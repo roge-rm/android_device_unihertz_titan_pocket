@@ -1,0 +1,128 @@
+--- a/drivers/input/touchscreen/pocket-gt1151.c
++++ b/drivers/input/touchscreen/pocket-gt1151.c
+@@ -81,6 +81,12 @@
+ 
+ 	/* Chip access from the IRQ thread, ESD work, sleep and wake. */
+ 	struct mutex lock;
++	/*
++	 * The ESD check, sleep and wake, as stock's ESD mutex: the ESD work
++	 * holds it through its 50 ms sleeps, without lock, so touch reports
++	 * go on. Taken before lock.
++	 */
++	struct mutex cmd_lock;
+ 	/* Stock irq_flag: true while this driver holds the IRQ disabled. */
+ 	spinlock_t irq_lock;
+ 	bool irq_off;
+@@ -185,14 +191,22 @@
+ 	return 0;
+ }
+ 
+-/* Data and checksum to 0x8041, then the command to 0x8040, then 50 ms. */
+-static int gt_send_cmd(struct gt1151 *ts, u8 cmd, u8 data)
++/* Data and checksum to 0x8041, then the command to 0x8040. */
++static int gt_write_cmd(struct gt1151 *ts, u8 cmd, u8 data)
+ {
+ 	u8 buf[3] = { cmd, data, (u8)(0 - cmd - data) };
+ 	int ret;
+ 
+ 	ret = gt_write(ts, GT_REG_CMD + 1, buf + 1, 2);
+ 	ret |= gt_write(ts, GT_REG_CMD, buf, 1);
++	return ret;
++}
++
++/* The command, then 50 ms. */
++static int gt_send_cmd(struct gt1151 *ts, u8 cmd, u8 data)
++{
++	int ret = gt_write_cmd(ts, cmd, data);
++
+ 	msleep(50);
+ 	return ret;
+ }
+@@ -518,32 +532,41 @@
+  * Stock gt1151qm_esd_check_func: up to 3 reads of 0x8040, 50 ms apart; a
+  * live chip shows 0x8040 != 0xaa and 0x8043 == 0xaa and gets fed 0xaa.
+  * Otherwise 0x4226 gets 01 01 01 01 and the supply is cycled.
++ * Only the reset holds lock across its sleeps, to keep the IRQ thread out.
+  */
+ static void gt_esd_work(struct work_struct *work)
+ {
+ 	struct gt1151 *ts = container_of(to_delayed_work(work), struct gt1151, esd_work);
+ 	u8 buf[4] = { 0 };
+ 	static const u8 reset[4] = { 1, 1, 1, 1 };
+-	int i;
+-
+-	mutex_lock(&ts->lock);
++	int i, ret;
++
++	mutex_lock(&ts->cmd_lock);
+ 	if (!READ_ONCE(ts->esd_running))
+ 		goto out;
+ 	for (i = 0; i < 3; i++) {
+-		if (!gt_read(ts, GT_REG_CMD, buf, sizeof(buf)) && buf[0] != 0xaa && buf[3] == 0xaa)
++		mutex_lock(&ts->lock);
++		ret = gt_read(ts, GT_REG_CMD, buf, sizeof(buf));
++		mutex_unlock(&ts->lock);
++		if (!ret && buf[0] != 0xaa && buf[3] == 0xaa)
+ 			break;
+ 		msleep(50);
+ 	}
+ 	if (i < 3) {
+-		gt_send_cmd(ts, GT_CMD_ESD, 0);
++		mutex_lock(&ts->lock);
++		gt_write_cmd(ts, GT_CMD_ESD, 0);
++		mutex_unlock(&ts->lock);
++		msleep(50);
+ 	} else if (READ_ONCE(ts->esd_running)) {
+ 		dev_err(&ts->client->dev, "chip not answering ESD check, resetting\n");
++		mutex_lock(&ts->lock);
+ 		gt_write(ts, GT_REG_ESD_RESET, reset, sizeof(reset));
+ 		msleep(50);
+ 		gt_power_reset(ts);
++		mutex_unlock(&ts->lock);
+ 	}
+ out:
+-	mutex_unlock(&ts->lock);
++	mutex_unlock(&ts->cmd_lock);
+ 	mutex_lock(&ts->esd_lock);
+ 	if (ts->esd_running)
+ 		queue_delayed_work(ts->wq, &ts->esd_work, GT_ESD_PERIOD);
+@@ -560,6 +583,7 @@
+ 
+ 	dev_info(&ts->client->dev, "suspend\n");
+ 	gt_esd_switch(ts, false);
++	mutex_lock(&ts->cmd_lock);
+ 	mutex_lock(&ts->lock);
+ 	ts->halted = true;
+ 	if (ts->wakeup_level == 1)
+@@ -572,6 +596,7 @@
+ 		msleep(10);
+ 	}
+ 	mutex_unlock(&ts->lock);
++	mutex_unlock(&ts->cmd_lock);
+ 	if (ret)
+ 		dev_err(&ts->client->dev, "enter sleep failed\n");
+ 	msleep(58);
+@@ -586,6 +611,7 @@
+ 	int ret;
+ 
+ 	dev_info(&ts->client->dev, "resume\n");
++	mutex_lock(&ts->cmd_lock);
+ 	mutex_lock(&ts->lock);
+ 	gt_irq_disable(ts);
+ 	ret = gt_reset_guitar(ts);
+@@ -596,6 +622,7 @@
+ 	ts->halted = false;
+ 	gt_irq_enable(ts);
+ 	mutex_unlock(&ts->lock);
++	mutex_unlock(&ts->cmd_lock);
+ 	gt_esd_switch(ts, true);
+ }
+ 
+@@ -690,6 +717,7 @@
+ 		return -ENOMEM;
+ 	ts->client = client;
+ 	mutex_init(&ts->lock);
++	mutex_init(&ts->cmd_lock);
+ 	mutex_init(&ts->esd_lock);
+ 	spin_lock_init(&ts->irq_lock);
+ 	INIT_DELAYED_WORK(&ts->esd_work, gt_esd_work);

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Current AOSP default health policy requires this role for the generic
+# hal_health_server -> bpfloader prog_run rule. This matches the contemporary
+# system/sepolicy/vendor/hal_health_default.te; it does not start a new service.
+typeattribute hal_health_default bpfdomain;
+
+# Preserve the existing legacy CAN-service find consumer through the current
+# typed HAL-client contract, matching AOSP hal_vehicle_default.te. This is a
+# policy role for a retained declared domain, not a declaration of car hardware.
+hal_client_domain(hal_vehicle_default, hal_can_bus)

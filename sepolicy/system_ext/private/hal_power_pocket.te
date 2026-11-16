@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Power HAL on system_ext (power/): libperfmgr writes cpufreq scaling_min_freq and the
+# cpuctl uclamp files listed in powerhint.json. Its rc chowns them to system first.
+type hal_power_pocket, domain, coredomain;
+hal_server_domain(hal_power_pocket, hal_power)
+
+type hal_power_pocket_exec, exec_type, system_file_type, file_type;
+init_daemon_domain(hal_power_pocket)
+
+allow hal_power_pocket sysfs_devices_system_cpu:file rw_file_perms;
+allow hal_power_pocket cgroup:dir search;
+allow hal_power_pocket cgroup:file rw_file_perms;
+
+# The re-add callback from AServiceManager_registerForServiceNotifications on IPower/default.
+allow servicemanager hal_power_pocket:binder { call transfer };
+# libperfmgr reads vendor.powerhal.*; its defaults are what we want.
+dontaudit hal_power_pocket vendor_property_type:file { read open getattr map };

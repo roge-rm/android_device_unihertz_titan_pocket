@@ -1,0 +1,32 @@
+--- a/drivers/power/supply/mediatek/charger/mtk_charger.c
++++ b/drivers/power/supply/mediatek/charger/mtk_charger.c
+@@ -2672,7 +2672,8 @@
+ 
+ 	pr_debug("[Battery] %s : %x\n",
+ 		__func__, pinfo->chg1_data.thermal_input_current_limit);
+-	return sprintf(buf, "%u\n",
++	/* -1 means no thermal limit, so print it signed. */
++	return sprintf(buf, "%d\n",
+ 			pinfo->chg1_data.thermal_input_current_limit);
+ }
+ 
+@@ -2705,7 +2706,8 @@
+ 
+ 	pr_debug("[Battery] %s : %x\n",
+ 		__func__, pinfo->chg1_data.thermal_charging_current_limit);
+-	return sprintf(buf, "%u\n",
++	/* -1 means no thermal limit, so print it signed. */
++	return sprintf(buf, "%d\n",
+ 			pinfo->chg1_data.thermal_charging_current_limit);
+ }
+ 
+@@ -2735,7 +2737,8 @@
+ 
+ 	pr_debug("[Battery] %s : %x\n",
+ 		__func__, pinfo->chg2_data.thermal_charging_current_limit);
+-	return sprintf(buf, "%u\n",
++	/* -1 means no thermal limit, so print it signed. */
++	return sprintf(buf, "%d\n",
+ 			pinfo->chg2_data.thermal_charging_current_limit);
+ }
+ 

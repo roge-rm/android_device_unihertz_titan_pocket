@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "audience": "Public Titan Pocket port; broader than the owner's configuration",
+  "carrier_policy": "Retain compatible stock telephony/IMS capabilities and platform carrier configuration; no owner-carrier allowlist. Report tested configurations separately from untested ones.",
+  "initial_carrier_test": {
+    "carrier": "Fido",
+    "country": "Canada",
+    "sim_present_at_inventory": false,
+    "test_status": "not_run"
+  },
+  "language_policy": "Retain platform locales, selectable physical layouts and third-party IME compatibility. Do not restrict languages to the owner's initial test language.",
+  "initial_language_observation": {
+    "locale": "en-US",
+    "ime_package": "com.iqqijni.bbkeyboard",
+    "required_default_replacement": "Open-source IME compatible with Pocket hardware and multilingual input; selection pending evaluation"
+  },
+  "application_policy": "Replace OEM user-facing keyboard/settings/shortcut features with appropriately licensed implementations. Review licenses and provenance of every reused source and binary before public distribution.",
+  "proprietary_hardware_policy": "Keep exact source-version/hash provenance for required vendor HAL, firmware, IMS and TEE dependencies. Redistribution permissions unresolved; do not treat extraction as permission. Provide extraction tooling where appropriate without claiming it resolves redistribution rights.",
+  "publication_exclusions": [
+    "Private device evidence",
+    "Partition backups",
+    "User data",
+    "Calibration/provisioning dumps",
+    "Signing and SSH private keys"
+  ],
+  "validation_policy": "Stock feature parity is the target; label carrier/region/IME/accessory combinations tested, failed or untested. Physical radio bands and operator acceptance are not expanded by the ROM.",
+  "data_backup_status": "User explicitly states current user data is disposable; no personal-data preservation required for this test device. Verified stock/calibration/provisioning backups remain required recovery assets.",
+  "hands_on_window": "Device testing paused at user request; continue offline work and text questions until resumed.",
+  "approved_improvements": [
+    {
+      "id": "faster_keyboard_lighting",
+      "status": "planned",
+      "goal": "Reduce measured approximately 0.5-second LED-control onset delay without regressing idle power or ambient-light policy"
+    },
+    {
+      "id": "swipe_cursor_control",
+      "status": "planned",
+      "goal": "Configurable cursor movement with clear separation from scrolling and safeguards for normal typing, focus and IME compatibility"
+    },
+    {
+      "id": "configurable_shortcuts",
+      "status": "planned",
+      "goal": "Configurable keyboard/button actions with persistence and appropriate keyguard restrictions"
+    }
+  ]
+}

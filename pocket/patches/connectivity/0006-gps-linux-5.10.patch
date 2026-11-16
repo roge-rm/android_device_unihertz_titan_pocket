@@ -1,0 +1,35 @@
+GPS (gps_drv, legacy STP build, OPPO MT6765 gps/) on Linux 5.10, applied to the staged tree by
+tools/prepare-connectivity-sources.py.
+
+- struct timeval and do_gettimeofday to struct __kernel_old_timeval filled from
+  ktime_get_real_ts64() (2 sites). No line is added or removed, so the pr_debug line
+  numbers stay as pinned.
+
+--- a/gps/stp_chrdev_gps.c
++++ b/gps/stp_chrdev_gps.c
+@@ -495,9 +495,9 @@
+ 	INT32 status;
+ 	UINT32 fw_tick = 0;
+ 	UINT32 local_ms0, local_ms1;
+-	struct timeval tv;
+-
+-	do_gettimeofday(&tv);
++	struct __kernel_old_timeval tv;
++	struct timespec64 ts; ktime_get_real_ts64(&ts);
++	tv.tv_sec = ts.tv_sec; tv.tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+ 
+ 	/* 32bit ms overflow almost 4.9 days, it's enough here */
+ 	local_ms0 = (UINT32)GPS_get_local_clock_ms();
+@@ -559,9 +559,9 @@
+ 	UINT32 rx_len = 0;
+ 	INT32 wmt_status;
+ 	UINT32 local_ms0, local_ms1;
+-	struct timeval tv;
+-
+-	do_gettimeofday(&tv);
++	struct __kernel_old_timeval tv;
++	struct timespec64 ts; ktime_get_real_ts64(&ts);
++	tv.tv_sec = ts.tv_sec; tv.tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+ 
+ 	/* 32bit ms overflow almost 4.9 days, it's enough here */
+ 	local_ms0 = (UINT32)GPS_get_local_clock_ms();

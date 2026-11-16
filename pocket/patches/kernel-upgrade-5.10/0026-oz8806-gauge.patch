@@ -1,0 +1,3137 @@
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -823,6 +823,39 @@
+ 	  charge management and system power path management devices for single
+ 	  cell Li-ion and Li-polymer batteries.
+ 
++config BATTERY_OZ8806
++	bool "O2Micro OZ8806 fuel gauge (Titan Pocket)"
++	depends on I2C=y && OF && MFD_MT6397=y
++	help
++	  The OZ8806 gauge on i2c6 0x2f of the Titan Pocket. The level
++	  follows the coulomb counter and is set from the cell's OCV at boot
++	  and after a rest.
++
++config OZ8806_WRITE
++	bool "Let the OZ8806 driver write the gauge and the RTC spare register"
++	depends on BATTERY_OZ8806
++	help
++	  Lets the driver write the OZ8806 (OP_CTRL, trim, board offset and
++	  CAR) and the SOC in the MT6358 RTC spare register, as stock does.
++	  Off, it only reads them and keeps the CAR offset in software, and
++	  writes only OP_CTRL: 0x20 to wake the chip, 0x60 at shutdown.
++
++config OZ8806_WRITE_CAR
++	bool "Let the OZ8806 driver write the coulomb counter (CAR) only"
++	depends on BATTERY_OZ8806 && !OZ8806_WRITE
++	help
++	  Writes the CAR register (0x14) as stock does: at init, at end of
++	  charge, at empty and when it drifts from the remaining capacity.
++	  Nothing else is written beyond the OP_CTRL wake and sleep.
++
++config OZ8806_BATTERY
++	bool "battery supply at /battery from the OZ8806"
++	depends on BATTERY_OZ8806
++	help
++	  Registers the "battery" power supply on the stock
++	  mediatek,bat_gm30 node with the OZ8806 values, until mtk_battery
++	  is ported.
++
+ source "drivers/power/supply/qcom/Kconfig"
+ 
+ endif # POWER_SUPPLY
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -102,4 +102,6 @@
+ obj-$(CONFIG_RN5T618_POWER)	+= rn5t618_power.o
+ obj-$(CONFIG_SCHGM_FLASH)       += schgm-flash.o
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
++obj-$(CONFIG_BATTERY_OZ8806)	+= oz8806.o oz8806_bmulib.o
++obj-$(CONFIG_OZ8806_BATTERY)	+= oz8806_battery.o
+ obj-$(CONFIG_QCOM_POWER_SUPPLY)		+= qcom/
+--- /dev/null
++++ b/drivers/power/supply/oz8806.c
+@@ -0,0 +1,1137 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * O2Micro OZ8806 fuel gauge on the Titan Pocket (i2c6 0x2f, "mediatek,coulomb"),
++ * with the calls and timing of the stock 4.14 kernel's oz8806 driver. The
++ * level maths is in oz8806_bmulib.c.
++ *
++ * Without CONFIG_OZ8806_WRITE the driver writes only the CAR (with
++ * CONFIG_OZ8806_WRITE_CAR) and OP_CTRL (the wake at
++ * probe and on each poll, and the sleep at shutdown) and never the PMIC RTC
++ * spare register; places where that differs from stock say "Read-only:".
++ *
++ * Locking: one mutex guards the bmulib state, as stock. The battery work runs
++ * on system_freezable_wq every 2 s until bmulib init is done, then stops; after
++ * that oz8806_update(), called by the battery supply every 10 s, drives the
++ * polls. Both works are freezable so no I2C runs while the bus is suspended.
++ * oz_api_lock guards oz_drv for the calls the battery supply makes, so remove
++ * can clear it before the state is freed.
++ *
++ * Port additions, not in stock: probe fails if the chip doesn't answer, bmulib
++ * init waits for a valid reading (oz8806_check_chip), and the report is only
++ * given while the polls are valid (data_ok).
++ */
++#include <linux/delay.h>
++#include <linux/gpio/driver.h>
++#include <linux/i2c.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/mfd/mt6397/core.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
++#include <linux/power/oz8806.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/sched/clock.h>
++#include <linux/suspend.h>
++#include <linux/timekeeping.h>
++#include <linux/workqueue.h>
++
++#include "oz8806_bmulib.h"
++
++/* MT6358 RTC_AL_MTH bits 15:8 hold the stock SOC + 1 (hal_rtc RTC_FGSOC) */
++#define MT6358_RTC_BBPU		0x0588
++#define MT6358_RTC_AL_MTH	0x05aa
++#define MT6358_RTC_WRTGR	0x05c2
++#define RTC_FGSOC_MASK		0xff00
++#define RTC_FGSOC_SHIFT		8
++#define RTC_BBPU_CBUSY		BIT(6)
++
++#define OZ8806_FULL_MS		300000	/* full after 5 min at the end point */
++#define OZ8806_STUCK99_MS	600000	/* or 10 min stuck at 99 % */
++#define OZ8806_RAMP_MS		30000	/* +1 % every 30 s while full */
++#define OZ8806_PMIC_TRIES	5	/* 2 s waits for the PMIC before init goes on without it */
++
++struct oz8806_drv {
++	struct i2c_client *client;
++	struct device *dev;
++	struct oz8806_bmu bmu;
++	struct mutex lock;
++	struct delayed_work work;
++	struct wakeup_source *ws;
++	struct notifier_block pm_nb;
++	struct regmap *pmic;
++
++	unsigned long power_on_base;
++	unsigned int interval;
++	int soc, volt, curr, temp, remcap, fcc, dis_th, chg_full;
++	bool bmulib_ready;	/* bmulib_init done, callbacks registered */
++	int init_done;		/* GG->init_ok copy */
++	int bmu_init_done;
++	int suspended;
++	int adapter;
++	int rtc_cache;
++	int save_capacity;
++	int charger_type;	/* -1 until a charger driver reports */
++	bool chg_done;
++	bool stopping;		/* remove or shutdown: no more work */
++	int pullup;		/* NTC pull-up, -1 until read */
++	int pmic_tries;
++	int wake_logged;	/* last wake event logged */
++	int chip_state;		/* last logged pre-init state: 0, 1 asleep, 2 bad reading */
++
++	/* full detection in battery_func */
++	unsigned long last, t_full_start, t_ramp, t99;
++	unsigned int t_full;
++	int ramp_soc, f99, full;
++
++	struct oz8806_report rep;
++};
++
++static struct oz8806_drv *oz_drv;
++/* POWER_SUPPLY_STATUS_* from the charger events, 0 until one comes. Kept
++ * outside oz_drv so an event before the gauge probes is not lost. Under
++ * oz_api_lock. */
++static int oz_bat_status;
++static void (*oz_changed_cb)(void *arg);
++static void *oz_changed_arg;
++static DEFINE_MUTEX(oz_api_lock);
++static int drv_ready;
++
++/* ---- hooks for oz8806_bmulib.c ---- */
++
++static inline struct oz8806_drv *to_drv(struct oz8806_bmu *b)
++{
++	return b->hw;
++}
++
++int oz8806_hw_read_byte(struct oz8806_bmu *b, u8 reg)
++{
++	return i2c_smbus_read_byte_data(to_drv(b)->client, reg);
++}
++
++int oz8806_hw_read_word(struct oz8806_bmu *b, u8 reg)
++{
++	return i2c_smbus_read_word_data(to_drv(b)->client, reg);
++}
++
++int oz8806_hw_write_byte(struct oz8806_bmu *b, u8 reg, u8 val)
++{
++	return i2c_smbus_write_byte_data(to_drv(b)->client, reg, val);
++}
++
++#if defined(CONFIG_OZ8806_WRITE) || defined(CONFIG_OZ8806_WRITE_CAR)
++int oz8806_hw_write_word(struct oz8806_bmu *b, u8 reg, u16 val)
++{
++	return i2c_smbus_write_word_data(to_drv(b)->client, reg, val);
++}
++#endif
++
++/* stock's bus probe moves client->addr; called under the lock */
++void oz8806_hw_set_addr(struct oz8806_bmu *b, u8 addr)
++{
++	to_drv(b)->client->addr = addr;
++}
++
++void oz8806_hw_msleep(struct oz8806_bmu *b, unsigned int ms)
++{
++	msleep(ms);
++}
++
++/* stock oz8806_get_boot_up_time(): sched_clock in ms */
++unsigned int oz8806_hw_boot_ms(struct oz8806_bmu *b)
++{
++	return div_u64(local_clock(), NSEC_PER_MSEC);
++}
++
++unsigned int oz8806_hw_power_on_ms(struct oz8806_bmu *b)
++{
++	return jiffies_to_msecs(jiffies - to_drv(b)->power_on_base);
++}
++
++static void oz8806_set_power_on_base(struct oz8806_drv *d)
++{
++	unsigned int boot = div_u64(local_clock(), NSEC_PER_MSEC);
++
++	d->power_on_base = jiffies;
++	if (boot < 2000)
++		d->power_on_base += msecs_to_jiffies(2000 - boot);
++}
++
++void oz8806_hw_reset_power_on_base(struct oz8806_bmu *b)
++{
++	oz8806_set_power_on_base(to_drv(b));
++}
++
++long long oz8806_hw_now_sec(struct oz8806_bmu *b)
++{
++	return ktime_get_real_seconds();
++}
++
++long long oz8806_hw_boottime_sec(struct oz8806_bmu *b)
++{
++	return ktime_get_boottime_seconds();
++}
++
++int oz8806_hw_adapter(struct oz8806_bmu *b)
++{
++	return to_drv(b)->adapter;
++}
++
++static int oz8806_ext_soc(struct oz8806_drv *d);
++
++int oz8806_hw_soc_from_ext(struct oz8806_bmu *b)
++{
++	return oz8806_ext_soc(to_drv(b));
++}
++
++int oz8806_hw_save_capacity(struct oz8806_bmu *b)
++{
++	return to_drv(b)->save_capacity;
++}
++
++/* ---- MT6358 RTC spare register ---- */
++
++static struct regmap *oz8806_pmic(struct oz8806_drv *d)
++{
++	struct device_node *np;
++	struct platform_device *pdev;
++	struct mt6397_chip *chip;
++
++	if (d->pmic)
++		return d->pmic;
++	np = of_find_compatible_node(NULL, NULL, "mediatek,mt6358");
++	if (!np)
++		return NULL;
++	pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!pdev)
++		return NULL;
++	chip = platform_get_drvdata(pdev);
++	if (chip && chip->regmap)
++		d->pmic = chip->regmap;
++	put_device(&pdev->dev);
++	return d->pmic;
++}
++
++/* stock get_rtc_spare_fg_value(); -1 if the PMIC isn't there yet */
++static int get_rtc_spare_fg_value(struct oz8806_drv *d)
++{
++	struct regmap *map = oz8806_pmic(d);
++	unsigned int v;
++
++	if (!map || regmap_read(map, MT6358_RTC_AL_MTH, &v))
++		return -1;
++	return (v & RTC_FGSOC_MASK) >> RTC_FGSOC_SHIFT;
++}
++
++/* the RTC value, cached once it has been read; 0 while it can't be read */
++static int oz8806_rtc_soc(struct oz8806_drv *d)
++{
++	int v;
++
++	if (d->rtc_cache != -1)
++		return d->rtc_cache;
++	v = get_rtc_spare_fg_value(d);
++	if (v < 0) {
++		dev_warn_once(d->dev, "RTC spare not readable yet\n");
++		return 0;
++	}
++	d->rtc_cache = v;
++	return v;
++}
++
++/* W10, stock set_rtc_spare_fg_value() */
++static void set_rtc_spare_fg_value(struct oz8806_drv *d, int val)
++{
++#ifdef CONFIG_OZ8806_WRITE
++	struct regmap *map = oz8806_pmic(d);
++	unsigned int bbpu;
++
++	if (!map)
++		return;
++	regmap_update_bits(map, MT6358_RTC_AL_MTH, RTC_FGSOC_MASK,
++			   (val << RTC_FGSOC_SHIFT) & RTC_FGSOC_MASK);
++	regmap_write(map, MT6358_RTC_WRTGR, 1);
++	regmap_read_poll_timeout(map, MT6358_RTC_BBPU, bbpu, !(bbpu & RTC_BBPU_CBUSY),
++				 100, 500000);
++#else
++	/* Read-only: the RTC spare keeps what stock last wrote */
++#endif
++}
++
++/* ---- NTC pull-up from SoC GPIO 5, stock agold_gpio_get_in(5) ---- */
++
++static int oz8806_match_pio(struct gpio_chip *gc, void *data)
++{
++	return gc->of_node && of_device_is_compatible(gc->of_node, "mediatek,mt6771-pinctrl");
++}
++
++/* Reads the pin's DIN through the pinctrl gpio_chip without requesting it, so
++ * the pin mode is left alone, as stock. */
++static int oz8806_ntc_pullup(struct oz8806_drv *d)
++{
++	struct gpio_chip *gc = gpiochip_find(NULL, oz8806_match_pio);
++	int v = gc && gc->get ? gc->get(gc, OZ8806_HWVER_GPIO) : -ENODEV;
++
++	if (v < 0) {
++		/* 24 kOhm: hw_ver_id 1, what the stock firmware reads on a retail phone */
++		dev_warn(d->dev, "hw_ver gpio not readable (%d), NTC pull-up %d\n",
++			 v, OZ8806_HWVER1_PULLUP);
++		return OZ8806_HWVER1_PULLUP;
++	}
++	dev_info(d->dev, "hw_ver_id=%d\n", v);
++	return v == 1 ? OZ8806_HWVER1_PULLUP : OZ8806_HWVER0_PULLUP;
++}
++
++/* log what oz8806_wake_if_asleep did; skips a repeat of the same failure */
++static void oz8806_log_wake(struct oz8806_drv *d)
++{
++	int ev = d->bmu.wake_event;
++
++	d->bmu.wake_event = OZ_WAKE_NONE;
++	if (ev == OZ_WAKE_NONE || (ev != OZ_WAKE_WROTE && ev == d->wake_logged))
++		return;
++	d->wake_logged = ev;
++	switch (ev) {
++	case OZ_WAKE_WROTE:
++		dev_info(d->dev, "chip asleep, wrote OP_CTRL 0x20, readings wait 2250 ms\n");
++		break;
++	case OZ_WAKE_NOT_TAKEN:
++		dev_warn(d->dev, "chip asleep, OP_CTRL 0x20 write did not take\n");
++		break;
++	case OZ_WAKE_PEC:
++		dev_warn(d->dev, "chip asleep, PEC error (reg 8 bit 2), OP_CTRL not written\n");
++		break;
++	case OZ_WAKE_REG8_FAIL:
++		dev_warn(d->dev, "chip asleep, reg 8 unreadable, OP_CTRL not written\n");
++		break;
++	}
++}
++
++/* ---- charger state ---- */
++
++/* stock: mt_get_charger_type() 0 -> 0, 1 or 2 (SDP, CDP) -> 1 USB, others -> 4 AC */
++static int oz8806_adapter_now(struct oz8806_drv *d)
++{
++	int t = d->charger_type;
++
++	/* none (0) until a charger driver calls oz8806_set_charger_info() */
++	return t <= 0 ? 0 : (t == 1 || t == 2) ? 1 : 4;
++}
++
++void oz8806_set_charger_info(int charger_type, bool charge_done)
++{
++	struct oz8806_drv *d;
++
++	mutex_lock(&oz_api_lock);
++	d = oz_drv;
++	if (d) {
++		mutex_lock(&d->lock);
++		d->charger_type = charger_type;
++		d->chg_done = charge_done;
++		mutex_unlock(&d->lock);
++	}
++	mutex_unlock(&oz_api_lock);
++}
++
++/* ---- stock oz8806_battery_func ---- */
++
++static void oz8806_copy_state(struct oz8806_drv *d)
++{
++	d->soc = d->bmu.bi.soc;
++	d->volt = d->bmu.bi.volt;
++	d->curr = d->bmu.bi.curr;
++	d->remcap = d->bmu.bi.rc;
++	d->chg_full = d->bmu.gg.chg_end;
++	d->init_done = d->bmu.gg.init_ok;
++	d->temp = d->bmu.bi.temp;
++}
++
++static void oz8806_clear_full(struct oz8806_drv *d)
++{
++	d->t_full = 0;
++	d->t_full_start = 0;
++	d->t_ramp = 0;
++	d->t99 = 0;
++	d->f99 = 0;
++	d->full = 0;
++}
++
++/* the report follows bmu.data_ok; log when it changes */
++static void oz8806_track_valid(struct oz8806_drv *d, int valid)
++{
++	struct oz8806_bmu *b = &d->bmu;
++
++	if (!oz8806_track_valid_core(b, valid))
++		return;
++	if (b->data_ok)
++		dev_info(d->dev, "readings valid, volt %d curr %d\n", b->bi.volt, b->bi.curr);
++	else
++		dev_warn(d->dev, "%d invalid polls (volt %d, %s, %d i2c errors), no battery data\n",
++			 b->bad_polls, b->bi.volt, b->asleep ? "asleep" : "awake", b->bi.i2c_errors);
++}
++
++static void oz8806_battery_func(struct oz8806_drv *d)
++{
++	struct oz8806_bmu *b = &d->bmu;
++	struct oz8806_batt_info *bi = &b->bi;
++	struct oz8806_gas_gauge *gg = &b->gg;
++	int prev_soc, I, th = 0, valid = -1;
++
++	d->last = jiffies;
++	mutex_lock(&d->lock);
++	if (d->stopping) {		/* shut down: the sleep write must stay the last */
++		mutex_unlock(&d->lock);
++		return;
++	}
++	d->adapter = oz8806_adapter_now(d);
++	prev_soc = d->soc;
++	if (d->bmulib_ready && !d->suspended) {
++		valid = oz8806_poll(b);
++		oz8806_log_wake(d);
++	}
++	oz8806_track_valid(d, valid);
++	if (!d->bmulib_ready)
++		goto out;
++	oz8806_copy_state(d);
++
++	if (d->adapter == 0) {
++		oz8806_clear_full(d);
++		goto out;
++	}
++	if (!d->chg_done) {
++		I = bi->curr;
++		if (I < -10 || I > b->cfg.end_current_ma) {
++			oz8806_clear_full(d);
++			goto out;
++		}
++		th = d->adapter == 1 ? 100 : d->adapter == 4 ? b->cfg.end_current_ma : 0;
++		if (I < th && bi->volt >= b->cfg.cv_mv - 50 && !gg->chg_end) {
++			if (!d->t_full_start)
++				d->t_full_start = jiffies;
++			d->t_full = jiffies_to_msecs(jiffies - d->t_full_start);
++			d->full = d->t_full >= OZ8806_FULL_MS;
++		} else {
++			d->t_full = 0;
++			d->t_full_start = 0;
++			d->full = 0;
++		}
++	} else {
++		d->full = 1;
++		th = 0;
++	}
++
++	/* stuck at 99 % */
++	if (bi->soc == 99 && !d->f99) {
++		if (bi->curr > th) {
++			d->f99 = 1;
++			d->t99 = jiffies;
++		}
++	} else if (bi->soc == 99) {
++		if (bi->curr < th) {
++			d->f99 = 0;
++		} else if (bi->curr > th &&
++			   jiffies_to_msecs(jiffies - d->t99) > OZ8806_STUCK99_MS) {
++			d->full = 1;
++			d->f99 = 0;
++		}
++	} else {
++		d->f99 = 0;
++	}
++
++	if (d->full) {
++		if (!gg->chg_end) {
++			if (bi->soc < 100) {
++				if (bi->soc <= prev_soc) {
++					if (!d->t_ramp || d->ramp_soc != bi->soc) {
++						d->t_ramp = jiffies;
++						d->ramp_soc = bi->soc;
++					}
++					/* stock compares (ms >> 4) >= 0x753 */
++					if ((jiffies_to_msecs(jiffies - d->t_ramp) >> 4) >= 0x753) {
++						d->t_ramp = 0;
++						bi->soc++;
++						bi->rc = d->fcc * bi->soc / 100 + 1;
++					}
++					if (bi->soc > 100) {
++						bi->soc = 100;
++						bi->rc = d->fcc + 1;
++					}
++				}
++				d->ramp_soc = bi->soc;
++				goto out;			/* keeps full set */
++			}
++			gg->chg_end = 1;
++			charge_end_process(b);			/* W7 */
++		}
++		d->full = 0;
++	}
++	d->t_ramp = 0;
++out:
++	/* port: only on a fresh valid voltage that isn't stuck */
++	if (d->adapter == 0 && d->bmulib_ready && valid == 1 && !b->volt_frozen &&
++	    bi->volt < oz8806_shutdown_mv(b) && bi->soc > 0) {
++		bi->soc--;				/* once per update below 3400 mV */
++		bi->rc = d->fcc * bi->soc / 100;
++	}
++	mutex_unlock(&d->lock);
++	if (d->adapter == 4)
++		__pm_stay_awake(d->ws);
++	else
++		__pm_relax(d->ws);
++}
++
++/* stock bmulib_init and oz8806_register_bmu_callback: setup, one poll. Port:
++ * waits (returns false) until the chip gives a valid reading, so the init
++ * SOC isn't worked out from a chip that reads 0 or is asleep. */
++static bool oz8806_bmulib_init(struct oz8806_drv *d)
++{
++	int ok, state;
++
++	if (d->pullup < 0)
++		d->pullup = oz8806_ntc_pullup(d);
++	if (!oz8806_pmic(d) && d->pmic_tries < OZ8806_PMIC_TRIES) {
++		d->pmic_tries++;			/* for the RTC SOC at init */
++		return false;
++	}
++	mutex_lock(&d->lock);
++	oz8806_bmu_setup(&d->bmu, d->pullup);
++	ok = oz8806_check_chip(&d->bmu);
++	oz8806_log_wake(d);
++	state = ok ? 0 : d->bmu.asleep ? 1 : 2;
++	if (state != d->chip_state) {
++		if (state == 1)
++			dev_warn(d->dev, "chip asleep (OP_CTRL bit 6), no battery data\n");
++		else if (state == 2)
++			dev_warn(d->dev, "no valid reading (volt %d, %d i2c errors), no battery data\n",
++				 d->bmu.bi.volt, d->bmu.bi.i2c_errors);
++		d->chip_state = state;
++	}
++	if (!ok) {
++		mutex_unlock(&d->lock);
++		return false;
++	}
++	bmulib_init_chip(&d->bmu);
++	d->fcc = d->bmu.gg.fcc;
++	d->dis_th = d->bmu.gg.dis_th;
++	d->bmulib_ready = true;
++	oz8806_track_valid(d, oz8806_poll(&d->bmu));
++	mutex_unlock(&d->lock);
++	dev_info(d->dev, "bmulib init, parameters %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
++		 d->bmu.cfg.rsense, d->bmu.cfg.ntc_pullup, d->bmu.cfg.ntc_ref_mv,
++		 d->bmu.cfg.car_lsb, d->bmu.cfg.curr_lsb, d->bmu.cfg.volt_lsb,
++		 d->bmu.cfg.design_mah, d->bmu.cfg.cv_mv, d->bmu.cfg.end_current_ma,
++		 d->bmu.cfg.end_volt_mv, d->bmu.cfg.board_offset_ma, d->bmu.cfg.debug);
++	return true;
++}
++
++static void oz8806_requeue(struct oz8806_drv *d, unsigned int ms)
++{
++	mutex_lock(&d->lock);
++	if (!d->stopping)
++		queue_delayed_work(system_freezable_wq, &d->work, msecs_to_jiffies(ms));
++	mutex_unlock(&d->lock);
++}
++
++static void oz8806_battery_work(struct work_struct *work)
++{
++	struct oz8806_drv *d = container_of(to_delayed_work(work), struct oz8806_drv, work);
++
++	if (d->stopping)
++		return;
++	if (!d->bmulib_ready && !oz8806_bmulib_init(d)) {
++		d->interval = 2000;
++		oz8806_requeue(d, 2000);
++		return;
++	}
++	if (d->init_done)
++		return;
++	oz8806_battery_func(d);
++	/* Stock spins here until mtk_battery's capacity matches; our supply
++	 * reads oz8806_get_soc() directly, so it matches at once. */
++	if (!d->bmu_init_done && d->init_done) {
++		d->bmu_init_done = 1;
++		dev_info(d->dev, "init done, soc %d rc %d car %d volt %d curr %d temp %d\n",
++			 d->bmu.bi.soc, d->bmu.bi.rc, d->bmu.bi.car, d->bmu.bi.volt,
++			 d->bmu.bi.curr, d->bmu.bi.temp);
++	}
++	if (!d->init_done) {
++		d->interval = 2000;
++		oz8806_requeue(d, 2000);
++	} else {
++		d->interval = 10000;
++	}
++}
++
++/* ---- getters ---- */
++
++int oz8806_get_soc(void)
++{
++	struct oz8806_drv *d = oz_drv;
++	int r;
++
++	if (!d)
++		return -1;
++	if (d->suspended == 1)
++		return d->bmulib_ready ? d->bmu.bi.soc : -1;
++	mutex_lock(&d->lock);
++	if (d->init_done) {
++		r = oz8806_report_soc(&d->bmu);
++	} else {
++		r = oz8806_rtc_soc(d);
++		if (r <= 0) {
++			if (d->rtc_cache != -1)
++				d->rtc_cache = 20;	/* 20, not 19, as stock */
++			r = 20;
++		} else {
++			r--;
++		}
++	}
++	mutex_unlock(&d->lock);
++	return r;
++}
++
++/* called under the lock from the init poll */
++static int oz8806_ext_soc(struct oz8806_drv *d)
++{
++	return oz8806_rtc_soc(d) - 1;
++}
++
++int oz8806_get_soc_from_ext(void)
++{
++	struct oz8806_drv *d = oz_drv;
++
++	return d ? oz8806_ext_soc(d) : -1;
++}
++
++static int oz8806_live_current(struct oz8806_drv *d)
++{
++	int r;
++
++	if (!d || !d->init_done)
++		return -1;
++	mutex_lock(&d->lock);
++	r = afe_read_current(&d->bmu, &d->bmu.bi.curr) < 0 ? -1 : d->bmu.bi.curr;
++	mutex_unlock(&d->lock);
++	return r;
++}
++
++int oz8806_get_battry_current(void)
++{
++	int r;
++
++	mutex_lock(&oz_api_lock);
++	r = oz8806_live_current(oz_drv);
++	mutex_unlock(&oz_api_lock);
++	return r;
++}
++
++int oz8806_get_battery_voltage(void)
++{
++	struct oz8806_drv *d = oz_drv;
++	int r;
++
++	if (!d || !d->init_done)
++		return -1;
++	mutex_lock(&d->lock);
++	r = afe_read_cell_volt(&d->bmu, &d->bmu.bi.volt) < 0 ? -1 : d->bmu.bi.volt;
++	mutex_unlock(&d->lock);
++	return r;
++}
++
++int oz8806_get_battery_temp(void)
++{
++	struct oz8806_drv *d = oz_drv;
++
++	if (!d || !d->init_done)
++		return -1;
++	return d->bmu.bi.temp;
++}
++
++/*
++ * For the charger, a deliberate change from stock (which used
++ * oz8806_get_battery_temp): -1, the value that stops charging, unless the
++ * polls are valid and the last NTC reading was good and inside the table.
++ */
++int oz8806_get_charger_temp(void)
++{
++	struct oz8806_drv *d = oz_drv;
++	int r = -1;
++
++	if (!d || !d->init_done)
++		return -1;
++	mutex_lock(&d->lock);
++	if (d->bmu.data_ok && d->bmu.temp_ok && d->bmu.temp_valid)
++		r = d->bmu.bi.temp;
++	mutex_unlock(&d->lock);
++	return r;
++}
++
++/*
++ * The same reading as oz8806_get_charger_temp() in *temp_c (C), with
++ * -ENODATA instead of -1 when there is none, so -1 C stays a reading.
++ */
++int oz8806_get_valid_temp(int *temp_c)
++{
++	struct oz8806_drv *d = oz_drv;
++	int ret = -ENODATA;
++
++	if (!d || !d->init_done)
++		return -ENODATA;
++	mutex_lock(&d->lock);
++	if (d->bmu.data_ok && d->bmu.temp_ok && d->bmu.temp_valid) {
++		*temp_c = d->bmu.bi.temp;
++		ret = 0;
++	}
++	mutex_unlock(&d->lock);
++	return ret;
++}
++
++/*
++ * One CSV line for the OCV run logger: boot time (s), voltage (mV), current
++ * (mA, charging positive), counted charge (uAh), the chip's OCV register
++ * (mV), temperature (C), level (%), remaining capacity (mAh), charger type
++ * (0 none, 1 USB, 4 AC), seconds at rest. Voltage, current and charge are
++ * read now.
++ */
++int oz8806_log_line(char *buf, size_t size)
++{
++	struct oz8806_sample s;
++	struct oz8806_drv *d;
++	int ret = -ENODEV;
++
++	mutex_lock(&oz_api_lock);
++	d = oz_drv;
++	if (d) {
++		mutex_lock(&d->lock);
++		ret = -ENODATA;
++		if (d->init_done && d->bmu.data_ok && !d->stopping && !d->suspended &&
++		    !oz8806_sample(&d->bmu, &s))
++			ret = scnprintf(buf, size, "%lld,%d,%d,%lld,%d,%d,%d,%d,%d,%d\n",
++					s.t_s, s.volt, s.curr, s.cc_uah, s.chip_ocv, s.temp,
++					oz8806_report_soc(&d->bmu), s.rc, d->adapter, s.rest_s);
++		mutex_unlock(&d->lock);
++	}
++	mutex_unlock(&oz_api_lock);
++	return ret;
++}
++
++int oz8806_get_remaincap(void)
++{
++	struct oz8806_drv *d = oz_drv;
++
++	return d && d->bmulib_ready ? d->bmu.bi.rc : -1;
++}
++
++/* no caller found in stock */
++int oz8806_vbus_voltage(void)
++{
++	struct oz8806_drv *d = oz_drv;
++	int mv = 0;
++
++	if (!d || !d->bmulib_ready)
++		return -1;
++	mutex_lock(&d->lock);
++	oz8806_temp_read(&d->bmu, &mv);
++	mutex_unlock(&d->lock);
++	return mv * 73100 / 5100;
++}
++
++int oz8806_get_simulated_temp(void)
++{
++	return 25;
++}
++
++int oz8806_get_init_status(void)
++{
++	return oz_drv ? oz_drv->init_done : 0;
++}
++
++int oz8806_gauge_int_done(void)
++{
++	return drv_ready;
++}
++
++int oz8806_get_adapter_status(void)
++{
++	return oz_drv ? oz_drv->adapter : 0;
++}
++
++int oz8806_get_save_capacity(void)
++{
++	int r;
++
++	mutex_lock(&oz_api_lock);
++	r = oz_drv ? oz_drv->save_capacity : -2;
++	mutex_unlock(&oz_api_lock);
++	return r;
++}
++
++void oz8806_set_save_capacity(int mah)
++{
++	struct oz8806_drv *d;
++
++	mutex_lock(&oz_api_lock);
++	d = oz_drv;
++	if (d) {
++		mutex_lock(&d->lock);
++		d->save_capacity = mah;
++		if (!d->init_done && !d->stopping)
++			mod_delayed_work(system_freezable_wq, &d->work, 0);
++		mutex_unlock(&d->lock);
++	}
++	mutex_unlock(&oz_api_lock);
++}
++
++int oz8806_get_bmu_init_done(void)
++{
++	int r;
++
++	mutex_lock(&oz_api_lock);
++	r = oz_drv ? oz_drv->bmu_init_done : 0;
++	mutex_unlock(&oz_api_lock);
++	return r;
++}
++
++struct i2c_client *oz8806_get_client(void)
++{
++	return oz_drv ? oz_drv->client : NULL;
++}
++
++/* Before the first charger event: from the gauge current. A charging
++ * status at 100 % is Full, as Android expects when plugged in. */
++static int oz8806_status(struct oz8806_drv *d, int curr)
++{
++	int st = oz_bat_status;
++
++	if (!d->init_done)
++		return POWER_SUPPLY_STATUS_UNKNOWN;
++	if (!st)
++		st = curr > 0 ? POWER_SUPPLY_STATUS_CHARGING : POWER_SUPPLY_STATUS_DISCHARGING;
++	if (st == POWER_SUPPLY_STATUS_CHARGING && d->rep.soc >= 100)
++		st = POWER_SUPPLY_STATUS_FULL;
++	return st;
++}
++
++/* The battery supply registers a function to call when the status changes. */
++void oz8806_set_changed_cb(void (*cb)(void *arg), void *arg)
++{
++	mutex_lock(&oz_api_lock);
++	oz_changed_cb = cb;
++	oz_changed_arg = arg;
++	mutex_unlock(&oz_api_lock);
++}
++
++/* Stock battery_callback plus Full at end of charge: the status is what the
++ * last charger event set. Called from the charger driver's sleepable
++ * context. The reported status updates now and the supply is told. */
++void oz8806_set_battery_status(int status)
++{
++	struct oz8806_drv *d;
++
++	mutex_lock(&oz_api_lock);
++	oz_bat_status = status;
++	d = oz_drv;
++	if (d) {
++		mutex_lock(&d->lock);
++		d->rep.status = oz8806_status(d, d->rep.curr);
++		mutex_unlock(&d->lock);
++	}
++	if (oz_changed_cb)
++		oz_changed_cb(oz_changed_arg);
++	mutex_unlock(&oz_api_lock);
++}
++
++/* stock oz8806_update(): battery_update_data, the getters, then the RTC spare */
++void oz8806_update(void)
++{
++	struct oz8806_drv *d;
++	int soc, temp, volt, curr;
++
++	mutex_lock(&oz_api_lock);
++	d = oz_drv;
++	if (!d) {
++		mutex_unlock(&oz_api_lock);
++		return;
++	}
++	if (d->init_done && drv_ready)
++		oz8806_battery_func(d);
++	soc = oz8806_get_soc();
++	temp = oz8806_get_battery_temp();
++	volt = oz8806_get_battery_voltage();
++	curr = oz8806_live_current(d);
++	if (soc != -1)
++		set_rtc_spare_fg_value(d, soc + 1);		/* W10 */
++
++	mutex_lock(&d->lock);
++	d->rep.soc = soc;
++	if (volt >= 0)
++		d->rep.volt = volt;
++	if (d->init_done) {
++		d->rep.curr = curr;
++		d->rep.temp = temp;
++	}
++	d->rep.rc = d->bmulib_ready ? d->bmu.bi.rc : d->remcap;
++	d->rep.fcc = d->fcc;
++	d->rep.temp_ok = d->init_done && d->bmu.temp_ok;
++	d->rep.status = oz8806_status(d, d->rep.curr);
++	mutex_unlock(&d->lock);
++	mutex_unlock(&oz_api_lock);
++}
++
++/* -ENODATA until init is done on valid readings, and while the polls fail */
++int oz8806_get_report(struct oz8806_report *r)
++{
++	struct oz8806_drv *d;
++	int ret = -ENODEV;
++
++	mutex_lock(&oz_api_lock);
++	d = oz_drv;
++	if (d) {
++		mutex_lock(&d->lock);
++		ret = d->bmu.data_ok ? 0 : -ENODATA;
++		if (!ret)
++			*r = d->rep;
++		mutex_unlock(&d->lock);
++	}
++	mutex_unlock(&oz_api_lock);
++	return ret;
++}
++
++/* ---- suspend notifier ---- */
++
++static int oz8806_suspend_notifier(struct notifier_block *nb, unsigned long event, void *unused)
++{
++	struct oz8806_drv *d = container_of(nb, struct oz8806_drv, pm_nb);
++
++	switch (event) {
++	case PM_SUSPEND_PREPARE:
++		d->adapter = oz8806_adapter_now(d);
++		d->suspended = 1;
++		break;
++	case PM_POST_SUSPEND:
++		d->adapter = oz8806_adapter_now(d);
++		mutex_lock(&d->lock);
++		if (d->adapter == 0 && d->bmulib_ready && !d->stopping)
++			bmu_wake_up_chip(&d->bmu);
++		oz8806_log_wake(d);
++		if (d->bmulib_ready)
++			oz8806_copy_state(d);
++		mutex_unlock(&d->lock);
++		if (d->adapter == 0 && d->curr >= d->dis_th && d->bmulib_ready)
++			d->bmu.bi.curr = d->curr = -20;
++		d->suspended = 0;
++		break;
++	}
++	return NOTIFY_DONE;
++}
++
++/* ---- sysfs on the i2c device ---- */
++
++static const u8 oz8806_dump_regs[] = { 0x00, 0x04, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
++	0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19 };
++
++static ssize_t registers_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct oz8806_drv *d = dev_get_drvdata(dev);
++	int i, n = 0, v;
++
++	mutex_lock(&d->lock);
++	for (i = 0; i < ARRAY_SIZE(oz8806_dump_regs); i++) {
++		v = i2c_smbus_read_byte_data(d->client, oz8806_dump_regs[i]);
++		n += scnprintf(buf + n, PAGE_SIZE - n, "0x%2x ", v < 0 ? 0 : v);
++	}
++	mutex_unlock(&d->lock);
++	n += scnprintf(buf + n, PAGE_SIZE - n, "\n");
++	return n;
++}
++
++#ifdef CONFIG_OZ8806_WRITE
++/* W8: "RRVV" in hex, only regs 0x08, 0x09, 0x14, 0x15, 0x18, 0x19 */
++static ssize_t registers_store(struct device *dev, struct device_attribute *attr,
++			       const char *buf, size_t count)
++{
++	struct oz8806_drv *d = dev_get_drvdata(dev);
++	unsigned long v;
++
++	if (kstrtoul(buf, 16, &v) || v > 0xffff)
++		return -EINVAL;
++	if ((v >> 8) < 32 && (0x3300300UL >> (v >> 8) & 1)) {
++		mutex_lock(&d->lock);
++		i2c_smbus_write_byte_data(d->client, v >> 8, v & 0xff);
++		mutex_unlock(&d->lock);
++	}
++	return count;
++}
++static DEVICE_ATTR_RW(registers);
++#else
++/* Read-only: no store */
++static DEVICE_ATTR_RO(registers);
++#endif
++
++static ssize_t debug_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct oz8806_drv *d = dev_get_drvdata(dev);
++
++	return sprintf(buf, "%d\n", d->bmu.cfg.debug);
++}
++
++static ssize_t debug_store(struct device *dev, struct device_attribute *attr,
++			   const char *buf, size_t count)
++{
++	struct oz8806_drv *d = dev_get_drvdata(dev);
++	int v;
++
++	if (kstrtoint(buf, 10, &v) || (v != 0 && v != 1))
++		return -EINVAL;
++	d->bmu.cfg.debug = v;
++	return count;
++}
++static DEVICE_ATTR_RW(debug);
++
++static struct attribute *oz8806_attrs[] = {
++	&dev_attr_registers.attr,
++	&dev_attr_debug.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(oz8806);
++
++/* ---- i2c driver ---- */
++
++static int oz8806_probe(struct i2c_client *client, const struct i2c_device_id *id)
++{
++	struct oz8806_drv *d;
++	int ret, k;
++
++	/* port: the chip has to answer before anything registers */
++	for (k = 0; k < 3; k++) {
++		ret = i2c_smbus_read_byte_data(client, 0x09);	/* OP_CTRL */
++		if (ret >= 0)
++			break;
++		msleep(5);
++	}
++	if (ret < 0) {
++		dev_err(&client->dev, "no answer at 0x%02x (%d)\n", client->addr, ret);
++		return -ENODEV;
++	}
++	dev_info(&client->dev, "OP_CTRL 0x%02x%s\n", ret, ret & 0x40 ? ", asleep" : "");
++
++	d = devm_kzalloc(&client->dev, sizeof(*d), GFP_KERNEL);
++	if (!d)
++		return -ENOMEM;
++	d->client = client;
++	d->dev = &client->dev;
++	d->bmu.hw = d;
++	mutex_init(&d->lock);
++	i2c_set_clientdata(client, d);
++
++	d->interval = 10000;
++	d->soc = 50;
++	d->volt = 3999;
++	d->curr = -300;
++	d->temp = 27;
++	d->remcap = 4000;
++	d->fcc = oz8806_board_config.design_mah;
++	d->dis_th = -10;
++	d->chg_full = 0;
++	d->rtc_cache = -1;
++	d->save_capacity = -2;
++	d->charger_type = -1;
++	d->pullup = -1;
++	d->rep = (struct oz8806_report){ .soc = -1, .volt = d->volt, .curr = d->curr,
++		.temp = d->temp, .rc = d->remcap, .fcc = d->fcc,
++		.status = POWER_SUPPLY_STATUS_UNKNOWN };
++	oz8806_set_power_on_base(d);
++
++	mutex_lock(&d->lock);
++	oz8806_wakeup_full_power(&d->bmu);		/* W1 */
++	oz8806_log_wake(d);
++	mutex_unlock(&d->lock);
++
++	ret = devm_device_add_groups(&client->dev, oz8806_groups);
++	if (ret)
++		return -EIO;
++
++	d->pm_nb.notifier_call = oz8806_suspend_notifier;
++	register_pm_notifier(&d->pm_nb);
++	d->ws = wakeup_source_register(&client->dev, "oz8806_wake");
++	INIT_DELAYED_WORK(&d->work, oz8806_battery_work);
++	mutex_lock(&oz_api_lock);
++	oz_drv = d;
++	drv_ready = 1;
++	mutex_unlock(&oz_api_lock);
++
++	/* stock bmulib_init runs from a later initcall and queues the work */
++	queue_delayed_work(system_freezable_wq, &d->work, 0);
++	dev_info(&client->dev, "OZ8806 gauge, %s\n",
++		 IS_ENABLED(CONFIG_OZ8806_WRITE) ? "chip writes on" :
++		 IS_ENABLED(CONFIG_OZ8806_WRITE_CAR) ? "CAR write only" : "read-only");
++	return 0;
++}
++
++static void oz8806_power_down(struct oz8806_drv *d)
++{
++	mutex_lock(&d->lock);
++	d->stopping = true;
++	mutex_unlock(&d->lock);
++	cancel_delayed_work_sync(&d->work);
++	mutex_lock(&d->lock);
++	if (d->bmulib_ready) {
++		bmu_power_down_chip(&d->bmu);		/* W5 */
++		oz8806_copy_state(d);
++	} else {
++		oz8806_chip_sleep(&d->bmu);		/* W5 */
++	}
++	mutex_unlock(&d->lock);
++}
++
++static int oz8806_remove(struct i2c_client *client)
++{
++	struct oz8806_drv *d = i2c_get_clientdata(client);
++
++	/* no supply call can reach d after this */
++	mutex_lock(&oz_api_lock);
++	drv_ready = 0;
++	oz_drv = NULL;
++	mutex_unlock(&oz_api_lock);
++	unregister_pm_notifier(&d->pm_nb);
++	oz8806_power_down(d);
++	wakeup_source_unregister(d->ws);
++	return 0;
++}
++
++static void oz8806_shutdown(struct i2c_client *client)
++{
++	oz8806_power_down(i2c_get_clientdata(client));
++}
++
++static const struct of_device_id oz8806_of_match[] = {
++	{ .compatible = "mediatek,coulomb" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, oz8806_of_match);
++
++static const struct i2c_device_id oz8806_id[] = {
++	{ "coulomb", 0 },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, oz8806_id);
++
++static struct i2c_driver oz8806_driver = {
++	.driver = {
++		.name = "coulomb",
++		.of_match_table = oz8806_of_match,
++	},
++	.probe = oz8806_probe,
++	.remove = oz8806_remove,
++	.shutdown = oz8806_shutdown,
++	.id_table = oz8806_id,
++};
++module_i2c_driver(oz8806_driver);
++
++MODULE_DESCRIPTION("O2Micro OZ8806 fuel gauge for the Titan Pocket");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/drivers/power/supply/oz8806_battery.c
+@@ -0,0 +1,208 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * The "battery" power supply at /devices/platform/battery (the stock
++ * "mediatek,bat_gm30" node), reporting the OZ8806 gauge until mtk_battery is
++ * ported. Stock mtk_battery takes level, voltage, current and temperature
++ * from the OZ8806 too; this keeps its supply name, parent and the
++ * bmu_init_done and save_capacity attributes the OZ8806 driver adds there,
++ * plus gauge_log for the OCV run logger.
++ *
++ * Every 10 s, as stock's battery_thread, it calls oz8806_update() and
++ * reports the change.
++ */
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/power/oz8806.h>
++#include <linux/power_supply.h>
++#include <linux/workqueue.h>
++
++#define OZ8806_BATTERY_INTERVAL_MS	10000
++
++struct oz8806_battery {
++	struct power_supply *psy;
++	struct delayed_work work;
++};
++
++static enum power_supply_property oz8806_battery_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CHARGE_FULL,
++	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
++	POWER_SUPPLY_PROP_CHARGE_COUNTER,
++	POWER_SUPPLY_PROP_TEMP,
++};
++
++static int oz8806_battery_get_property(struct power_supply *psy,
++				       enum power_supply_property psp,
++				       union power_supply_propval *val)
++{
++	struct oz8806_report r;
++	int curr;
++
++	if (!oz8806_gauge_int_done() || oz8806_get_report(&r))
++		return -ENODATA;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_STATUS:
++		val->intval = r.status;
++		break;
++	case POWER_SUPPLY_PROP_HEALTH:
++		val->intval = POWER_SUPPLY_HEALTH_GOOD;
++		break;
++	case POWER_SUPPLY_PROP_PRESENT:
++		val->intval = 1;
++		break;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		if (r.soc < 0)
++			return -ENODATA;
++		val->intval = clamp(r.soc, 0, 100);
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		/* live read, as stock battery_get_property; else the last report */
++		curr = oz8806_get_battry_current();
++		val->intval = (curr == -1 ? r.curr : curr) * 1000;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		val->intval = r.volt * 1000;
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_FULL:
++	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
++		val->intval = r.fcc * 1000;
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
++		val->intval = r.rc * 1000;
++		break;
++	case POWER_SUPPLY_PROP_TEMP:
++		if (!r.temp_ok)
++			return -ENODATA;
++		val->intval = r.temp * 10;
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static const struct power_supply_desc oz8806_battery_desc = {
++	.name = "battery",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = oz8806_battery_props,
++	.num_properties = ARRAY_SIZE(oz8806_battery_props),
++	.get_property = oz8806_battery_get_property,
++};
++
++static ssize_t bmu_init_done_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", oz8806_get_bmu_init_done());
++}
++static DEVICE_ATTR_RO(bmu_init_done);
++
++static ssize_t save_capacity_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", oz8806_get_save_capacity());
++}
++
++/* sets the driver's saved capacity, not the chip */
++static ssize_t save_capacity_store(struct device *dev, struct device_attribute *attr,
++				   const char *buf, size_t count)
++{
++	int v;
++
++	if (kstrtoint(buf, 10, &v))
++		return -EINVAL;
++	oz8806_set_save_capacity(v);
++	return count;
++}
++static DEVICE_ATTR_RW(save_capacity);
++
++/* the OCV run logger reads this */
++static ssize_t gauge_log_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return oz8806_log_line(buf, PAGE_SIZE);
++}
++static DEVICE_ATTR_RO(gauge_log);
++
++static struct attribute *oz8806_battery_attrs[] = {
++	&dev_attr_bmu_init_done.attr,
++	&dev_attr_gauge_log.attr,
++	&dev_attr_save_capacity.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(oz8806_battery);
++
++static void oz8806_battery_work(struct work_struct *work)
++{
++	struct oz8806_battery *bat = container_of(to_delayed_work(work),
++						  struct oz8806_battery, work);
++
++	oz8806_update();
++	power_supply_changed(bat->psy);
++	queue_delayed_work(system_freezable_wq, &bat->work,
++			   msecs_to_jiffies(OZ8806_BATTERY_INTERVAL_MS));
++}
++
++static void oz8806_battery_changed(void *arg)
++{
++	struct oz8806_battery *bat = arg;
++
++	power_supply_changed(bat->psy);
++}
++
++static int oz8806_battery_probe(struct platform_device *pdev)
++{
++	struct power_supply_config cfg = {};
++	struct oz8806_battery *bat;
++
++	bat = devm_kzalloc(&pdev->dev, sizeof(*bat), GFP_KERNEL);
++	if (!bat)
++		return -ENOMEM;
++	cfg.of_node = pdev->dev.of_node;
++	cfg.drv_data = bat;
++	cfg.attr_grp = oz8806_battery_groups;
++	bat->psy = devm_power_supply_register(&pdev->dev, &oz8806_battery_desc, &cfg);
++	if (IS_ERR(bat->psy))
++		return PTR_ERR(bat->psy);
++	platform_set_drvdata(pdev, bat);
++	INIT_DELAYED_WORK(&bat->work, oz8806_battery_work);
++	queue_delayed_work(system_freezable_wq, &bat->work, 0);
++	oz8806_set_changed_cb(oz8806_battery_changed, bat);
++	return 0;
++}
++
++static int oz8806_battery_remove(struct platform_device *pdev)
++{
++	struct oz8806_battery *bat = platform_get_drvdata(pdev);
++
++	oz8806_set_changed_cb(NULL, NULL);
++	cancel_delayed_work_sync(&bat->work);
++	return 0;
++}
++
++static const struct of_device_id oz8806_battery_of_match[] = {
++	{ .compatible = "mediatek,bat_gm30" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, oz8806_battery_of_match);
++
++static struct platform_driver oz8806_battery_driver = {
++	.probe = oz8806_battery_probe,
++	.remove = oz8806_battery_remove,
++	.driver = {
++		.name = "oz8806-battery",
++		.of_match_table = oz8806_battery_of_match,
++	},
++};
++module_platform_driver(oz8806_battery_driver);
++
++MODULE_DESCRIPTION("Titan Pocket battery supply from the OZ8806 gauge");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/drivers/power/supply/oz8806_bmulib.c
+@@ -0,0 +1,1373 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * OZ8806 level maths for the Titan Pocket: the polling steps, integer maths
++ * and end-of-charge, end-of-discharge and shutdown-voltage handling of the
++ * stock O2Micro bmulib. The level follows the coulomb counter against the
++ * full-charge capacity, set from the OCV at boot and after a rest
++ * (rest_check). Stock's capacity table and its charge and discharge ratios
++ * are not used.
++ *
++ * Chip writes (marked W1..W7) happen only with CONFIG_OZ8806_WRITE,
++ * except the CAR write (W7), which CONFIG_OZ8806_WRITE_CAR also turns on,
++ * and the OP_CTRL wake (oz8806_wake_if_asleep) and sleep
++ * (oz8806_chip_sleep), which are always on.
++ * Without it nothing is written, and afe_write_car() keeps a software CAR
++ * offset instead, so afe_read_car() returns what the chip would hold after
++ * the stock write and the level follows the stock maths. Every place where
++ * read-only differs from stock is marked "Read-only:".
++ *
++ * The file I/O stock does (/data/ocv_flag.dat, /data/offset.dat) is left out:
++ * the files can't be opened that early, so a missing file is what stock sees
++ * too.
++ */
++#ifdef __KERNEL__
++#include <linux/string.h>
++#else
++#include <string.h>
++#endif
++#include "oz8806_bmulib.h"
++
++#define OZ_REG_STATUS		0x08
++#define OZ_REG_OP_CTRL		0x09
++#define OZ_REG_CELL_TEMP	0x0c
++#define OZ_REG_CELL_VOLT	0x0e
++#define OZ_REG_OCV		0x10
++#define OZ_REG_CURRENT		0x12
++#define OZ_REG_CAR		0x14
++#define OZ_REG_BOARD_OFFSET	0x18
++#define OZ_REG_OTP_CTRL		0x1a
++#define OZ_ADDR			0x2f
++
++#define CFG	(&b->cfg)
++#define BI	(&b->bi)
++#define GG	(&b->gg)
++
++static inline int iabs(int v) { return v < 0 ? -v : v; }
++static inline long long labs64(long long v) { return v < 0 ? -v : v; }
++static inline int imin(int a, int b) { return a < b ? a : b; }
++static inline int imax(int a, int b) { return a > b ? a : b; }
++
++/* ---- register access ---- */
++
++/* 8 tries, no delay; the final failure counts an i2c error */
++static int afe_register_read_byte(struct oz8806_bmu *b, u8 reg, u8 *v)
++{
++	int i, r = -1;
++
++	for (i = 0; i < 8; i++) {
++		r = oz8806_hw_read_byte(b, reg);
++		if (r >= 0) {
++			*v = r;
++			return r;
++		}
++	}
++	BI->i2c_errors++;
++	return r;
++}
++
++static int afe_register_read_word(struct oz8806_bmu *b, u8 reg, u16 *v)
++{
++	int i, r = -1;
++
++	for (i = 0; i < 8; i++) {
++		r = oz8806_hw_read_word(b, reg);
++		if (r >= 0) {
++			*v = r;
++			return r;
++		}
++	}
++	BI->i2c_errors++;
++	return r;
++}
++
++/* W1, W3, W3b, W4, W5 */
++static int afe_register_write_byte(struct oz8806_bmu *b, u8 reg, u8 v)
++{
++#ifdef CONFIG_OZ8806_WRITE
++	int i, r = -1;
++
++	for (i = 0; i < 8; i++) {
++		r = oz8806_hw_write_byte(b, reg, v);
++		if (r >= 0)
++			return r;
++	}
++	BI->i2c_errors++;
++	return r;
++#else
++	/* Read-only: not written */
++	return 0;
++#endif
++}
++
++/* driver-side byte read: 4 tries, no i2c error count */
++static int drv_read_byte(struct oz8806_bmu *b, u8 reg, u8 *v)
++{
++	int i, r = -1;
++
++	for (i = 0; i < 4; i++) {
++		r = oz8806_hw_read_byte(b, reg);
++		if (r >= 0) {
++			*v = r;
++			return 0;
++		}
++	}
++	return r;
++}
++
++/* ---- readers ---- */
++
++/* volt maths shared by 0x0c, 0x0e and 0x10: 2.5 mV LSB in the top 12 bits */
++static int raw_to_mv(struct oz8806_bmu *b, int raw)
++{
++	return ((int)(s16)raw / 16) * CFG->volt_lsb / 100;
++}
++
++int afe_read_cell_volt(struct oz8806_bmu *b, int *mv)
++{
++	int k, r = -1, v;
++
++	for (k = 0; k < 8; k++) {
++		r = oz8806_hw_read_word(b, OZ_REG_CELL_VOLT);
++		if (r >= 0) {
++			v = raw_to_mv(b, r);
++			if ((unsigned int)v <= 5117) {
++				*mv = v;
++				b->volt_fresh = 1;
++				b->volt_raw = r;
++				return r;
++			}
++			r = -1;
++		}
++		oz8806_hw_msleep(b, 5);
++	}
++	BI->i2c_errors++;
++	b->volt_fresh = 0;
++	return r;
++}
++
++static int afe_read_ocv_volt(struct oz8806_bmu *b, int *mv)
++{
++	int k, r = -1, v;
++
++	for (k = 0; k < 8; k++) {
++		r = oz8806_hw_read_word(b, OZ_REG_OCV);
++		if (r >= 0) {
++			v = raw_to_mv(b, r);
++			if ((unsigned int)v <= 5117) {
++				*mv = v;
++				return r;
++			}
++			r = -1;
++		}
++	}
++	BI->i2c_errors++;
++	return r;
++}
++
++/* thermistor voltage, one try, no error count */
++int oz8806_temp_read(struct oz8806_bmu *b, int *mv)
++{
++	int r = oz8806_hw_read_word(b, OZ_REG_CELL_TEMP), v;
++
++	if (r < 0)
++		return r;
++	v = raw_to_mv(b, r);
++	if ((unsigned int)v > 5117)
++		return -1;
++	*mv = v;
++	return r;
++}
++
++int afe_read_current(struct oz8806_bmu *b, int *ma)
++{
++	int k, r = -1, t;
++
++	for (k = 0; k < 8; k++) {
++		r = oz8806_hw_read_word(b, OZ_REG_CURRENT);
++		if (r >= 0) {
++			t = CFG->rsense ? (int)(s16)r * CFG->curr_lsb / CFG->rsense : 0;
++			t = t / 100;
++			*ma = t / 4;
++			b->curr_fresh = 1;
++			b->curr_raw = r;
++			return r;
++		}
++		oz8806_hw_msleep(b, 5);
++	}
++	BI->i2c_errors++;
++	b->curr_fresh = 0;
++	return r;
++}
++
++/* chip CAR raw word, 8 tries 5 ms apart */
++static int read_car_raw(struct oz8806_bmu *b)
++{
++	int k, r = -1;
++
++	for (k = 0; k < 8; k++) {
++		r = oz8806_hw_read_word(b, OZ_REG_CAR);
++		if (r >= 0)
++			return r;
++		oz8806_hw_msleep(b, 5);
++	}
++	BI->i2c_errors++;
++	return r;
++}
++
++/* Counts the change since the last virtual CAR raw seen. A step of 10 % of
++ * the capacity or more in one read is a glitch, as normal_poll treats it,
++ * and isn't counted. */
++static void cc_track(struct oz8806_bmu *b, u16 vraw)
++{
++	int d = (s16)(u16)(vraw - b->cc_ref);
++
++	if (b->cc_ref_ok && iabs(d * CFG->car_lsb / CFG->rsense) < CFG->design_mah / 10)
++		b->cc_uah += (long long)d * CFG->car_lsb * 1000 / CFG->rsense;
++	b->cc_ref = vraw;
++	b->cc_ref_ok = 1;
++}
++
++static int afe_read_car(struct oz8806_bmu *b, int *mah)
++{
++	int r = read_car_raw(b);
++	s16 raw;
++
++	if (r < 0)
++		return r;
++	/* Read-only: the virtual CAR is the chip CAR plus the software offset */
++	raw = (s16)(u16)((u16)r + b->car_off);
++	cc_track(b, (u16)raw);
++	*mah = (s16)((int)raw * CFG->car_lsb / CFG->rsense);
++	return r;
++}
++
++/* W7. With CONFIG_OZ8806_WRITE_CAR the chip is written (car_off stays 0). */
++static int afe_write_car(struct oz8806_bmu *b, int mah)
++{
++	u16 raw = (u16)(mah * CFG->rsense / CFG->car_lsb);
++	int r = read_car_raw(b);
++#if defined(CONFIG_OZ8806_WRITE) || defined(CONFIG_OZ8806_WRITE_CAR)
++	int k;
++
++	/* count up to the chip value before it is replaced */
++	if (r >= 0)
++		cc_track(b, (u16)r);
++	for (k = 0; k < 8; k++) {
++		r = oz8806_hw_write_word(b, OZ_REG_CAR, raw);
++		if (r >= 0) {
++			b->cc_ref = raw;
++			return r;
++		}
++		oz8806_hw_msleep(b, 5);
++	}
++	BI->i2c_errors++;
++	return r;
++#else
++	/* Read-only: move the software offset so the next read gives raw */
++	if (r < 0)
++		return r;
++	cc_track(b, (u16)((u16)r + b->car_off));
++	b->car_off = (u16)(raw - (u16)r);
++	b->cc_ref = raw;
++	return 0;
++#endif
++}
++
++static int afe_read_board_offset(struct oz8806_bmu *b, int *ma)
++{
++	u16 raw;
++	int r = afe_register_read_word(b, OZ_REG_BOARD_OFFSET, &raw), v;
++
++	if (r < 0)
++		return r;
++	v = raw & 0x7ff;
++	if (raw & 0x400)
++		v |= (int)0xfffffc00;
++	*ma = (s16)(v * 78 / (CFG->rsense * 10));
++	return r;
++}
++
++/* W6 */
++static int afe_write_board_offset(struct oz8806_bmu *b, int ma)
++{
++#ifdef CONFIG_OZ8806_WRITE
++	int v, i, r = -1;
++
++	if (ma > 0) {
++		v = imin(ma * CFG->rsense * 10 / 78, 0x3ff);
++	} else if (ma == 0) {
++		v = 0;
++	} else {
++		ma = imax(ma, -0x13800 / (CFG->rsense * 10));
++		v = ((CFG->rsense * ma * 10) / 78 & 0x3ff) | 0x400;
++	}
++	for (i = 0; i < 8; i++) {
++		r = oz8806_hw_write_word(b, OZ_REG_BOARD_OFFSET, v);
++		if (r >= 0)
++			return r;
++	}
++	BI->i2c_errors++;
++	return r;
++#else
++	/* Read-only: the chip keeps the last offset written */
++	(void)b;
++	(void)ma;
++	return 0;
++#endif
++}
++
++/* /data/offset.dat; stock can't open it this early, so: no file */
++static int bmu_read_data(void)
++{
++	return -1;
++}
++
++static int afe_read_cell_temp(struct oz8806_bmu *b, int *c)
++{
++	int k, r = -1, mv = 0, ohm;
++
++	b->temp_valid = 0;
++	if (GG->ext_temp) {
++		b->temp_ok = 1;
++		return 0;
++	}
++	for (k = 0; k < 8; k++) {
++		r = oz8806_temp_read(b, &mv);
++		if (r >= 0)
++			break;
++		oz8806_hw_msleep(b, 5);
++	}
++	if (r < 0) {
++		BI->i2c_errors++;
++		b->temp_ok = 0;
++		return r;
++	}
++	b->temp_ok = 1;
++	if (mv > 0 && mv < CFG->ntc_ref_mv) {
++		ohm = mv * CFG->ntc_pullup / (CFG->ntc_ref_mv - mv);
++		*c = one_latitude_table(OZ8806_NTC_N, oz8806_ntc, ohm);
++		b->temp_valid = ohm >= oz8806_ntc[0].x && ohm <= oz8806_ntc[OZ8806_NTC_N - 1].x;
++	} else {
++		*c = 25;
++	}
++	return r;
++}
++
++/* ---- tables ---- */
++
++int one_latitude_table(int n, const struct oz8806_pair *t, int x)
++{
++	int i, num;
++
++	if (n <= 0 || x < t[0].x)
++		return t[0].y;
++	if (t[0].x == x)
++		return t[0].y;
++	for (i = 1; ; i++) {
++		if (i == n)
++			return t[n - 1].y;
++		if (t[i].x == x)
++			return t[i].y;
++		if (t[i].x >= x)
++			break;
++	}
++	num = (x - t[i - 1].x) * (t[i].y - t[i - 1].y);
++	return (t[i].x != t[i - 1].x ? num / (t[i].x - t[i - 1].x) : num) + t[i - 1].y;
++}
++
++/* level from the voltage with the IR drop taken out: ri while discharging,
++ * ri + 100 mOhm while charging as stock */
++int calculate_soc_result(struct oz8806_bmu *b)
++{
++	int I = BI->curr, v;
++
++	if (I < 0)
++		v = BI->volt - I * GG->ri / 1000;
++	else
++		v = BI->volt - I * (GG->ri + 100) / 1000;
++	return one_latitude_table(OZ8806_OCV_N, oz8806_ocv, v);
++}
++
++/* ---- chip state ---- */
++
++/* W1: clear OP_CTRL bit 6 (sleep) */
++void oz8806_wakeup_full_power(struct oz8806_bmu *b)
++{
++#ifdef CONFIG_OZ8806_WRITE
++	u8 v = 0;
++
++	if (drv_read_byte(b, OZ_REG_OP_CTRL, &v) < 0 || !(v & 0x40))
++		return;
++	drv_read_byte(b, OZ_REG_OP_CTRL, &v);
++	oz8806_hw_write_byte(b, OZ_REG_OP_CTRL, v & ~0x40);
++	if (drv_read_byte(b, OZ_REG_OP_CTRL, &v) >= 0 && !(v & 0x40))
++		oz8806_hw_reset_power_on_base(b);
++#else
++	/* Read-only: the 0x20 write of oz8806_wake_if_asleep instead */
++	oz8806_wake_if_asleep(b);
++#endif
++}
++
++/* OP_CTRL write with the same 8 tries as afe_register_write_byte, in both builds */
++static int op_ctrl_write(struct oz8806_bmu *b, u8 v)
++{
++	int i, r = -1;
++
++	for (i = 0; i < 8; i++) {
++		r = oz8806_hw_write_byte(b, OZ_REG_OP_CTRL, v);
++		if (r >= 0)
++			return r;
++	}
++	BI->i2c_errors++;
++	return r;
++}
++
++/* the driver clears wake_event once it has logged it; a WROTE not yet logged stays */
++static void wake_event(struct oz8806_bmu *b, u8 ev)
++{
++	if (b->wake_event != OZ_WAKE_WROTE)
++		b->wake_event = ev;
++}
++
++/* Always on, with or without CONFIG_OZ8806_WRITE (the one write allowed
++ * read-only). Reads OP_CTRL; if bit 6 (sleep) is set or the read fails, and
++ * reg 8 bit 2 (PEC error) is clear, writes 0x20 (once more if it didn't
++ * take) and reads back. Readings count as invalid for 2250 ms after the
++ * write (wake_pending, checked in oz8806_reading_valid). */
++void oz8806_wake_if_asleep(struct oz8806_bmu *b)
++{
++	u8 v = 0, st = 0;
++
++	if (b->stopped)
++		return;
++	if (drv_read_byte(b, OZ_REG_OP_CTRL, &v) >= 0 && !(v & 0x40))
++		return;
++	if (drv_read_byte(b, OZ_REG_STATUS, &st) < 0) {
++		wake_event(b, OZ_WAKE_REG8_FAIL);
++		return;
++	}
++	if (st & 0x04) {
++		wake_event(b, OZ_WAKE_PEC);
++		return;
++	}
++	op_ctrl_write(b, 0x20);
++	if (drv_read_byte(b, OZ_REG_OP_CTRL, &v) < 0 || (v & 0x40)) {
++		op_ctrl_write(b, 0x20);
++		if (drv_read_byte(b, OZ_REG_OP_CTRL, &v) < 0 || (v & 0x40)) {
++			wake_event(b, OZ_WAKE_NOT_TAKEN);
++			goto written;
++		}
++	}
++	wake_event(b, OZ_WAKE_WROTE);
++written:
++	oz8806_hw_reset_power_on_base(b);
++	b->wake_pending = 1;
++}
++
++/* Always on. Stock bmu_power_down_chip's write: OP_CTRL 0x60, sleep. */
++void oz8806_chip_sleep(struct oz8806_bmu *b)
++{
++	b->stopped = 1;		/* no wake write after this */
++	op_ctrl_write(b, 0x60);
++}
++
++/* CRC-8, poly 0x07, init 0 (SMBus PEC) */
++static u8 pec_crc8(const u8 *p, int n)
++{
++	u8 c = 0;
++	int i, k;
++
++	for (i = 0; i < n; i++) {
++		c ^= p[i];
++		for (k = 0; k < 8; k++)
++			c = c & 0x80 ? (u8)(c << 1) ^ 0x07 : (u8)(c << 1);
++	}
++	return c;
++}
++
++static void check_oz8806_staus(struct oz8806_bmu *b)
++{
++	u8 v, reg8 = 0;
++	int addr, i, found = 0;
++
++	for (i = 0; i < 4; i++)
++		afe_register_read_byte(b, i, &v);
++	/* bus probe: 0x2f down to 0x28 until reg 4 answers */
++	for (addr = OZ_ADDR; addr >= 0x28; addr--) {
++		oz8806_hw_set_addr(b, addr);
++		if (oz8806_hw_read_byte(b, 4) >= 0) {
++			found = 1;
++			break;
++		}
++	}
++	if (!found) {
++		oz8806_hw_set_addr(b, OZ_ADDR);
++		return;
++	}
++	if (afe_register_read_byte(b, 8, &reg8) >= 0 && (reg8 & 4)) {
++		u8 m[3] = { (u8)(addr << 1), 0x08, (u8)(reg8 & ~4) };
++		u8 crc = pec_crc8(m, 3);
++
++		/* W2 */
++#ifdef CONFIG_OZ8806_WRITE
++		oz8806_hw_write_word(b, 8, (u16)((reg8 & ~4) | crc << 8));
++#else
++		(void)crc;
++#endif
++	}
++	oz8806_wakeup_full_power(b);
++	afe_register_write_byte(b, OZ_REG_OP_CTRL, 0x20);	/* W4 */
++	oz8806_hw_msleep(b, 10);
++	afe_register_write_byte(b, OZ_REG_OTP_CTRL, 0x02);	/* W3b, force OTP mapping */
++	oz8806_hw_msleep(b, 10);
++	oz8806_hw_set_addr(b, OZ_ADDR);
++	for (i = 0; i <= 10; i++) {
++		if (afe_register_read_byte(b, OZ_REG_OTP_CTRL, &v) >= 0 && !(v & 4))
++			break;
++		if (i < 10)
++			oz8806_hw_msleep(b, 10);
++	}
++	for (i = 0; i < 4; i++)
++		afe_register_read_byte(b, i, &v);
++}
++
++/* W3: VD23 trim from reg 3 bits 8 and 7 into reg 8 bits 1..0 */
++static void trim_bmu_VD23(struct oz8806_bmu *b)
++{
++	int i, r = -1, trim;
++	u8 reg8 = 0, nv;
++
++	for (i = 0; i < 3; i++) {
++		r = oz8806_hw_read_word(b, 3);
++		if (r >= 0)
++			break;
++	}
++	if (r < 0)
++		return;
++	trim = (r >> 8 & 1) | (r >> 6 & 2);
++	for (i = 0; i < 3; i++) {
++		int t = oz8806_hw_read_byte(b, 8);
++
++		if (t >= 0) {
++			reg8 = t;
++			break;
++		}
++		if (i == 2)
++			return;
++	}
++	nv = trim == 2 ? (reg8 & 0xfc) | 3 : (reg8 & 0xfc) | trim;
++#ifdef CONFIG_OZ8806_WRITE
++	for (i = 0; i < 3; i++)
++		if (oz8806_hw_write_byte(b, 8, nv) >= 0)
++			break;
++#else
++	(void)nv;
++#endif
++}
++
++void oz8806_bmu_setup(struct oz8806_bmu *b, int ntc_pullup)
++{
++	struct oz8806_gas_gauge *g = GG;
++	void *hw = b->hw;
++	u8 wake_pending = b->wake_pending, wake_event = b->wake_event, stopped = b->stopped;
++
++	memset(b, 0, sizeof(*b));
++	b->hw = hw;
++	/* the probe wake's 2250 ms window and log stay across the setup */
++	b->wake_pending = wake_pending;
++	b->wake_event = wake_event;
++	b->stopped = stopped;
++	b->cfg = oz8806_board_config;
++	b->cfg.ntc_pullup = ntc_pullup;
++
++	b->soc_from_ext_en = 1;
++	b->car_tol_pct = 50;
++	b->trust_car = 0;
++	b->file_save = 0;
++	b->retry_max = 3;
++	b->ext_soc = -1;
++
++	g->car_max = 0x28000 / CFG->rsense;
++	g->fcc = CFG->design_mah;
++	g->chg_end_curr = CFG->end_current_ma + 2;
++	g->dis_th = -10;
++	g->ri = 18;
++	g->ext_temp = 0;
++
++	b->onepct = CFG->design_mah / 100;
++	b->rest_ocv_mv = -1;
++	b->rest_soc = -1;
++	b->rest_target = -1;
++}
++
++/* bmulib_init after the parameter and state setup */
++void bmulib_init_chip(struct oz8806_bmu *b)
++{
++	unsigned int boot = oz8806_hw_boot_ms(b);
++	int bo, o;
++	u16 w;
++	u8 v;
++
++	check_oz8806_staus(b);
++	trim_bmu_VD23(b);
++	if (boot < 625) {
++		oz8806_hw_msleep(b, 625 - boot);
++		afe_register_read_word(b, OZ_REG_BOARD_OFFSET, &w);
++	}
++	if (afe_read_board_offset(b, &bo) >= 0) {
++		o = CFG->board_offset_ma;
++		if (o == 0) {
++			if ((unsigned int)(bo - 1) < 10)
++				goto skip;
++			o = 7;
++		}
++		afe_write_board_offset(b, o);			/* W6 */
++	}
++skip:
++	afe_register_write_byte(b, OZ_REG_OP_CTRL, 0x20);	/* W4 */
++	if (afe_register_read_byte(b, OZ_REG_OP_CTRL, &v) < 0 || (v & 0x40))
++		afe_register_write_byte(b, OZ_REG_OP_CTRL, 0x20);			/* W4 */
++	GG->ext_temp = 0;
++}
++
++static void cap_car(struct oz8806_bmu *b)
++{
++	if (BI->car >= GG->car_max - 10)
++		BI->car = BI->prev_car = GG->car_max - GG->car_max / 100;
++}
++
++/* first poll: wait for the ADC and take the power-on OCV if the chip has one */
++static void wait_ocv_flag_fun(struct oz8806_bmu *b)
++{
++	unsigned int boot = oz8806_hw_boot_ms(b), pon;
++	int k, got = 0, v;
++	u16 f = 0;
++	u8 r;
++
++	if (boot < 2000)
++		oz8806_hw_msleep(b, 2000 - boot);
++	b->flag_first = 1;
++	for (k = 0; k < 3; k++) {
++		if (afe_register_read_word(b, OZ_REG_OCV, &f) >= 0) {
++			got = 1;
++			boot = oz8806_hw_boot_ms(b);
++			pon = oz8806_hw_power_on_ms(b);
++			if ((f & 3) == 0) {
++				if (boot < 2250)
++					oz8806_hw_msleep(b, 2250 - boot);
++			} else if (pon < 2250) {
++				oz8806_hw_msleep(b, 2250 - pon);
++			}
++			break;
++		}
++	}
++	afe_read_cell_volt(b, &BI->volt);
++	afe_read_current(b, &BI->curr);
++	afe_read_cell_temp(b, &BI->temp);
++	afe_read_car(b, &BI->car);
++	BI->soc = BI->car * 100 / CFG->design_mah;
++	if (!got) {
++		;
++	} else if (!(f & 1)) {
++		if (f & 2) {
++			afe_read_ocv_volt(b, &BI->ocv);
++			b->flag_ocv_ok = 1;
++		}
++	} else {
++		b->flag_ocv_boot = 1;
++		afe_read_ocv_volt(b, &BI->ocv);
++		afe_read_cell_volt(b, &BI->volt);
++		if (BI->ocv > CFG->cv_mv + 70) {
++			afe_read_cell_volt(b, &BI->volt);
++			BI->ocv = BI->volt;
++		}
++		afe_read_current(b, &BI->curr);
++		v = BI->ocv;
++		if (BI->curr > 50)
++			v -= 100;
++		BI->soc = one_latitude_table(OZ8806_OCV_N, oz8806_ocv, v);
++		if ((unsigned int)BI->soc > 100)
++			BI->soc = 50;
++		BI->car = BI->soc * CFG->design_mah / 100;
++		afe_read_current(b, &BI->curr);
++		cap_car(b);
++		afe_write_car(b, BI->car);			/* W7 */
++		BI->prev_car = BI->car;
++		GG->fcc = CFG->design_mah;
++		BI->rc = GG->rc_mirror = BI->soc * CFG->design_mah / 100;
++		GG->used = CFG->design_mah - BI->rc;
++	}
++	afe_register_read_byte(b, 0, &r);
++	afe_register_read_byte(b, OZ_REG_OP_CTRL, &r);
++}
++
++static void check_shutdwon_voltage(struct oz8806_bmu *b)
++{
++	int s;
++
++	afe_read_cell_volt(b, &BI->volt);
++	if (!b->flag_ocv_ok)
++		return;
++	s = imax(one_latitude_table(OZ8806_OCV_N, oz8806_ocv, BI->ocv), b->init_soc);
++	if (BI->soc - s > 20 || (s < 6 && BI->volt < CFG->end_volt_mv - 50)) {
++		s = imax(s, 0);
++		BI->soc = s;
++		BI->rc = BI->car = s * GG->fcc / 100;
++		if (BI->car > GG->car_max - 20)
++			BI->car = GG->car_max - 20;
++		afe_write_car(b, BI->car);			/* W7 */
++		BI->prev_car = BI->car;
++		GG->rc_mirror = BI->rc;
++		GG->used = imax(GG->fcc - BI->rc, 0);
++	}
++}
++
++void charge_end_process(struct oz8806_bmu *b)
++{
++	GG->fcc = CFG->design_mah;
++	BI->rc = GG->fcc + GG->fcc / 100 - 1;
++	afe_write_car(b, BI->rc);				/* W7; car, prev_car kept */
++	b->chg_end_done = 1;
++	BI->soc = 100;
++	GG->chg_end = GG->b6 = GG->b7 = 1;
++	GG->used = 0;
++	b->flag_ocv_boot = 0;
++}
++
++void discharge_end_process(struct oz8806_bmu *b)
++{
++	GG->fcc = CFG->design_mah;
++	BI->rc = GG->fcc / 100 - 1;
++	afe_write_car(b, BI->rc);				/* W7 */
++	BI->prev_car = BI->rc;
++	BI->soc = 0;
++	GG->dis_end = GG->b6 = GG->b7 = 1;
++	GG->rc_mirror = 0;
++}
++
++/* Counted charge allowed over dt seconds at rest: OZ8806_REST_MA plus
++ * OZ8806_REST_SLACK_UAH for the CAR's 0.5 mAh steps. uAh. */
++static long long rest_allow_uah(long long dt)
++{
++	return OZ8806_REST_MA * dt * 10 / 36 + OZ8806_REST_SLACK_UAH;
++}
++
++/* Move the level one point toward rest_target and write the CAR to match. */
++static void rest_step(struct oz8806_bmu *b, long long now)
++{
++	int s = BI->soc + (b->rest_target > BI->soc ? 1 : -1);
++
++	BI->soc = s;
++	/* the middle of the point, so the next count doesn't drop it */
++	BI->rc = BI->car = s * GG->fcc / 100 + GG->fcc / 200;
++	afe_write_car(b, BI->car);				/* W7 */
++	BI->prev_car = BI->car;
++	GG->rc_mirror = BI->rc;
++	GG->used = imax(GG->fcc - BI->rc, 0);
++	GG->dis_end = 0;
++	GG->chg_end = 0;
++	b->rest_step_t = now;
++	if (s == b->rest_target)
++		b->rest_target = -1;
++}
++
++/* Rest tracking and the OCV correction, after each steady poll. The counted
++ * charge covers the time in suspend, when there are no polls: it must stay
++ * within the rest current both since the last poll and since the rest began. */
++static void rest_check(struct oz8806_bmu *b)
++{
++	long long now = oz8806_hw_boottime_sec(b), dt = now - b->rest_prev_t;
++	int quiet, s, v;
++
++	quiet = b->rest_prev_t && dt >= 0 && !oz8806_hw_adapter(b) &&
++		iabs(BI->curr) <= OZ8806_REST_MA;
++	if (quiet)
++		quiet = labs64(b->cc_uah - b->rest_prev_cc) <= rest_allow_uah(dt) &&
++			labs64(b->cc_uah - b->rest_cc0) <= rest_allow_uah(now - b->rest_t0);
++	b->rest_prev_t = now;
++	b->rest_prev_cc = b->cc_uah;
++	if (!quiet) {
++		b->rest_t0 = now;
++		b->rest_cc0 = b->cc_uah;
++		b->rest_done = 0;
++		b->rest_target = -1;
++		return;
++	}
++	if (b->rest_target >= 0) {
++		if (now - b->rest_step_t >= OZ8806_REST_STEP_S)
++			rest_step(b, now);
++		return;
++	}
++	if (b->rest_done || now - b->rest_t0 < OZ8806_REST_S)
++		return;
++	b->rest_done = 1;
++	if (!b->temp_valid || BI->temp < OZ8806_REST_TMIN || BI->temp > OZ8806_REST_TMAX)
++		return;
++	v = BI->volt - BI->curr * GG->ri / 1000;
++	s = one_latitude_table(OZ8806_OCV_N, oz8806_ocv, v);
++	b->rest_ocv_mv = v;
++	b->rest_soc = s;
++	if (iabs(s - BI->soc) < OZ8806_REST_DEADBAND)
++		return;
++	/* 0 and 100 % stay with the end voltage and the end of charge */
++	b->rest_target = imax(1, imin(s, 99));
++	if (b->rest_target == BI->soc) {
++		b->rest_target = -1;
++		return;
++	}
++	rest_step(b, now);
++}
++
++/* steady poll, once GG->init_ok is set */
++static void normal_poll(struct oz8806_bmu *b)
++{
++	int c = 0, r, delta, bo, o, lim;
++	u8 op;
++
++	BI->prev_car = BI->car;
++	afe_read_cell_temp(b, &BI->temp);
++	afe_read_cell_volt(b, &BI->volt);
++	afe_read_current(b, &BI->curr);
++	r = afe_read_car(b, &c);
++	if (CFG->debug && c == 0)
++		b->car_zero_cnt++;
++	if (r >= 0 && c > 0) {
++		if (iabs(c - BI->prev_car) < CFG->design_mah * 10 / 100) {
++			BI->car = c;
++			b->car_err = 0;
++		} else if (++b->car_err > 3) {
++			b->car_err = 0;
++			afe_write_car(b, BI->rc);		/* W7 */
++			BI->prev_car = BI->car = BI->rc;
++		}
++	}
++	if (BI->volt < CFG->end_volt_mv && BI->curr > 0 && BI->prev_car < BI->car) {
++		BI->car = BI->prev_car;
++		afe_write_car(b, BI->prev_car);			/* W7 */
++	}
++	GG->rc_mirror += BI->car - BI->prev_car;
++	GG->used += BI->prev_car - BI->car;
++	if (GG->rc_mirror < 0)
++		GG->rc_mirror = 0;
++	if (GG->used < 0)
++		GG->used = 0;
++
++	if (oz8806_hw_adapter(b) == 0 || BI->curr <= GG->dis_th) {
++		/* discharging */
++		if (BI->soc < 100)
++			GG->chg_end = 0;
++		delta = (s16)((s16)BI->prev_car - (s16)BI->car);
++		/* at the end only a rest above empty moves the level (rest_check) */
++		if (delta > 0 && !GG->dis_end) {
++			BI->rc -= delta;
++			BI->soc = GG->fcc ? BI->rc * 100 / GG->fcc : 0;
++			/* 0 % only at the end voltage; until then hold 1 % */
++			if (BI->soc < 1) {
++				if (BI->volt > CFG->end_volt_mv) {
++					BI->soc = 1;
++					BI->rc = b->onepct;
++				} else {
++					GG->dis_end = 1;
++				}
++			}
++		}
++	} else {
++		/* charging: adapter present and curr above dis_th */
++		GG->dis_end = 0;
++		if (!GG->chg_end && BI->soc < 100) {
++			delta = (s16)((s16)BI->car - (s16)BI->prev_car);
++			if (delta > 0) {
++				BI->rc += delta;
++				BI->soc = GG->fcc ? BI->rc * 100 / GG->fcc : 0;
++			}
++			/* 100 % only at the end point (taper current at the charge
++			 * voltage); the driver's full detection also gets there */
++			if (BI->soc >= 100) {
++				if (BI->curr < GG->chg_end_curr && BI->volt >= CFG->cv_mv - 50) {
++					GG->chg_end = 1;
++				} else {
++					BI->soc = 99;
++					BI->rc = GG->fcc - 1;
++				}
++			}
++		}
++	}
++	rest_check(b);
++	if (GG->chg_end) {
++		if (!b->chg_end_done) {
++			b->chg_end_done = 1;
++			charge_end_process(b);			/* W7 */
++		}
++	} else {
++		b->chg_end_done = 0;
++	}
++	if (GG->dis_end) {
++		if (!b->dis_end_done) {
++			b->dis_end_done = 1;
++			discharge_end_process(b);		/* W7 */
++		}
++	} else {
++		b->dis_end_done = 0;
++	}
++	if (GG->dis_end && BI->soc > 0)
++		GG->dis_end = 0;
++	if (BI->soc < 100)
++		GG->chg_end = 0;
++
++	if (BI->car < 0) {
++		if (BI->volt < CFG->cv_mv - 200)
++			BI->car = BI->soc < 1 ? BI->rc : BI->soc * GG->fcc / 100 - 1;
++		else
++			BI->car = GG->fcc - 1;
++		afe_write_car(b, BI->car);			/* W7 */
++		BI->prev_car = BI->car;
++	}
++	if (afe_read_car(b, &c) >= 0) {
++		if (c < 5 || c > (CFG->car_lsb << 15) / CFG->rsense - 5) {
++			afe_write_car(b, BI->rc);		/* W7 */
++			BI->prev_car = BI->car = BI->rc;
++		}
++		/* keeps CAR slaved to rc */
++		if (iabs(c - BI->rc) > b->onepct && BI->rc < GG->car_max && BI->rc > 0) {
++			afe_write_car(b, BI->rc);		/* W7 */
++			BI->prev_car = BI->car = BI->rc;
++		}
++		lim = GG->fcc + GG->fcc / 100 - 1;
++		if (BI->car > lim) {
++			BI->car = BI->prev_car = lim;
++			afe_write_car(b, lim);			/* W7 */
++		}
++	}
++	b->last_sec = b->now_sec;
++	b->now_sec = oz8806_hw_now_sec(b);
++	lim = GG->fcc + GG->fcc / 100 - 1;
++	if (BI->rc < GG->fcc / 100 - 1)
++		BI->rc = GG->fcc / 100 - 1;
++	if (BI->rc > lim)
++		BI->rc = lim;
++	GG->fcc = CFG->design_mah;
++	if (BI->soc != b->last_soc) {
++		b->last_soc = BI->soc;
++		return;
++	}
++	op = 0;
++	r = afe_register_read_byte(b, OZ_REG_OP_CTRL, &op);
++	BI->op_bit0 = op & 1;
++	if (r < 0)
++		BI->op_bit0 = 0;
++	if (r < 0 || (op & 0x40))
++		afe_register_write_byte(b, OZ_REG_OP_CTRL, 0x20);	/* W4 */
++	if (afe_read_board_offset(b, &bo) >= 0) {
++		o = CFG->board_offset_ma;
++		if (o == 0) {
++			if ((unsigned int)(bo - 1) > 9)
++				afe_write_board_offset(b, 7);	/* W6 */
++		} else if (iabs(bo - o) > 3) {
++			afe_write_board_offset(b, o);		/* W6 */
++		}
++	}
++	if (BI->i2c_errors) {
++		check_oz8806_staus(b);
++		trim_bmu_VD23(b);
++		BI->i2c_errors = 0;
++	}
++}
++
++void bmu_polling_loop(struct oz8806_bmu *b)
++{
++	int cap, s, c, sc, bo = 0, o, r, fbo;
++	unsigned int pon;
++	u16 f;
++	u8 op = 0;
++
++	if (GG->init_ok) {
++		normal_poll(b);
++		return;
++	}
++	if (!b->flag_first) {
++		wait_ocv_flag_fun(b);
++		goto after_init;
++	}
++
++	/* init polls */
++	b->wait_cnt++;
++	oz8806_wakeup_full_power(b);				/* W1 */
++	r = afe_register_read_byte(b, OZ_REG_OP_CTRL, &op);
++	BI->op_bit0 = op & 1;
++	if (r < 0 || (op & 0x40)) {
++		afe_register_write_byte(b, OZ_REG_OP_CTRL, 0x20);	/* W4 */
++		afe_register_read_byte(b, OZ_REG_OP_CTRL, &op);
++	}
++	if (afe_register_read_word(b, OZ_REG_OCV, &f) >= 0 && (f & 1))
++		wait_ocv_flag_fun(b);
++	pon = oz8806_hw_power_on_ms(b);
++	if (pon < 2250)
++		oz8806_hw_msleep(b, 2250 - pon);
++	afe_read_cell_temp(b, &BI->temp);
++	afe_read_cell_volt(b, &BI->volt);
++	afe_read_current(b, &BI->curr);
++	afe_read_car(b, &BI->car);
++	b->init_soc = calculate_soc_result(b);
++	b->init_cap = b->init_soc * CFG->design_mah / 100;
++	if (oz8806_hw_boot_ms(b) < 5000)
++		goto after_init;				/* wait for the ADC */
++	GG->fcc = CFG->design_mah;
++	cap = BI->car;
++	if (cap > 5 && !b->flag_ocv_boot)
++		goto choose;					/* trust the chip's CAR */
++	if (b->soc_from_ext_en) {
++		b->ext_soc = oz8806_hw_soc_from_ext(b);		/* RTC spare - 1 */
++		if (b->ext_soc != -1 && b->ext_soc <= 100) {
++			cap = GG->fcc * b->ext_soc / 100;
++			goto choose;
++		}
++		b->retry = 0;
++		b->soc_from_ext_en = 0;
++	}
++	sc = oz8806_hw_save_capacity(b);
++	if (sc == -2) {
++		if (b->retry < 11) {
++			b->retry++;
++			goto after_init;
++		}
++		goto no_source;
++	}
++	if (sc != -1) {
++		cap = sc;
++		goto choose;
++	}
++	goto no_source;
++
++choose:
++	s = b->ext_soc != -1 ? b->ext_soc : cap * 100 / GG->fcc;
++	if (!b->flag_ocv_boot) {
++		GG->ocv_flag = 0;
++		afe_read_car(b, &BI->car);
++		if (BI->curr < 1 ? BI->car > 0 : BI->car >= 3) {
++			c = BI->car;
++			if (cap < c)
++				BI->rc = (c - cap > b->onepct || (unsigned int)b->ext_soc <= 100) ? c : cap;
++			else
++				BI->rc = (cap - c > b->onepct) ? c : cap;
++		} else {
++			if (iabs(b->init_soc - s) > 30 || (s < 6 && BI->volt < CFG->end_volt_mv - 50))
++				BI->rc = b->init_cap;
++			else
++				BI->rc = cap;
++		}
++	} else {
++		GG->ocv_flag = 1;
++		if (s < 91 || BI->soc < 91) {
++			if (BI->curr < 0)
++				BI->rc = (iabs(b->init_soc - s) < 21 &&
++					  (s > 5 || BI->volt >= CFG->end_volt_mv - 50)) ? cap : b->init_cap;
++			else
++				BI->rc = iabs(s - b->init_soc) < 31 ? cap : b->init_cap;
++		} else {
++			BI->rc = cap;
++		}
++	}
++	if (cap >= 0)
++		goto finish;
++no_source:
++	if (!b->flag_ocv_boot) {
++		afe_read_car(b, &BI->car);
++		if (BI->curr < 1 ? BI->car < 1 : BI->car < 3) {
++			BI->rc = b->init_cap;
++		} else {
++			c = BI->car;
++			if (c < b->onepct)
++				b->car_tol_pct = 30;
++			BI->rc = iabs(b->init_cap - c) > b->car_tol_pct * CFG->design_mah / 100 ?
++				 b->init_cap : c;
++			if (b->trust_car)
++				BI->rc = BI->car;
++		}
++	} else {
++		BI->rc = b->init_cap;
++	}
++finish:
++	if (BI->rc < 1) {
++		afe_read_cell_volt(b, &BI->volt);
++		BI->soc = (unsigned int)b->init_soc > 100 ? 50 : b->init_soc;
++		BI->car = BI->soc * CFG->design_mah / 100;
++		cap_car(b);
++		afe_write_car(b, BI->car);			/* W7 */
++		BI->prev_car = BI->rc = BI->car;
++	}
++	BI->rc = imin(BI->rc, GG->fcc + GG->fcc / 100 - 1);
++	BI->soc = BI->rc * 100 / GG->fcc;
++	if ((unsigned int)b->ext_soc <= 100 && BI->rc == b->ext_soc * GG->fcc / 100)
++		BI->soc = b->ext_soc;
++	BI->car = BI->rc;
++	cap_car(b);
++	afe_write_car(b, BI->car);				/* W7, every boot */
++	BI->prev_car = BI->car;
++	GG->rc_mirror = BI->rc;
++	GG->used = imax(GG->fcc - BI->rc, 0);
++	/* the counter says empty but the voltage doesn't: take the OCV level */
++	if (BI->soc < 1 && BI->volt > CFG->end_volt_mv && b->init_soc > 0) {
++		BI->soc = imin(b->init_soc, 99);
++		BI->rc = BI->car = BI->soc * GG->fcc / 100;
++		afe_write_car(b, BI->car);			/* W7 */
++		BI->prev_car = BI->car;
++		GG->rc_mirror = BI->rc;
++		GG->used = imax(GG->fcc - BI->rc, 0);
++	}
++	if (BI->soc < 1) {
++		GG->dis_end = 1;
++		BI->soc = 0;
++		GG->rc_mirror = 0;
++		GG->ocv_flag = 0;
++	}
++	if (BI->soc > 99) {
++		b->chg_end_done = 1;
++		GG->chg_end = 1;
++		BI->soc = 100;
++		GG->used = 0;
++		GG->b7 = 1;
++		GG->ocv_flag = 0;
++	}
++	if (b->flag_ocv_ok)
++		check_shutdwon_voltage(b);
++	b->last_soc = BI->soc;
++	GG->init_ok = 1;
++
++after_init:
++	if (!GG->init_ok)
++		return;
++	/* board offset, once, right after init */
++	r = afe_read_board_offset(b, &bo);
++	o = CFG->board_offset_ma;
++	if (o != bo && o != 0) {
++		afe_write_board_offset(b, o);			/* W6 */
++		return;
++	}
++	if (bmu_read_data() < 0) {
++		if ((unsigned int)(bo - 1) > 9)
++			afe_write_board_offset(b, 7);		/* W6 */
++		if (r >= 0 && (unsigned int)(bo - 1) < 9)
++			bo = bmu_read_data();			/* write dropped, read fails */
++	} else {
++		fbo = bmu_read_data();
++		if ((unsigned int)(fbo - bo + 2) > 4)
++			afe_write_board_offset(b, fbo);		/* W6 */
++	}
++	afe_read_board_offset(b, &bo);
++	if ((unsigned int)(bo - 1) > 9)
++		afe_write_board_offset(b, 7);			/* W6 */
++	afe_read_board_offset(b, &bo);
++}
++
++/* resume with no charger */
++void bmu_wake_up_chip(struct oz8806_bmu *b)
++{
++	int dis, k, c = 0, est;
++	long long dt;
++	u8 op;
++
++	dis = oz8806_hw_adapter(b) == 0 || BI->curr <= GG->dis_th;
++	b->resumed = 1;
++	b->now_sec = oz8806_hw_now_sec(b);
++	dt = b->now_sec - b->last_sec;
++	oz8806_wakeup_full_power(b);				/* W1 */
++	if (afe_register_read_byte(b, OZ_REG_OP_CTRL, &op) < 0 || (op & 0x40))
++		afe_register_write_byte(b, OZ_REG_OP_CTRL, 0x20);	/* W4 */
++	if (BI->soc > 99) {
++		BI->soc = 100;
++		BI->rc = imin(BI->rc, GG->fcc + GG->fcc / 100 - 1);
++	}
++	afe_read_current(b, &BI->curr);
++	afe_read_cell_volt(b, &BI->volt);
++	for (k = 0; k < 3; k++) {
++		if (afe_read_car(b, &c) >= 0) {
++			if (c != 0 && (dis || c >= 0))
++				break;
++			b->car_zero_cnt++;
++		}
++	}
++	/* port guard: no earlier poll, a clock step back, or a very long sleep */
++	if (b->last_sec == 0 || dt < 0)
++		dt = 60;
++	else if (dt > 864000)
++		dt = 864000;				/* 10 days keeps dt * 500 in an int */
++	est = dis ? (int)dt * -12 : (int)dt * 500;		/* expected change x1000 */
++	if (iabs(BI->car - c) > CFG->design_mah * 10 / 100 && (c - BI->car) * 1000 - est < 0) {
++		c = BI->car + est / 1000;
++		afe_write_car(b, c);				/* W7 */
++	}
++	if (c < 1) {
++		GG->b6 = GG->b7 = 0;
++		if (c < 0) {
++			if (BI->volt < CFG->cv_mv - 50)
++				c = BI->soc < 1 ? BI->rc : BI->soc * GG->fcc / 100 - 1;
++			else
++				c = GG->fcc - 1;
++			afe_write_car(b, c);			/* W7 */
++			BI->car = BI->prev_car = c;
++		}
++		if (dis) {
++			int s;
++
++			check_shutdwon_voltage(b);
++			s = calculate_soc_result(b);
++			if (s < BI->soc) {
++				BI->soc = s;
++				BI->rc = BI->car = BI->prev_car = s * GG->fcc / 100;
++				afe_write_car(b, BI->rc);	/* W7 */
++			}
++			if (BI->soc > 0)
++				return;
++			if (BI->volt > CFG->end_volt_mv) {
++				BI->soc = 1;
++				BI->rc = GG->fcc / 100;
++				GG->dis_end = 0;
++				return;
++			}
++			discharge_end_process(b);		/* W7 */
++			return;
++		}
++	} else if (dis) {
++		if (c > BI->car) {
++			c = 2 * BI->car - c;
++			afe_write_car(b, c);			/* W7: no rise while discharging */
++		}
++		return;
++	}
++	if (c < BI->car) {
++		c = 2 * BI->car - c;
++		afe_write_car(b, c);				/* W7: no fall while charging */
++	}
++}
++
++void bmu_power_down_chip(struct oz8806_bmu *b)
++{
++	afe_read_cell_temp(b, &BI->temp);
++	afe_read_cell_volt(b, &BI->volt);
++	afe_read_current(b, &BI->curr);
++	afe_read_car(b, &BI->car);
++	oz8806_chip_sleep(b);					/* W5 */
++}
++
++/* ---- reading checks and the logger sample, not in stock ---- */
++
++/* 1 if the readings of the last poll can be reported: the voltage and current
++ * were read and the voltage is a cell voltage, and the chip answers and isn't
++ * asleep (OP_CTRL bit 6). Also flags readings stuck while current flows
++ * (volt_frozen: the same raw voltage and current words 3 polls in a row).
++ * Clears the fresh flags, so the next check needs new reads. */
++int oz8806_reading_valid(struct oz8806_bmu *b)
++{
++	int ok = b->volt_fresh && b->curr_fresh &&
++		 BI->volt >= OZ8806_VALID_MIN_MV && BI->volt <= OZ8806_VALID_MAX_MV;
++	u8 op = 0;
++
++	if (b->wake_pending) {
++		if ((int)oz8806_hw_power_on_ms(b) < 2250)
++			ok = 0;
++		else
++			b->wake_pending = 0;
++	}
++	if (afe_register_read_byte(b, OZ_REG_OP_CTRL, &op) < 0) {
++		ok = 0;
++	} else {
++		b->asleep = !!(op & 0x40);
++		if (b->asleep)
++			ok = 0;
++	}
++	if (ok && iabs(BI->curr) > OZ8806_FROZEN_MA && b->volt_raw == b->prev_volt_raw &&
++	    b->curr_raw == b->prev_curr_raw)
++		b->volt_same++;
++	else
++		b->volt_same = 0;
++	b->prev_volt_raw = ok ? b->volt_raw : -1;
++	b->prev_curr_raw = ok ? b->curr_raw : -1;
++	b->volt_frozen = b->volt_same >= 2;
++	b->volt_fresh = b->curr_fresh = 0;
++	return ok;
++}
++
++/* before bmulib init: read the voltage and current and check them. The wake
++ * runs in both builds: stock's own wakes (W2, W4) are in init, which waits
++ * for this check to pass, so an asleep chip would never get there. */
++int oz8806_check_chip(struct oz8806_bmu *b)
++{
++	b->volt_fresh = b->curr_fresh = 0;
++	oz8806_wake_if_asleep(b);
++	afe_read_cell_volt(b, &BI->volt);
++	afe_read_current(b, &BI->curr);
++	return oz8806_reading_valid(b);
++}
++
++/* one bmu_polling_loop, then whether its readings are valid */
++int oz8806_poll(struct oz8806_bmu *b)
++{
++	b->volt_fresh = b->curr_fresh = 0;
++#ifndef CONFIG_OZ8806_WRITE
++	oz8806_wake_if_asleep(b);
++#endif
++	bmu_polling_loop(b);
++	return oz8806_reading_valid(b);
++}
++
++/* data_ok: set by a valid poll once init is done, cleared after
++ * OZ8806_BAD_POLLS invalid polls in a row. valid < 0: no poll ran.
++ * Returns 1 when data_ok changed. */
++int oz8806_track_valid_core(struct oz8806_bmu *b, int valid)
++{
++	int was = b->data_ok;
++
++	if (valid < 0)
++		return 0;
++	if (valid) {
++		b->bad_polls = 0;
++		if (GG->init_ok)
++			b->data_ok = 1;
++	} else if (++b->bad_polls >= OZ8806_BAD_POLLS) {
++		b->data_ok = 0;
++	}
++	return was != b->data_ok;
++}
++
++/* check_shutdwon_voltage() and the driver's step-down act below this */
++int oz8806_shutdown_mv(struct oz8806_bmu *b)
++{
++	return CFG->end_volt_mv - 50;
++}
++
++/* SOC to report: 0 % only once the voltage is at or below the shutdown
++ * voltage, else 1 %, so a drifted counter can't shut down a battery that
++ * isn't empty. */
++int oz8806_report_soc(struct oz8806_bmu *b)
++{
++	if (BI->soc < 1 && BI->volt > oz8806_shutdown_mv(b))
++		return 1;
++	return BI->soc;
++}
++
++/* Fresh voltage, current and CAR for the logger, outside the polls. Only the
++ * readings and the counted charge change, not the level. */
++int oz8806_sample(struct oz8806_bmu *b, struct oz8806_sample *s)
++{
++	int car = 0, ocv = 0, r;
++
++	r = afe_read_cell_volt(b, &BI->volt);
++	if (r >= 0)
++		r = afe_read_current(b, &BI->curr);
++	if (r >= 0)
++		r = afe_read_car(b, &car);
++	if (r < 0)
++		return r;
++	if (afe_read_ocv_volt(b, &ocv) < 0)
++		ocv = -1;
++	s->t_s = oz8806_hw_boottime_sec(b);
++	s->volt = BI->volt;
++	s->curr = BI->curr;
++	s->chip_ocv = ocv;
++	s->temp = BI->temp;
++	s->soc = BI->soc;
++	s->rc = BI->rc;
++	s->cc_uah = b->cc_uah;
++	s->rest_s = (int)(b->rest_prev_t - b->rest_t0);
++	return 0;
++}
+--- /dev/null
++++ b/drivers/power/supply/oz8806_bmulib.h
+@@ -0,0 +1,250 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Level maths for the OZ8806 gauge on the Titan Pocket. It follows the
++ * polling steps of the stock O2Micro bmulib ("2016.08.24/7.00.04") with the
++ * level counted by the coulomb counter and corrected from the OCV at rest.
++ * The core has no kernel dependencies so it also builds on the host
++ * (tools/check-pocket-oz8806-soc.py).
++ *
++ * All maths is 32-bit signed int with truncating division unless a comment
++ * says otherwise.
++ */
++#ifndef OZ8806_BMULIB_H
++#define OZ8806_BMULIB_H
++
++#ifdef __KERNEL__
++#include <linux/types.h>
++#else
++#include <stdint.h>
++#include <stdbool.h>
++typedef uint8_t u8;
++typedef uint16_t u16;
++typedef int16_t s16;
++typedef int64_t s64;
++#endif
++
++struct oz8806_pair { int32_t x; int32_t y; };
++
++/* Board and battery values the level maths uses */
++struct oz8806_config {
++	int32_t rsense;		/* current sense resistor, mOhm */
++	int32_t ntc_pullup;	/* NTC pull-up to ntc_ref_mv, Ohm */
++	int32_t ntc_ref_mv;	/* NTC reference, mV */
++	int32_t car_lsb;	/* CAR mAh = raw * car_lsb / rsense */
++	int32_t curr_lsb;	/* mA = raw * curr_lsb / rsense / 100 / 4 */
++	int32_t volt_lsb;	/* mV = (raw >> 4) * volt_lsb / 100 */
++	int32_t design_mah;	/* full-charge capacity */
++	int32_t cv_mv;		/* charge voltage */
++	int32_t end_current_ma;	/* charge taper current that counts as full */
++	int32_t end_volt_mv;	/* empty, under load */
++	int32_t board_offset_ma; /* current offset written to the chip */
++	uint8_t debug;		/* only counts CAR reads of 0 */
++};
++
++#include "oz8806_ntc.h"
++/* OCV to level, (mV, %) with mV rising: the measured table from
++ * tools/make-pocket-oz8806-ocv.py when it is there, else the placeholder */
++#if __has_include("oz8806_ocv.h")
++#include "oz8806_ocv.h"
++#else
++#include "oz8806_ocv_generic.h"
++#endif
++
++#define OZ8806_NTC_N	((int)(sizeof(oz8806_ntc) / sizeof(oz8806_ntc[0])))
++#define OZ8806_OCV_N	((int)(sizeof(oz8806_ocv) / sizeof(oz8806_ocv[0])))
++
++/* SoC GPIO 5 (hw_ver) selects the NTC pull-up: 1 is 24 kOhm, 0 is 120 kOhm */
++#define OZ8806_HWVER_GPIO	5
++#define OZ8806_HWVER1_PULLUP	24000
++#define OZ8806_HWVER0_PULLUP	120000
++
++#ifdef OZ8806_OCV_CAPACITY_MAH
++#define OZ8806_DESIGN_MAH	OZ8806_OCV_CAPACITY_MAH
++#else
++/* battery label; the stock driver used 4250 */
++#define OZ8806_DESIGN_MAH	4000
++#endif
++
++static const struct oz8806_config oz8806_board_config = {
++	.rsense = 10,
++	.ntc_pullup = OZ8806_HWVER1_PULLUP,
++	.ntc_ref_mv = 1800,
++	.car_lsb = 5,
++	.curr_lsb = 781,
++	.volt_lsb = 250,
++	.design_mah = OZ8806_DESIGN_MAH,
++	.cv_mv = 4400,
++	.end_current_ma = 300,
++	.end_volt_mv = 3450,
++	.board_offset_ma = 30,
++	.debug = 0,
++};
++
++/* battery state */
++struct oz8806_batt_info {
++	int op_bit0;	/* OP_CTRL bit 0 */
++	int car;	/* mAh read from the chip */
++	int soc;	/* % */
++	int volt;	/* mV */
++	int curr;	/* mA, charging positive */
++	int ocv;	/* mV */
++	int temp;	/* C */
++	int prev_car;
++	int rc;		/* remaining capacity, mAh */
++	int i2c_errors;
++};
++
++/* gas gauge state */
++struct oz8806_gas_gauge {
++	int car_max;		/* 0x28000 / rsense */
++	u8 dis_end;
++	u8 chg_end;
++	u8 b6, b7;		/* end flags, set by the end processes */
++	int rc_mirror;
++	int fcc;
++	int used;		/* fcc minus rc */
++	int chg_end_curr;	/* end_current + 2 */
++	int dis_th;		/* -10 mA: at or below is discharging */
++	u8 ocv_flag;		/* level came from a power-on OCV */
++	int ri;			/* cell resistance for the OCV lookups, mOhm */
++	u8 ext_temp;
++	u8 init_ok;
++};
++
++enum {
++	OZ_WAKE_NONE,
++	OZ_WAKE_WROTE,		/* wrote 0x20, bit 6 clear after */
++	OZ_WAKE_NOT_TAKEN,	/* wrote 0x20 twice, bit 6 still set or unreadable */
++	OZ_WAKE_PEC,		/* reg 8 bit 2 set, not written */
++	OZ_WAKE_REG8_FAIL,	/* reg 8 unreadable, not written */
++};
++
++struct oz8806_bmu {
++	struct oz8806_config cfg;	/* oz8806_board_config, ntc_pullup chosen */
++	struct oz8806_batt_info bi;
++	struct oz8806_gas_gauge gg;
++	int onepct;			/* design / 100 */
++
++	u8 flag_ocv_boot, flag_first, flag_ocv_ok, resumed;
++	u8 chg_end_done, dis_end_done, soc_from_ext_en, trust_car;
++	u8 file_save, retry, retry_max, car_tol_pct, car_err;
++	int init_soc, init_cap, last_soc, ext_soc, wait_cnt, car_zero_cnt;
++	long long last_sec, now_sec;
++
++	/* Read-only CAR emulation: virtual CAR raw = chip raw + car_off (16-bit) */
++	u16 car_off;
++
++	/* Whether the readings can be trusted.
++	 * The readers set volt_fresh, curr_fresh and temp_ok; oz8806_poll()
++	 * clears the fresh flags before each poll and checks them after.
++	 * data_ok: init done and the polls valid, so the readings can be reported. */
++	u8 volt_fresh, curr_fresh, temp_ok, asleep, volt_frozen;
++	/* temp_valid: the last temperature came from an NTC reading inside the
++	 * table, not the 25 C fallback or an old value; the charger needs it. */
++	u8 temp_valid;
++	int volt_raw, prev_volt_raw, curr_raw, prev_curr_raw, volt_same;
++	int data_ok, bad_polls;
++
++	/* Wake and sleep writes that are on without CONFIG_OZ8806_WRITE
++	 * (OP_CTRL only). wake_pending: readings are invalid until 2250 ms
++	 * after the wake write. wake_event: what the last wake attempt did,
++	 * for the driver to log. */
++	u8 wake_pending;
++	u8 wake_event;
++	u8 stopped;		/* sleep written at shutdown: no more wake writes */
++
++	/* Charge counted from the CAR, uAh, charging positive. Not changed by
++	 * the CAR writes: each write first counts up to the chip value, then
++	 * moves the reference (cc_ref, virtual CAR raw) to the value written. */
++	long long cc_uah;
++	u16 cc_ref;
++	u8 cc_ref_ok;
++
++	/* Rest: no charger, |current| at most OZ8806_REST_MA, and the counted
++	 * charge within that current since the last poll and since the rest
++	 * began (rest_t0, boot time s; rest_cc0, uAh). After OZ8806_REST_S the
++	 * OCV lookup is taken once (rest_done). If it differs by
++	 * OZ8806_REST_DEADBAND or more, the level moves one point every
++	 * OZ8806_REST_STEP_S toward it (rest_target, -1 if none) while the rest
++	 * lasts. */
++	long long rest_t0, rest_prev_t, rest_prev_cc, rest_cc0, rest_step_t;
++	u8 rest_done;
++	int rest_target;
++	int rest_ocv_mv, rest_soc;	/* last rested OCV and its level, -1 if none */
++
++	void *hw;			/* driver or host harness context */
++};
++
++/* Hardware hooks, given by the driver or the host harness. Reads are one try
++ * each and return the value (>= 0) or a negative error. */
++int oz8806_hw_read_byte(struct oz8806_bmu *b, u8 reg);
++int oz8806_hw_read_word(struct oz8806_bmu *b, u8 reg);
++int oz8806_hw_write_byte(struct oz8806_bmu *b, u8 reg, u8 val);
++#if defined(CONFIG_OZ8806_WRITE) || defined(CONFIG_OZ8806_WRITE_CAR)
++int oz8806_hw_write_word(struct oz8806_bmu *b, u8 reg, u16 val);
++#endif
++void oz8806_hw_set_addr(struct oz8806_bmu *b, u8 addr);
++void oz8806_hw_msleep(struct oz8806_bmu *b, unsigned int ms);
++unsigned int oz8806_hw_boot_ms(struct oz8806_bmu *b);
++unsigned int oz8806_hw_power_on_ms(struct oz8806_bmu *b);
++void oz8806_hw_reset_power_on_base(struct oz8806_bmu *b);
++long long oz8806_hw_now_sec(struct oz8806_bmu *b);
++long long oz8806_hw_boottime_sec(struct oz8806_bmu *b);	/* runs in suspend */
++int oz8806_hw_adapter(struct oz8806_bmu *b);
++int oz8806_hw_soc_from_ext(struct oz8806_bmu *b);
++int oz8806_hw_save_capacity(struct oz8806_bmu *b);
++
++/* entry points with the stock names */
++void oz8806_bmu_setup(struct oz8806_bmu *b, int ntc_pullup);
++void bmulib_init_chip(struct oz8806_bmu *b);
++void bmu_polling_loop(struct oz8806_bmu *b);
++void bmu_wake_up_chip(struct oz8806_bmu *b);
++void bmu_power_down_chip(struct oz8806_bmu *b);
++void charge_end_process(struct oz8806_bmu *b);
++void discharge_end_process(struct oz8806_bmu *b);
++void oz8806_wakeup_full_power(struct oz8806_bmu *b);
++void oz8806_wake_if_asleep(struct oz8806_bmu *b);
++void oz8806_chip_sleep(struct oz8806_bmu *b);
++int oz8806_temp_read(struct oz8806_bmu *b, int *mv);
++int afe_read_current(struct oz8806_bmu *b, int *ma);
++int afe_read_cell_volt(struct oz8806_bmu *b, int *mv);
++
++/* SOC core, exposed for the host test */
++int one_latitude_table(int n, const struct oz8806_pair *t, int x);
++int calculate_soc_result(struct oz8806_bmu *b);
++
++/* Reading checks, not in stock */
++#define OZ8806_VALID_MIN_MV	2500
++#define OZ8806_VALID_MAX_MV	4600
++#define OZ8806_FROZEN_MA	50	/* |current| above this should move the readings */
++#define OZ8806_BAD_POLLS	3	/* invalid polls in a row before data_ok drops */
++int oz8806_reading_valid(struct oz8806_bmu *b);
++int oz8806_check_chip(struct oz8806_bmu *b);
++int oz8806_poll(struct oz8806_bmu *b);
++int oz8806_track_valid_core(struct oz8806_bmu *b, int valid);
++int oz8806_shutdown_mv(struct oz8806_bmu *b);
++int oz8806_report_soc(struct oz8806_bmu *b);
++
++/* Rest and OCV. 30 mA is about C/140: the IR drop is a few mV and the cell
++ * relaxes to within about 5 mV of its OCV in 30 min at room temperature.
++ * 3 % is about what 5 mV of OCV error is worth in the flat middle of the
++ * curve, so smaller differences are left to the counter. Away from 10..45 C
++ * the OCV moves with temperature, so no correction there. */
++#define OZ8806_REST_MA		30
++#define OZ8806_REST_S		1800
++#define OZ8806_REST_DEADBAND	3
++#define OZ8806_REST_STEP_S	60	/* one point a minute, no visible jumps */
++#define OZ8806_REST_SLACK_UAH	1000	/* two CAR steps */
++#define OZ8806_REST_TMIN	10
++#define OZ8806_REST_TMAX	45
++
++/* one sample for the OCV run logger: fresh voltage, current and counted charge */
++struct oz8806_sample {
++	long long t_s;		/* boot time */
++	int volt, curr, chip_ocv, temp, soc, rc;
++	long long cc_uah;
++	int rest_s;		/* seconds at rest, 0 if not */
++};
++int oz8806_sample(struct oz8806_bmu *b, struct oz8806_sample *s);
++
++#endif
+--- /dev/null
++++ b/drivers/power/supply/oz8806_ntc.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Generated by tools/make-pocket-oz8806-ntc.py, do not edit.
++ * Cell NTC resistance (Ohm) to temperature (C) from the Beta formula:
++ * 10000 Ohm at 22 C, Beta 3312 K, 5 C steps.
++ */
++#ifndef OZ8806_NTC_H
++#define OZ8806_NTC_H
++
++static const struct oz8806_pair oz8806_ntc[29] = {
++	{680, 115}, {760, 110}, {852, 105}, {958, 100},
++	{1081, 95}, {1223, 90}, {1389, 85}, {1583, 80},
++	{1812, 75}, {2081, 70}, {2400, 65}, {2781, 60},
++	{3235, 55}, {3782, 50}, {4443, 45}, {5247, 40},
++	{6229, 35}, {7437, 30}, {8932, 25}, {10796, 20},
++	{13134, 15}, {16089, 10}, {19854, 5}, {24690, 0},
++	{30953, -5}, {39140, -10}, {49945, -15}, {64349, -20},
++	{83759, -25},
++};
++
++#endif
+--- /dev/null
++++ b/drivers/power/supply/oz8806_ocv_generic.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Generated by tools/make-pocket-oz8806-ocv.py --generic, do not edit.
++ * Placeholder OCV (mV) to level (%): a smooth model curve for a 4.4 V Li-ion
++ * cell, not measured. Used only when there is no oz8806_ocv.h; the level is
++ * approximate until a measured table is added.
++ */
++#ifndef OZ8806_OCV_GENERIC_H
++#define OZ8806_OCV_GENERIC_H
++
++static const struct oz8806_pair oz8806_ocv[21] = {
++	{3400, 0}, {3573, 5}, {3629, 10}, {3664, 15},
++	{3696, 20}, {3729, 25}, {3763, 30}, {3799, 35},
++	{3836, 40}, {3875, 45}, {3915, 50}, {3957, 55},
++	{4000, 60}, {4045, 65}, {4091, 70}, {4139, 75},
++	{4188, 80}, {4239, 85}, {4291, 90}, {4345, 95},
++	{4400, 100},
++};
++
++#endif
+--- /dev/null
++++ b/include/linux/power/oz8806.h
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * OZ8806 gauge calls, with the stock Titan Pocket names so mtk_battery can
++ * call them when it is ported. -1 means not ready, as stock.
++ */
++#ifndef __LINUX_POWER_OZ8806_H
++#define __LINUX_POWER_OZ8806_H
++
++#include <linux/types.h>
++
++struct i2c_client;
++
++int oz8806_get_soc(void);
++int oz8806_get_soc_from_ext(void);
++int oz8806_get_battry_current(void);	/* mA, charging positive, live read */
++int oz8806_get_battery_voltage(void);	/* mV, live read */
++int oz8806_get_battery_temp(void);	/* C */
++int oz8806_get_charger_temp(void);	/* C, -1 unless the last NTC reading is valid */
++int oz8806_get_valid_temp(int *temp_c);	/* 0 and C, or -ENODATA as above */
++int oz8806_get_remaincap(void);		/* mAh */
++int oz8806_vbus_voltage(void);
++int oz8806_get_simulated_temp(void);
++int oz8806_get_init_status(void);
++int oz8806_gauge_int_done(void);	/* stock gauge_int_done */
++int oz8806_get_adapter_status(void);	/* stock get_adapter_status: 0 none, 1 USB, 4 AC */
++int oz8806_get_save_capacity(void);
++void oz8806_set_save_capacity(int mah);
++int oz8806_get_bmu_init_done(void);
++struct i2c_client *oz8806_get_client(void);
++void oz8806_update(void);
++/* the logger's CSV line (see oz8806.c), length or a negative error */
++int oz8806_log_line(char *buf, size_t size);
++
++/* For the charger driver, once ported: charger type in the mt_get_charger_type()
++ * numbering (0 none, 1 SDP, 2 CDP, others AC) and the charge-done flag. */
++void oz8806_set_charger_info(int charger_type, bool charge_done);
++/* Battery status from the charger events (POWER_SUPPLY_STATUS_*) */
++void oz8806_set_battery_status(int status);
++/* The battery supply's hook, called when that status changes */
++void oz8806_set_changed_cb(void (*cb)(void *arg), void *arg);
++
++/* For the battery supply: values from the last oz8806_update() */
++struct oz8806_report {
++	int soc;	/* % */
++	int volt;	/* mV */
++	int curr;	/* mA */
++	int temp;	/* C */
++	int temp_ok;	/* 0 when every NTC read failed */
++	int rc;		/* mAh */
++	int fcc;	/* mAh */
++	int status;	/* POWER_SUPPLY_STATUS_* */
++};
++/* -ENODATA until the gauge has valid readings, and while its polls fail */
++int oz8806_get_report(struct oz8806_report *r);
++
++#endif

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Hardware contract for later integration. Not included by the audit product.
+TARGET_ARCH := arm64
+TARGET_ARCH_VARIANT := armv8-a
+TARGET_CPU_VARIANT := cortex-a53
+TARGET_CPU_ABI := arm64-v8a
+TARGET_2ND_ARCH := arm
+TARGET_2ND_ARCH_VARIANT := armv8-a
+TARGET_2ND_CPU_VARIANT := cortex-a53
+TARGET_2ND_CPU_ABI := armeabi-v7a
+TARGET_2ND_CPU_ABI2 := armeabi
+TARGET_BOARD_PLATFORM := mt6771
+TARGET_BOOTLOADER_BOARD_NAME := g66v71c2k_dfl_tee
+BOARD_BOOT_HEADER_VERSION := 2
+BOARD_KERNEL_BASE := 0x40000000
+BOARD_KERNEL_PAGESIZE := 2048
+BOARD_KERNEL_OFFSET := 0x00080000
+BOARD_RAMDISK_OFFSET := 0x15000000
+BOARD_KERNEL_TAGS_OFFSET := 0x14000000
+BOARD_DTB_OFFSET := 0x14000000
+BOARD_BOOTIMAGE_PARTITION_SIZE := 33554432
+BOARD_RECOVERYIMAGE_PARTITION_SIZE := 33554432
+BOARD_SUPER_PARTITION_SIZE := 4831838208
+BOARD_SUPER_PARTITION_GROUPS := pocket_dynamic
+BOARD_POCKET_DYNAMIC_SIZE := 4829741056
+BOARD_POCKET_DYNAMIC_PARTITION_LIST := system vendor product
+BOARD_SUPER_PARTITION_METADATA_DEVICE := super
+BOARD_BUILD_SUPER_IMAGE_BY_DEFAULT := false
+# md_udc mounts at /metadata in first stage; switch-root needs the dir in the system root.
+BOARD_USES_METADATA_PARTITION := true
+# The cache partition mounts at /cache, so the root needs a dir there, not the /data/cache link.
+BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
+BOARD_VNDK_VERSION := 30
+BOARD_SEPOLICY_VERS := 30.0
+TARGET_KERNEL_SOURCE := kernel/unihertz/mt6771
+# Defconfig, complete public DTS and product/vendor integration are deliberately unset.
+BOARD_MKBOOTIMG_ARGS += --kernel_offset $(BOARD_KERNEL_OFFSET)
+BOARD_MKBOOTIMG_ARGS += --ramdisk_offset $(BOARD_RAMDISK_OFFSET)
+BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
+BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)

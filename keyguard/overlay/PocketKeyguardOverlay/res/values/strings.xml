@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <!-- Key width to height. Wider keys use the square screen's width, as stock's did. -->
+    <string name="num_pad_key_ratio" translatable="false">1.4</string>
+</resources>

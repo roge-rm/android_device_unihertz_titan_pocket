@@ -1,0 +1,535 @@
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/Kconfig
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0
++
++config MTK_CCCI_PLATFORM_DEPS
++	bool "MT6771 platform calls for the eccci modem driver"
++	depends on MACH_MT6771 && MTK_PMIC_CHIP_MT6358 && MFD_MT6397 && MEDIATEK_SOLUTION
++	help
++	  The calls the 4.14 eccci driver makes outside itself: VMODEM
++	  through the MT6358, the clock buffer flight mode bit, the SPM
++	  AP-to-MD clock source request, and logging stubs for PBM,
++	  vcorefs and AEE. Same names and prototypes as 4.14.
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/Makefile
+@@ -0,0 +1,11 @@
++# SPDX-License-Identifier: GPL-2.0
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include/clkbuf_v1
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include/clkbuf_v1/$(MTK_PLATFORM)
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include/spm_v4
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include/vcorefs_v3
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/pmic
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat/$(MTK_PLATFORM)/include
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
++
++obj-$(CONFIG_MTK_CCCI_PLATFORM_DEPS) += ccci_pmic_regmap.o vmd1_pmic.o clkbuf_md.o spm_mdsrc.o ccci_platform_stubs.o
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/ccci_platform.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __CCCI_PLATFORM_H__
++#define __CCCI_PLATFORM_H__
++
++struct regmap;
++
++/* The MT6358 regmap (over pwrap) U's mfd made, or NULL before it binds. Accesses can sleep. */
++struct regmap *ccci_pmic_regmap(void);
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/ccci_pmic_regmap.c
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * The MT6358 regmap for the eccci platform calls. 4.14 wrote these PMIC
++ * registers with pmic_config_interface; U has no such API, so the writes
++ * go through the regmap the MT6358 mfd uses, as the connectivity adapter
++ * (0040) and the audio codec (0044) do.
++ */
++
++#include <linux/kernel.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/mfd/mt6397/core.h>
++
++#include "ccci_platform.h"
++
++static struct regmap *pmic_map;
++
++struct regmap *ccci_pmic_regmap(void)
++{
++	struct device_node *np;
++	struct platform_device *pdev;
++	struct mt6397_chip *chip;
++	struct regmap *map = READ_ONCE(pmic_map);
++
++	if (map)
++		return map;
++	np = of_find_compatible_node(NULL, NULL, "mediatek,mt6358");
++	if (!np)
++		return NULL;
++	pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!pdev)
++		return NULL;
++	chip = platform_get_drvdata(pdev);
++	if (chip)
++		map = chip->regmap;
++	put_device(&pdev->dev);
++	if (map)
++		WRITE_ONCE(pmic_map, map);
++	return map;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/vmd1_pmic.c
+@@ -0,0 +1,93 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * VMODEM for MD1, from 4.14 pmic/mt6358/v1/pmic.c. Stock reads the VMODEM
++ * voltage the bootloader set (RG_BUCK_VMODEM_VOSEL) at PMIC probe and
++ * writes the same value back each time eccci powers MD1 on. Power off only
++ * logs. Same here, with the read at late_initcall_sync once the MT6358
++ * regmap exists; a call before that records the value then, as stock's
++ * fallback does.
++ */
++
++#define pr_fmt(fmt) "ccci_plat: " fmt
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/regmap.h>
++
++#include <upmu_common.h>
++#include "include/pmic_api_buck.h"
++#include "ccci_platform.h"
++
++static unsigned short g_vmodem_vosel;
++
++static int vmodem_get(struct regmap *map, unsigned int addr,
++		      unsigned int mask, unsigned int shift)
++{
++	unsigned int val;
++
++	if (regmap_read(map, addr, &val))
++		return -EIO;
++	return (val >> shift) & mask;
++}
++
++static int record_md_vosel(void)
++{
++	struct regmap *map = ccci_pmic_regmap();
++	int vosel;
++
++	if (!map)
++		return -EPROBE_DEFER;
++	vosel = vmodem_get(map, PMIC_RG_BUCK_VMODEM_VOSEL_ADDR,
++			   PMIC_RG_BUCK_VMODEM_VOSEL_MASK,
++			   PMIC_RG_BUCK_VMODEM_VOSEL_SHIFT);
++	if (vosel < 0)
++		return vosel;
++	g_vmodem_vosel = vosel;
++	pr_info("[%s] vmodem_vosel = 0x%x\n", __func__, g_vmodem_vosel);
++	return 0;
++}
++
++static int __init vmd1_record_init(void)
++{
++	if (record_md_vosel())
++		pr_notice("[%s] no MT6358 regmap yet, vmodem vosel not recorded\n",
++			  __func__);
++	return 0;
++}
++late_initcall_sync(vmd1_record_init);
++
++/* [Export API] */
++void vmd1_pmic_setting_on(void)
++{
++	struct regmap *map = ccci_pmic_regmap();
++	int da;
++
++	if (!map) {
++		pr_err("[%s] no MT6358 regmap, vmodem left as is\n", __func__);
++		return;
++	}
++	/* 1.Call PMIC driver API configure VMODEM voltage */
++	if (g_vmodem_vosel != 0) {
++		regmap_update_bits(map, PMIC_RG_BUCK_VMODEM_VOSEL_ADDR,
++				   PMIC_RG_BUCK_VMODEM_VOSEL_MASK <<
++				   PMIC_RG_BUCK_VMODEM_VOSEL_SHIFT,
++				   g_vmodem_vosel <<
++				   PMIC_RG_BUCK_VMODEM_VOSEL_SHIFT);
++	} else {
++		pr_notice("[%s] vmodem vosel has not recorded!\n", __func__);
++		record_md_vosel();
++	}
++	da = vmodem_get(map, PMIC_DA_VMODEM_VOSEL_ADDR,
++			PMIC_DA_VMODEM_VOSEL_MASK, PMIC_DA_VMODEM_VOSEL_SHIFT);
++	if (da != g_vmodem_vosel)
++		pr_notice("[%s] vmodem vosel = 0x%x, da_vosel = 0x%x",
++			  __func__,
++			  vmodem_get(map, PMIC_RG_BUCK_VMODEM_VOSEL_ADDR,
++				     PMIC_RG_BUCK_VMODEM_VOSEL_MASK,
++				     PMIC_RG_BUCK_VMODEM_VOSEL_SHIFT), da);
++}
++
++void vmd1_pmic_setting_off(void)
++{
++	pr_debug("%s\n", __func__);
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/clkbuf_md.c
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * The clock buffer calls eccci makes, from 4.14 clkbuf_v1 mtk_clkbuf_ctl.c
++ * and mt6771/mtk_clkbuf_hw.c. MT6771 runs the buffers from the MT6358
++ * (is_pmic_clkbuf is true), so the RF driving current and AFC calls return
++ * without touching anything, and flight mode sets or clears XO_BB_LPM_CEL
++ * (DCXO_CW23 bit 0).
++ *
++ * Stock's clk_buf_init makes no PMIC write on this board in the kernel
++ * (the init writes are under #ifndef __KERNEL__, CLKBUF_USE_BBLPM isn't
++ * defined for MT6771, the board boots from UFS, has NFC and enables
++ * XO 2, 3, 4 and 7), so it isn't ported. clk_buf_ctrl and the XO status
++ * calls stay in the connectivity adapter (0040).
++ */
++
++#define pr_fmt(fmt) "ccci_plat: " fmt
++
++#include <linux/kernel.h>
++#include <linux/regmap.h>
++
++#include <mtk_clkbuf_ctl.h>
++#include <upmu_common.h>
++#include "ccci_platform.h"
++
++/* false: rf_clkbuf, true: pmic_clkbuf */
++static const bool is_pmic_clkbuf = true;
++static bool g_is_flightmode_on;
++
++void clk_buf_ctrl_bblpm_hw(short on)
++{
++	struct regmap *map;
++	unsigned int cw23 = 0;
++
++	if (!is_pmic_clkbuf)
++		return;
++
++	map = ccci_pmic_regmap();
++	if (!map) {
++		pr_err("%s(%u): no MT6358 regmap\n", __func__, on ? 1 : 0);
++		return;
++	}
++	if (on)
++		regmap_update_bits(map, PMIC_XO_BB_LPM_CEL_ADDR,
++				   PMIC_XO_BB_LPM_CEL_MASK << PMIC_XO_BB_LPM_CEL_SHIFT,
++				   0x1 << PMIC_XO_BB_LPM_CEL_SHIFT);
++	else
++		regmap_update_bits(map, PMIC_XO_BB_LPM_CEL_ADDR,
++				   PMIC_XO_BB_LPM_CEL_MASK << PMIC_XO_BB_LPM_CEL_SHIFT,
++				   0x0 << PMIC_XO_BB_LPM_CEL_SHIFT);
++
++	regmap_read(map, PMIC_XO_BB_LPM_CEL_ADDR, &cw23);
++	pr_debug("%s(%u): CW23=0x%x\n", __func__, (on ? 1 : 0), cw23);
++}
++
++/* for spm driver use */
++bool is_clk_buf_under_flightmode(void)
++{
++	return g_is_flightmode_on;
++}
++
++/* for ccci driver to notify this */
++void clk_buf_set_by_flightmode(bool is_flightmode_on)
++{
++	g_is_flightmode_on = is_flightmode_on;
++	if (is_flightmode_on)
++		clk_buf_ctrl_bblpm_hw(true);
++	else
++		clk_buf_ctrl_bblpm_hw(false);
++}
++
++void clk_buf_get_swctrl_status(enum CLK_BUF_SWCTRL_STATUS_T *status)
++{
++	/* stock returns here for a PMIC clock buffer */
++}
++
++/*
++ * Let caller get driving current setting of RF clock buffer
++ * Caller: ccci & ccci will send it to modem
++ */
++void clk_buf_get_rf_drv_curr(void *rf_drv_curr)
++{
++	/* stock returns here for a PMIC clock buffer */
++}
++
++/* Called by ccci driver to keep afcdac value sent from modem */
++void clk_buf_save_afc_val(unsigned int afcdac)
++{
++	/* stock returns here for a PMIC clock buffer */
++}
++
++bool is_clk_buf_from_pmic(void)
++{
++	return true;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/spm_mdsrc.c
+@@ -0,0 +1,126 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * SPM calls eccci makes, from 4.14 spm_v4/mtk_spm_sleep_mt6771.c.
++ * spm_ap_mdsrc_req asks ATF (SMC MTK_SIP_KERNEL_SPM_AP_MDSRC_REQ) to raise
++ * or drop the AP's request for the modem's 26 MHz source, counted, and on
++ * raise waits for the ack in AP_MDSRC_REQ. spm_is_md1_sleep reads MD1's
++ * clock enable from PCM_REG13_DATA; eccci polls it when it stops MD1.
++ * The kernel only reads SPM here; the request itself is written by ATF.
++ * These override the weak versions in ccci_util_dummy.c.
++ */
++
++#define pr_fmt(fmt) "[SPM] " fmt
++
++#include <linux/delay.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/spinlock.h>
++
++#include <mtk_secure_api.h>
++
++/* SPM registers, from 4.14 mtk_spm_reg_mt6771.h and pcm_def_mt6771.h */
++#define PCM_REG13_DATA_OFS	0x134
++#define AP_MDSRC_REQ_OFS	0x430
++#define R13_MD1_SRCCLKENA	(1U << 2)
++#define R13_MD1_APSRC_REQ	(1U << 3)
++#define AP_MDSMSRC_ACK_LSB	(1U << 4)
++
++static void __iomem *mdsrc_spm_base;
++static DEFINE_SPINLOCK(__spm_lock);
++int spm_ap_mdsrc_req_cnt;
++
++#define spm_read(ofs)	readl(mdsrc_spm_base + (ofs))
++#define SMC_CALL(_name, _arg0, _arg1, _arg2) \
++	mt_secure_call(_name, _arg0, _arg1, _arg2, 0)
++
++/* Maps SPM from the mediatek,sleep node as 4.14 spm_module_init does; the board DT leaves it disabled, which of_iomap ignores. */
++static int __init spm_mdsrc_init(void)
++{
++	struct device_node *node;
++
++	node = of_find_compatible_node(NULL, NULL, "mediatek,sleep");
++	if (!node) {
++		pr_err("%s: no mediatek,sleep node\n", __func__);
++		return 0;
++	}
++	mdsrc_spm_base = of_iomap(node, 0);
++	of_node_put(node);
++	if (!mdsrc_spm_base)
++		pr_err("%s: SPM map failed\n", __func__);
++	return 0;
++}
++subsys_initcall(spm_mdsrc_init);
++
++bool spm_is_md1_sleep(void)
++{
++	if (!mdsrc_spm_base)
++		return true;
++	return !(spm_read(PCM_REG13_DATA_OFS) & R13_MD1_SRCCLKENA);
++}
++EXPORT_SYMBOL(spm_is_md1_sleep);
++
++void spm_ap_mdsrc_req(u8 set)
++{
++	unsigned long flags;
++	u32 i = 0;
++	u32 md_sleep = 0;
++
++	if (!mdsrc_spm_base) {
++		pr_err("%s(%u): SPM not mapped\n", __func__, set);
++		return;
++	}
++
++	if (set) {
++		spin_lock_irqsave(&__spm_lock, flags);
++
++		if (spm_ap_mdsrc_req_cnt < 0) {
++			pr_err("warning: set = %d, spm_ap_mdsrc_req_cnt = %d\n",
++			       set, spm_ap_mdsrc_req_cnt);
++			spin_unlock_irqrestore(&__spm_lock, flags);
++		} else {
++			spm_ap_mdsrc_req_cnt++;
++
++			SMC_CALL(MTK_SIP_KERNEL_SPM_AP_MDSRC_REQ, 1, 0, 0);
++
++			spin_unlock_irqrestore(&__spm_lock, flags);
++
++			/* if md_apsrc_req = 1'b0, */
++			/* wait 26M settling time (3ms) */
++			if ((spm_read(PCM_REG13_DATA_OFS) &
++			     R13_MD1_APSRC_REQ) == 0) {
++				md_sleep = 1;
++				mdelay(3);
++			}
++
++			/* Check ap_mdsrc_ack = 1'b1 */
++			while ((spm_read(AP_MDSRC_REQ_OFS) &
++				AP_MDSMSRC_ACK_LSB) == 0) {
++				if (i++ < 10) {
++					mdelay(1);
++				} else {
++					pr_err("WARNING: MD SLEEP = %d, %s CAN NOT polling AP_MD1SRC_ACK\n",
++					       md_sleep, __func__);
++					break;
++				}
++			}
++		}
++	} else {
++		spin_lock_irqsave(&__spm_lock, flags);
++
++		spm_ap_mdsrc_req_cnt--;
++
++		if (spm_ap_mdsrc_req_cnt < 0) {
++			pr_err("warning: set = %d, spm_ap_mdsrc_req_cnt = %d\n",
++			       set, spm_ap_mdsrc_req_cnt);
++		} else {
++			if (spm_ap_mdsrc_req_cnt == 0)
++				SMC_CALL(MTK_SIP_KERNEL_SPM_AP_MDSRC_REQ,
++					 0, 0, 0);
++		}
++
++		spin_unlock_irqrestore(&__spm_lock, flags);
++	}
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccci_platform/ccci_platform_stubs.c
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Logging stubs for the eccci calls into drivers this tree leaves out:
++ * PBM (pbm_v3), vcorefs (vcorefs_v3) and AEE. Prototypes as 4.14.
++ */
++
++#define pr_fmt(fmt) "ccci_plat: " fmt
++
++#include <linux/bitops.h>
++#include <linux/kernel.h>
++
++#include <mach/mtk_pbm.h>
++#include <mtk_vcorefs_manager.h>
++#include <mt-plat/aee.h>
++
++/* PBM budgets MD1's power against the CPU and GPU; without pbm_v3 nothing is budgeted. */
++void kicker_pbm_by_md(enum pbm_kicker kicker, bool status)
++{
++	pr_info("%s(%d, %d): no PBM\n", __func__, kicker, status);
++}
++
++/*
++ * No Vcore DVFS: every request fails with -ENODEV as the inline stub this
++ * replaces did, so mmdvfs and audio see what they saw before. Logged once
++ * per kicker; mmdvfs and audio call this often.
++ */
++static unsigned long vcorefs_logged;
++
++int vcorefs_request_dvfs_opp(enum dvfs_kicker kicker, enum dvfs_opp opp)
++{
++	if ((unsigned int)kicker < BITS_PER_LONG &&
++	    !test_and_set_bit(kicker, &vcorefs_logged))
++		pr_info("%s(%d, %d): no vcorefs, -ENODEV (logged once per kicker)\n",
++			__func__, kicker, opp);
++	return -ENODEV;
++}
++EXPORT_SYMBOL(vcorefs_request_dvfs_opp);
++
++/* Modem exception report; no AEE, so only the detail line is kept, in dmesg. */
++void aed_md_exception_api(const int *log, int log_size, const int *phy,
++			  int phy_size, const char *detail, const int db_opt)
++{
++	pr_err("%s: no AEE, modem exception not saved (log %d, phy %d bytes): %s\n",
++	       __func__, log_size, phy_size, detail ? detail : "");
++}
++EXPORT_SYMBOL(aed_md_exception_api);
+--- /dev/null
++++ b/drivers/misc/mediatek/pmic/include/pmic_api_buck.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* 4.14's PMIC buck API header, MT6358 only; eccci includes it as "include/pmic_api_buck.h". */
++#ifndef _PMIC_API_BUCK_H_
++#define _PMIC_API_BUCK_H_
++
++#ifdef CONFIG_MTK_PMIC_CHIP_MT6358
++#include "mt6358/mtk_pmic_api_buck.h"
++#endif
++
++#endif				/* _PMIC_API_BUCK_H_ */
+--- /dev/null
++++ b/drivers/misc/mediatek/pmic/include/mt6358/mtk_pmic_api_buck.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* The VMODEM calls from 4.14's MT6358 buck API; the low power table calls aren't in this tree. */
++#ifndef _MT_PMIC_API_BUCK_H_
++#define _MT_PMIC_API_BUCK_H_
++
++void vmd1_pmic_setting_on(void);
++void vmd1_pmic_setting_off(void);
++
++#endif
+--- a/drivers/misc/mediatek/Kconfig
++++ b/drivers/misc/mediatek/Kconfig
+@@ -85,6 +85,9 @@
+ # FS16xx smart amp raw I2C node
+ source "drivers/misc/mediatek/smartpa/Kconfig"
+ 
++# PMIC, clock buffer, SPM and stub calls for the eccci modem driver
++source "drivers/misc/mediatek/ccci_platform/Kconfig"
++
+ # Sensor hub stack, stock's Sensors menu
+ menu "Sensors"
+ 
+--- a/drivers/misc/mediatek/Makefile
++++ b/drivers/misc/mediatek/Makefile
+@@ -55,6 +55,8 @@
+ obj-$(CONFIG_NFC_CHIP_SUPPORT) += nfc/
+ # FS16xx smart amp raw I2C node /dev/smartpa_i2c
+ obj-$(CONFIG_MTK_SMARTPA_FS16XX_I2C) += smartpa/
++# eccci platform calls: VMODEM, clock buffer flight mode, SPM MD source, PBM/vcorefs/AEE stubs
++obj-$(CONFIG_MTK_CCCI_PLATFORM_DEPS) += ccci_platform/
+ # Sensor hub stack: hwmon misc devices and the hub sensors over the SCP
+ ifeq ($(subst ",,$(CONFIG_MTK_SENSOR_ARCHITECTURE)),1.0)
+ obj-y += sensors-1.0/
+--- a/drivers/power/supply/mediatek/Makefile
++++ b/drivers/power/supply/mediatek/Makefile
+@@ -16,6 +16,7 @@
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/include
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat/$(MTK_PLATFORM)/include
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
++subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/pmic/include
+ 
+ # GM3.0 (battery/) is left out: the Titan Pocket reports and charges from the
+ # OZ8806, through mtk_battery_intf.c.
+--- a/drivers/power/supply/mediatek/charger/Makefile
++++ b/drivers/power/supply/mediatek/charger/Makefile
+@@ -19,6 +19,7 @@
+ subdir-ccflags-$(CONFIG_USB_MTK_HDRC) += -I$(srctree)/drivers/misc/mediatek/usb20/
+ subdir-ccflags-$(CONFIG_MTK_PMIC_CHIP_MT6355) += -I$(srctree)/drivers/misc/mediatek/pmic/include/mt6355
+ subdir-ccflags-$(CONFIG_MTK_PMIC_CHIP_MT6356) += -I$(srctree)/drivers/misc/mediatek/pmic/include/mt6356
++subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/pmic/include
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/typec/tcpc/inc
+ subdir-ccflags-y += -I$(srctree)/drivers/power/supply/mediatek/misc/
+ subdir-ccflags-y += -I$(srctree)/drivers/power/supply/mediatek/battery/
+--- a/drivers/power/supply/mediatek/misc/Makefile
++++ b/drivers/power/supply/mediatek/misc/Makefile
+@@ -16,6 +16,7 @@
+ subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/include
+ subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/include/mt-plat/$(MTK_PLATFORM)/include
+ subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/include/mt-plat
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/pmic/include
+ 
+ 
+ obj-y += mtk_gauge_time_service.o

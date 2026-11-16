@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- The built-in keyboard's layout. Android 16 puts a layout over every full keyboard, picked
+     from the IME language unless one matches the keyboard's vendor and product IDs. This one
+     matches aw9523-key (0, 0) and carries its Alt layer. No code: the system only reads the
+     receiver's meta-data. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        package="org.lineageos.pocket.keyboardlayout">
+    <application android:hasCode="false" android:label="@string/app_label">
+        <receiver android:name=".KeyboardLayouts"
+                android:label="@string/collection_label"
+                android:exported="true">
+            <intent-filter>
+                <action android:name="android.hardware.input.action.QUERY_KEYBOARD_LAYOUTS" />
+            </intent-filter>
+            <meta-data android:name="android.hardware.input.metadata.KEYBOARD_LAYOUTS"
+                    android:resource="@xml/keyboard_layouts" />
+        </receiver>
+    </application>
+</manifest>

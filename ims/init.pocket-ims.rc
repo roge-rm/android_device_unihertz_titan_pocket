@@ -1,0 +1,10 @@
+# Vendor IMS switches stock ImsService reads (MODEM_PORT.md, milestone 8).
+# Runs after init.rc's load_persist_props, so these win over vendor build.prop and /data.
+on post-fs-data
+    # Otherwise ImsConfigImpl turns VoLTE off for carriers missing from vendor
+    # libcarrierconfig's IMS resource list, Fido 302370 among them.
+    setprop persist.vendor.mtk_dynamic_ims_switch 0
+    # Video and Wi-Fi video calling need libmtk_vt_wrapper.so, which we don't ship;
+    # with these on, ImsService crashes loading it.
+    setprop persist.vendor.vilte_support 0
+    setprop persist.vendor.viwifi_support 0

@@ -1,0 +1,8 @@
+# Binder names stock com.mediatek.ims publishes (ImsApp.onCreate, and WfoService even
+# without Wi-Fi calling), labelled as in stock's system_ext_service_contexts.
+mtkIms u:object_r:radio_service:s0
+imsa u:object_r:radio_service:s0
+wfo u:object_r:radio_service:s0
+mwis u:object_r:radio_service:s0
+# System-side Bluetooth audio provider for the Bluetooth stack.
+android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/sysbta u:object_r:hal_audio_service:s0

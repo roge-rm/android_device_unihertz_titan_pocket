@@ -1,0 +1,15 @@
+--- a/sound/core/pcm_native.c
++++ b/sound/core/pcm_native.c
+@@ -813,7 +813,11 @@
+ 
+ 		if (runtime->info & SNDRV_PCM_INFO_MMAP)
+ 			size = PAGE_ALIGN(size);
+-		memset(runtime->dma_area, 0, size);
++		/*
++		 * memset_io as stock 4.14: MTK PCMs can hand out the AFE SRAM, which is
++		 * ioremap'd Device memory, and memset's DC ZVA faults on it.
++		 */
++		memset_io((void __iomem *)runtime->dma_area, 0, size);
+ 	}
+ 
+ 	snd_pcm_timer_resolution_change(substream);

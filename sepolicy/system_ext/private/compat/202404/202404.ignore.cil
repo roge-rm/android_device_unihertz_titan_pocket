@@ -1,0 +1,23 @@
+;; new_objects - types with no analogue in older policy, carried down to
+;;   every older version when the maps combine. The Pocket types are mapped
+;;   for 30.0 in 30.0/30.0.cil. vendor_persist_camera_prop is a LineageOS
+;;   type that its own 202404 list leaves out.
+(type new_objects)
+(typeattribute new_objects)
+(typeattributeset new_objects
+  ( new_objects
+    mcupm_device
+    mtd_device
+    sysfs_boot_info
+    sysfs_headset
+    sysfs_pmu
+    sysfs_vbus
+    system_mtk_ctl_emdlogger1_prop
+    system_mtk_ctl_emdlogger2_prop
+    system_mtk_ctl_emdlogger3_prop
+    system_mtk_ctl_mdlogger_prop
+    system_mtk_init_svc_aee_aedv_prop
+    system_mtk_init_svc_emdlogger1_prop
+    system_mtk_init_svc_md_monitor_prop
+    system_mtk_persist_mtk_aee_prop
+    vendor_persist_camera_prop))

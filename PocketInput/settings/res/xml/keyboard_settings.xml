@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Values are saved by PocketSettingsFragment in the provider's format, not by the preferences. -->
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory android:title="@string/category_light">
+        <SwitchPreferenceCompat
+            android:key="light"
+            android:title="@string/light"
+            android:persistent="false" />
+        <ListPreference
+            android:key="light_timeout"
+            android:title="@string/light_timeout"
+            android:dependency="light"
+            android:entries="@array/light_timeout_entries"
+            android:entryValues="@array/light_timeout_values"
+            android:persistent="false"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/category_touchpad">
+        <ListPreference
+            android:key="swipes"
+            android:title="@string/swipes"
+            android:entries="@array/swipe_entries"
+            android:entryValues="@array/swipe_values"
+            android:persistent="false"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            android:key="cursor_speed"
+            android:title="@string/cursor_speed"
+            android:entries="@array/cursor_speed_entries"
+            android:entryValues="@array/cursor_speed_values"
+            android:persistent="false"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/category_shortcuts">
+        <SwitchPreferenceCompat
+            android:key="shortcut_browser"
+            android:title="@string/shortcut_browser"
+            android:persistent="false" />
+        <SwitchPreferenceCompat
+            android:key="shortcut_camera"
+            android:title="@string/shortcut_camera"
+            android:persistent="false" />
+        <SwitchPreferenceCompat
+            android:key="shortcut_settings"
+            android:title="@string/shortcut_settings"
+            android:persistent="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/category_function_keys">
+        <ListPreference
+            android:key="func1_press"
+            android:title="@string/func1_press"
+            android:entries="@array/press_entries"
+            android:entryValues="@array/press_values"
+            android:persistent="false"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            android:key="func1_long_press"
+            android:title="@string/func1_long_press"
+            android:entries="@array/press_entries"
+            android:entryValues="@array/press_values"
+            android:persistent="false"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            android:key="func2_press"
+            android:title="@string/func2_press"
+            android:entries="@array/press_entries"
+            android:entryValues="@array/press_values"
+            android:persistent="false"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            android:key="func2_long_press"
+            android:title="@string/func2_long_press"
+            android:entries="@array/press_entries"
+            android:entryValues="@array/press_values"
+            android:persistent="false"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/category_display">
+        <Preference
+            android:key="display_mode"
+            android:title="@string/display_mode"
+            android:persistent="false" />
+    </PreferenceCategory>
+</PreferenceScreen>

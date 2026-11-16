@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Values live in Settings.Global; DisplayModeFragment reads and writes them. -->
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <com.android.settingslib.widget.MainSwitchPreference
+        android:key="mode_on"
+        android:title="@string/use_display_mode"
+        android:persistent="false" />
+
+    <PreferenceCategory android:title="@string/category_square">
+        <org.lineageos.pocketinput.settings.SquareGridPreference
+            android:key="square_grid"
+            android:selectable="false"
+            android:persistent="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/category_other">
+        <com.android.settingslib.widget.SelectorWithWidgetPreference
+            android:key="portrait_mini"
+            android:title="@string/portrait_mini"
+            android:persistent="false" />
+        <com.android.settingslib.widget.SelectorWithWidgetPreference
+            android:key="custom"
+            android:title="@string/custom"
+            android:persistent="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:key="boot_category">
+        <SwitchPreferenceCompat
+            android:key="keep_after_reboot"
+            android:title="@string/keep_after_reboot"
+            android:persistent="false" />
+    </PreferenceCategory>
+
+    <com.android.settingslib.widget.FooterPreference
+        android:key="footer"
+        android:title="@string/display_footer"
+        android:selectable="false"
+        android:persistent="false" />
+</PreferenceScreen>

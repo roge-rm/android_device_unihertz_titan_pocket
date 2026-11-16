@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+// AIDL IPower on system_ext, driven by libperfmgr and powerhint.json (POWER_PORT.md,
+// "Power HAL result"). Replaces the boosts of the stock mtkpower HAL, whose /proc/perfmgr
+// nodes don't exist on our 5.10 kernel. No ADPF hint sessions.
+
+soong_namespace {
+    imports: [
+        "hardware/google/pixel",
+    ],
+}
+
+cc_binary {
+    name: "android.hardware.power-service.pocket",
+    defaults: ["android.hardware.power-ndk_shared"],
+    relative_install_path: "hw",
+    system_ext_specific: true,
+    init_rc: ["android.hardware.power-service.pocket.rc"],
+    vintf_fragments: ["android.hardware.power-service.pocket.xml"],
+    required: ["powerhint.pocket.json"],
+    srcs: [
+        "Power.cpp",
+        "service.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+        "libcutils",
+        "liblog",
+        "libprocessgroup",
+        "libutils",
+    ],
+    // libperfmgr's headers include the generated powerhal_flags.h; its static deps are
+    // listed here as Soong doesn't pass them on.
+    static_libs: [
+        "libperfmgr",
+        "libjsoncpp",
+        "powerhal_flags-aconfig-cc",
+        "libaconfig_storage_read_api_cc",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+    cpp_std: "gnu++20",
+}
+
+prebuilt_etc {
+    name: "powerhint.pocket.json",
+    src: "powerhint.json",
+    filename: "powerhint.json",
+    system_ext_specific: true,
+}

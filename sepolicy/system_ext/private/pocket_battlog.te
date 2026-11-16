@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# OCV run logger (battlog/), a shell script run by init as system. Reads the gauge's
+# gauge_log, writes a CSV under /data/misc/pocket_battlog and holds a wakelock.
+type pocket_battlog, domain, coredomain;
+type pocket_battlog_exec, system_file_type, exec_type, file_type;
+init_daemon_domain(pocket_battlog)
+
+allow pocket_battlog shell_exec:file rx_file_perms;
+allow pocket_battlog toolbox_exec:file rx_file_perms;
+allow pocket_battlog pocket_battlog_exec:file rx_file_perms;
+allow pocket_battlog self:process signal;
+
+# Its own label on gauge_log keeps the logger out of sysfs_batteryinfo, which the
+# platform keeps from core domains.
+type sysfs_pocket_gauge_log, fs_type, sysfs_type;
+allow pocket_battlog sysfs:dir search;
+allow pocket_battlog sysfs_batteryinfo:dir search;
+allow pocket_battlog sysfs_pocket_gauge_log:file r_file_perms;
+
+wakelock_use(pocket_battlog)
+
+type pocket_battlog_data_file, file_type, data_file_type, core_data_file_type;
+allow pocket_battlog system_data_file:dir search;
+allow pocket_battlog pocket_battlog_data_file:dir rw_dir_perms;
+allow pocket_battlog pocket_battlog_data_file:file create_file_perms;
+# adb pull of the logs.
+allow shell pocket_battlog_data_file:dir r_dir_perms;
+allow shell pocket_battlog_data_file:file r_file_perms;
+
+# persist.vendor.pocket.battlog: set from adb shell to start and stop, by the logger at the end.
+system_internal_prop(pocket_battlog_prop)
+set_prop(shell, pocket_battlog_prop)
+set_prop(pocket_battlog, pocket_battlog_prop)

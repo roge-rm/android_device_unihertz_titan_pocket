@@ -1,0 +1,4 @@
+# Proposed correction from the pinned Lineage 21 Android-R/4.14 requirement audit.
+# This fragment has NOT been applied to the preserved diagnostic kernel build.
+# It does not establish driver, runtime, security or Lineage compatibility.
+# CONFIG_SYSVIPC is not set

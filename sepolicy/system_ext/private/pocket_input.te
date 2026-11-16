@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# ro.pocket.input_policy turns on PocketKeyHooks in system_server (patches/android/0004).
+system_internal_prop(pocket_input_config_prop)
+get_prop(system_server, pocket_input_config_prop)
+
+# Torch LED (kernel pocket_torch.c), written by PocketTorch in system_server.
+type sysfs_pocket_torch, fs_type, sysfs_type;
+allow system_server sysfs_pocket_torch:file rw_file_perms;
+# init.pocket.torch.rc chowns and chmods brightness on boot.
+allow init sysfs_pocket_torch:file setattr;

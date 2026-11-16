@@ -1,0 +1,4 @@
+# Added on top of kernel-firstboot-5.10.fragment for the enforcing boot image.
+# That image has no first-boot wrapper, so devtmpfs goes back off as stock and
+# the kernel's devtmpfs thread never needs a policy rule.
+# CONFIG_DEVTMPFS is not set

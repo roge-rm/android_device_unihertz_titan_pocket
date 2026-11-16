@@ -1,0 +1,43 @@
+--- a/drivers/misc/mediatek/video/common/pwm10/ddp_pwm.c
++++ b/drivers/misc/mediatek/video/common/pwm10/ddp_pwm.c
+@@ -67,6 +67,10 @@
+ #else
+ #define PWM0_CLK_NAMING (DISP_PWM)
+ #endif
++
++extern void agold_gpio_set(unsigned int gpio, int value);
++/* Matches stock: GPIO165 goes high when going off from a dim level; what it is wired to is unknown. */
++static bool g_pwm_gpio165_high;
+ 
+ static int pwm_dbg_en;
+ #define PWM_ERR(fmt, arg...) pr_notice("[PWM] %s: " fmt "\n", __func__, ##arg)
+@@ -594,6 +598,12 @@
+ 
+ 	index = index_of_pwm(id);
+ 
++	/* The board's backlight PWM is active low. As stock: 0 and 1 give 1023 (off), others an inverted 312..1016. */
++	if (level_1024 >= 0 && level_1024 <= 1)
++		level_1024 = 0x3ff;
++	else
++		level_1024 = ((1033 - (7 * level_1024) / 10) * 1010) >> 10;
++
+ 	/* we have to change backlight after config init */
+ 	/* or max backlight changed */
+ 	old_pwm = atomic_xchg(&g_pwm_backlight[index], level_1024);
+@@ -618,6 +628,16 @@
+ 			level_1024 = max_level_1024;
+ 		else if (level_1024 < 0)
+ 			level_1024 = 0;
++
++		if (level_1024 == 0x3ff) {
++			if (old_pwm >= 0x3d0) {
++				agold_gpio_set(165, 1);
++				g_pwm_gpio165_high = true;
++			}
++		} else if (g_pwm_gpio165_high) {
++			agold_gpio_set(165, 0);
++			g_pwm_gpio165_high = false;
++		}
+ 
+ 		level_1024 = disp_pwm_level_remap(id, level_1024);
+ 

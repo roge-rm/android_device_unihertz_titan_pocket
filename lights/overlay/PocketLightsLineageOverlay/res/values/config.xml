@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <!-- RGB notification 1, pulsating 8, battery 64, no brightness control
+         512 (the HAL only checks zero or non-zero). Android drives the
+         charging light like stock: red while charging, green when full. The
+         MT6370's own charge indicator is off from boot. -->
+    <integer name="config_deviceLightCapabilities">585</integer>
+</resources>

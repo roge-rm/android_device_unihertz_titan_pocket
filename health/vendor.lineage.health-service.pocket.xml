@@ -1,0 +1,9 @@
+<!-- Charging control served from system_ext. servicemanager reads the framework manifest as
+     well as the device one. -->
+<manifest version="1.0" type="framework">
+    <hal format="aidl">
+        <name>vendor.lineage.health</name>
+        <version>2</version>
+        <fqname>IChargingControl/default</fqname>
+    </hal>
+</manifest>

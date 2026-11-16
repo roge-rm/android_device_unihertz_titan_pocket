@@ -1,0 +1,1029 @@
+--- a/drivers/scsi/ufs/ufs-mediatek.c
++++ b/drivers/scsi/ufs/ufs-mediatek.c
+@@ -8,6 +8,7 @@
+ 
+ #include <linux/arm-smccc.h>
+ #include <linux/bitfield.h>
++#include <linux/clk.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+@@ -23,25 +24,55 @@
+ #include "ufs_quirks.h"
+ #include "unipro.h"
+ #include "ufs-mediatek.h"
++#include "ufs-mediatek-fw.h"
+ 
+ #define CREATE_TRACE_POINTS
+ #include "ufs-mediatek-trace.h"
+ 
+-#define ufs_mtk_smc(cmd, val, res) \
+-	arm_smccc_smc(MTK_SIP_UFS_CONTROL, \
+-		      cmd, val, 0, 0, 0, 0, 0, &(res))
+-
+-#define ufs_mtk_va09_pwr_ctrl(res, on) \
+-	ufs_mtk_smc(UFS_MTK_SIP_VA09_PWR_CTRL, on, res)
+-
+-#define ufs_mtk_crypto_ctrl(res, enable) \
+-	ufs_mtk_smc(UFS_MTK_SIP_CRYPTO_CTRL, enable, res)
+-
+-#define ufs_mtk_ref_clk_notify(on, res) \
+-	ufs_mtk_smc(UFS_MTK_SIP_REF_CLK_NOTIFICATION, on, res)
+-
+-#define ufs_mtk_device_reset_ctrl(high, res) \
+-	ufs_mtk_smc(UFS_MTK_SIP_DEVICE_RESET, high, res)
++static bool ufs_mtk_uses_mt6771_fw(struct ufs_hba *hba)
++{
++	return of_device_is_compatible(hba->dev->of_node,
++				       "mediatek,mt6771-ufshci");
++}
++
++static int ufs_mtk_smc(struct ufs_hba *hba, u32 command, u32 value,
++		       struct arm_smccc_res *res)
++{
++	int ret = ufs_mtk_fw_validate(ufs_mtk_uses_mt6771_fw(hba),
++				    command, value);
++
++	if (ret) {
++		memset(res, 0, sizeof(*res));
++		res->a0 = ret;
++		return ret;
++	}
++
++	arm_smccc_smc(MTK_SIP_UFS_CONTROL,
++		      command, value, 0, 0, 0, 0, 0, res);
++	return 0;
++}
++
++static int ufs_mtk_smc_checked(struct ufs_hba *hba, u32 command, u32 value,
++			       struct arm_smccc_res *res)
++{
++	int ret = ufs_mtk_smc(hba, command, value, res);
++
++	if (ret || !ufs_mtk_uses_mt6771_fw(hba))
++		return ret;
++	return ufs_mt6771_fw_result(res->a0);
++}
++
++#define ufs_mtk_va09_pwr_ctrl(hba, res, on) \
++	ufs_mtk_smc_checked(hba, UFS_MTK_SIP_VA09_PWR_CTRL, on, &(res))
++
++#define ufs_mtk_crypto_ctrl(hba, res, enable) \
++	ufs_mtk_smc(hba, UFS_MTK_SIP_CRYPTO_CTRL, enable, &(res))
++
++#define ufs_mtk_ref_clk_notify(hba, on, res) \
++	ufs_mtk_smc(hba, UFS_MTK_SIP_REF_CLK_NOTIFICATION, on, &(res))
++
++#define ufs_mtk_device_reset_ctrl(hba, high, res) \
++	ufs_mtk_smc_checked(hba, UFS_MTK_SIP_DEVICE_RESET, high, &(res))
+ 
+ static struct ufs_dev_fix ufs_mtk_dev_fixups[] = {
+ 	UFS_FIX(UFS_VENDOR_MICRON, UFS_ANY_MODEL,
+@@ -53,6 +84,8 @@
+ 
+ static const struct of_device_id ufs_mtk_of_match[] = {
+ 	{ .compatible = "mediatek,mt8183-ufshci" },
++	/* Explicit RAM storage engineering profile only; probe checks its opt-in. */
++	{ .compatible = "mediatek,mt6771-ufshci" },
+ 	{},
+ };
+ 
+@@ -117,7 +150,7 @@
+ {
+ 	struct arm_smccc_res res;
+ 
+-	ufs_mtk_crypto_ctrl(res, 1);
++	ufs_mtk_crypto_ctrl(hba, res, 1);
+ 	if (res.a0) {
+ 		dev_info(hba->dev, "%s: crypto enable failed, err: %lu\n",
+ 			 __func__, res.a0);
+@@ -150,6 +183,22 @@
+ 			 str, PTR_ERR(*rc));
+ 		*rc = NULL;
+ 	}
++}
++
++static int ufs_mt6771_init_reset(struct ufs_hba *hba)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++
++	host->hci_reset = devm_reset_control_get_exclusive(hba->dev, "hci_rst");
++	if (IS_ERR(host->hci_reset))
++		return PTR_ERR(host->hci_reset);
++	host->unipro_reset = devm_reset_control_get_exclusive(hba->dev, "unipro_rst");
++	if (IS_ERR(host->unipro_reset))
++		return PTR_ERR(host->unipro_reset);
++	host->crypto_reset = devm_reset_control_get_exclusive(hba->dev, "crypto_rst");
++	if (IS_ERR(host->crypto_reset))
++		return PTR_ERR(host->crypto_reset);
++	return 0;
+ }
+ 
+ static void ufs_mtk_init_reset(struct ufs_hba *hba)
+@@ -175,10 +224,12 @@
+ 			hba->vps->hba_enable_delay_us = 0;
+ 		} else {
+ 			hba->vps->hba_enable_delay_us = 600;
+-			ufs_mtk_host_reset(hba);
+-		}
+-
+-		if (hba->caps & UFSHCD_CAP_CRYPTO)
++			if (!ufs_mtk_uses_mt6771_fw(hba))
++				ufs_mtk_host_reset(hba);
++		}
++
++		if (!ufs_mtk_uses_mt6771_fw(hba) &&
++		    (hba->caps & UFSHCD_CAP_CRYPTO))
+ 			ufs_mtk_crypto_enable(hba);
+ 
+ 		if (host->caps & UFS_MTK_CAP_DISABLE_AH8) {
+@@ -191,6 +242,16 @@
+ 			hba->capabilities &= ~MASK_AUTO_HIBERN8_SUPPORT;
+ 			hba->ahit = 0;
+ 		}
++	} else if (status == POST_CHANGE && ufs_mtk_uses_mt6771_fw(hba)) {
++		struct arm_smccc_res res;
++
++		/* Exact shipped HCE callback: legacy restore, then disable the
++		 * unsupported UFSHCI reference-clock-request path. This is not
++		 * the newer 0x276 crypto command and registers no key callback.
++		 * The shipped callback does not interpret the SMC return value.
++		 */
++		arm_smccc_smc(MTK_SIP_SMC_CMD(0x270), 4, 0, 0, 0, 0, 0, 0, &res);
++		ufshcd_writel(hba, 0, REG_UFS_REFCLK_CTRL);
+ 	}
+ 
+ 	return 0;
+@@ -234,18 +295,81 @@
+ 	return err;
+ }
+ 
++/* Kept outside hba->clk_list_head: the generic list cannot own the
++ * card/Hibern8-dependent PMIC clock-buffer sequence.
++ */
++static int ufs_mt6771_init_ref_clk(struct ufs_hba *hba)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++	struct device_node *node;
++
++	node = of_get_child_by_name(hba->dev->of_node, "reference-clock");
++	if (!node)
++		return -ENODEV;
++	if (!of_device_is_available(node)) {
++		of_node_put(node);
++		return -ENODEV;
++	}
++	host->legacy_ref_clk = devm_get_clk_from_child(hba->dev, node,
++						    "ref_clk");
++	of_node_put(node);
++	if (IS_ERR(host->legacy_ref_clk))
++		return PTR_ERR(host->legacy_ref_clk);
++	return 0;
++}
++
++static int ufs_mt6771_setup_ref_clk(struct ufs_hba *hba, bool on)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++	unsigned int wait_us;
++	int ret;
++
++	/* Stock leaves the inherited-on reference clock alone before discovery. */
++	if (!hba->dev_info.wmanufacturerid)
++		return 0;
++	if (host->ref_clk_enabled == on)
++		return 0;
++	if (!host->legacy_ref_clk)
++		return -ENODEV;
++	/* Stock off also releases the UFS SPM resource vote. No SPM supplier
++	 * exists in this port yet: fail visibly without clock/PHY/power writes.
++	 * Production PM stays disabled; the RAM probe pins runtime PM and
++	 * rejects suspend until that complete dependency is integrated.
++	 */
++	if (!on)
++		return -EOPNOTSUPP;
++	ret = clk_prepare_enable(host->legacy_ref_clk);
++	if (ret)
++		return ret;
++	host->ref_clk_enabled = true;
++	wait_us = hba->dev_info.wmanufacturerid == UFS_VENDOR_SAMSUNG ||
++		  hba->dev_info.wmanufacturerid == UFS_VENDOR_TOSHIBA ? 32 : 30;
++	udelay(wait_us);
++	return 0;
++}
++
+ static int ufs_mtk_setup_ref_clk(struct ufs_hba *hba, bool on)
+ {
+ 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+ 	struct arm_smccc_res res;
+ 	ktime_t timeout, time_checked;
+ 	u32 value;
++	int ret;
++
++	if (ufs_mtk_uses_mt6771_fw(hba))
++		return ufs_mt6771_setup_ref_clk(hba, on);
++
++	/* Newer profiles retain their register handshake and notification. */
++	ret = ufs_mtk_fw_validate(ufs_mtk_uses_mt6771_fw(hba),
++				  UFS_MTK_SIP_REF_CLK_NOTIFICATION, on);
++	if (ret)
++		return ret;
+ 
+ 	if (host->ref_clk_enabled == on)
+ 		return 0;
+ 
+ 	if (on) {
+-		ufs_mtk_ref_clk_notify(on, res);
++		ufs_mtk_ref_clk_notify(hba, on, res);
+ 		ufshcd_delay_us(host->ref_clk_ungating_wait_us, 10);
+ 		ufshcd_writel(hba, REFCLK_REQUEST, REG_UFS_REFCLK_CTRL);
+ 	} else {
+@@ -267,7 +391,7 @@
+ 
+ 	dev_err(hba->dev, "missing ack of refclk req, reg: 0x%x\n", value);
+ 
+-	ufs_mtk_ref_clk_notify(host->ref_clk_enabled, res);
++	ufs_mtk_ref_clk_notify(hba, host->ref_clk_enabled, res);
+ 
+ 	return -ETIMEDOUT;
+ 
+@@ -275,7 +399,7 @@
+ 	host->ref_clk_enabled = on;
+ 	if (!on) {
+ 		ufshcd_delay_us(host->ref_clk_gating_wait_us, 10);
+-		ufs_mtk_ref_clk_notify(on, res);
++		ufs_mtk_ref_clk_notify(hba, on, res);
+ 	}
+ 
+ 	return 0;
+@@ -322,45 +446,82 @@
+ 	return -ETIMEDOUT;
+ }
+ 
++static int ufs_mtk_mphy_power_off(struct ufs_hba *hba)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++	struct arm_smccc_res res;
++	int ret;
++
++	if (host->mphy_enabled) {
++		ret = phy_power_off(host->mphy);
++		if (ret)
++			return ret;
++		host->mphy_enabled = false;
++	}
++	if (host->va09_fw_requested) {
++		ret = ufs_mtk_va09_pwr_ctrl(hba, res, 0);
++		if (ret)
++			return ret;
++		host->va09_fw_requested = false;
++	}
++	if (host->va09_reg_enabled) {
++		ret = regulator_disable(host->reg_va09);
++		if (ret)
++			return ret;
++		host->va09_reg_enabled = false;
++	}
++	return 0;
++}
++
+ static int ufs_mtk_mphy_power_on(struct ufs_hba *hba, bool on)
+ {
+ 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+-	struct phy *mphy = host->mphy;
+ 	struct arm_smccc_res res;
+-	int ret = 0;
+-
+-	if (!mphy || !(on ^ host->mphy_powered_on))
++	int ret = 0, cleanup;
++
++	if (!host->mphy || (on && host->mphy_powered_on))
+ 		return 0;
+ 
+-	if (on) {
+-		if (ufs_mtk_is_va09_supported(hba)) {
++	if (!on) {
++		ret = ufs_mtk_mphy_power_off(hba);
++		goto out;
++	}
++
++	if (ufs_mtk_is_va09_supported(hba)) {
++		if (!host->va09_reg_enabled) {
+ 			ret = regulator_enable(host->reg_va09);
+-			if (ret < 0)
++			if (ret)
+ 				goto out;
+-			/* wait 200 us to stablize VA09 */
++			host->va09_reg_enabled = true;
++			/* Preserve the BSP's VA09 stabilization interval. */
+ 			usleep_range(200, 210);
+-			ufs_mtk_va09_pwr_ctrl(res, 1);
+-		}
+-		phy_power_on(mphy);
+-	} else {
+-		phy_power_off(mphy);
+-		if (ufs_mtk_is_va09_supported(hba)) {
+-			ufs_mtk_va09_pwr_ctrl(res, 0);
+-			ret = regulator_disable(host->reg_va09);
+-			if (ret < 0)
+-				goto out;
+-		}
+-	}
++		}
++		if (!host->va09_fw_requested) {
++			ret = ufs_mtk_va09_pwr_ctrl(hba, res, 1);
++			if (ret)
++				goto unwind;
++			host->va09_fw_requested = true;
++		}
++	}
++	if (!host->mphy_enabled) {
++		ret = phy_power_on(host->mphy);
++		if (ret)
++			goto unwind;
++		host->mphy_enabled = true;
++	}
++	goto out;
++
++unwind:
++	cleanup = ufs_mtk_mphy_power_off(hba);
++	if (cleanup)
++		dev_warn(hba->dev, "PHY power cleanup failed: %d\n", cleanup);
+ out:
+-	if (ret) {
+-		dev_info(hba->dev,
+-			 "failed to %s va09: %d\n",
+-			 on ? "enable" : "disable",
+-			 ret);
+-	} else {
+-		host->mphy_powered_on = on;
+-	}
+-
++	host->mphy_powered_on = host->mphy_enabled &&
++		(!ufs_mtk_is_va09_supported(hba) ||
++		 (host->va09_reg_enabled && host->va09_fw_requested));
++	if (ret)
++		dev_info(hba->dev, "failed to %s PHY power: %d\n",
++			 on ? "enable" : "disable", ret);
+ 	return ret;
+ }
+ 
+@@ -496,27 +657,40 @@
+ 	return;
+ }
+ 
+-static void ufs_mtk_init_va09_pwr_ctrl(struct ufs_hba *hba)
+-{
+-	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+-
+-	host->reg_va09 = regulator_get(hba->dev, "va09");
++static int ufs_mtk_init_va09_pwr_ctrl(struct ufs_hba *hba)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++
++	/* Required when requested: optional-get refuses dummy supply fallback. */
++	host->reg_va09 = devm_regulator_get_optional(hba->dev, "va09");
+ 	if (IS_ERR(host->reg_va09))
+-		dev_info(hba->dev, "failed to get va09");
+-	else
+-		host->caps |= UFS_MTK_CAP_VA09_PWR_CTRL;
+-}
+-
+-static void ufs_mtk_init_host_caps(struct ufs_hba *hba)
++		return PTR_ERR(host->reg_va09);
++	host->caps |= UFS_MTK_CAP_VA09_PWR_CTRL;
++	return 0;
++}
++
++static int ufs_mtk_init_host_caps(struct ufs_hba *hba)
+ {
+ 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+ 	struct device_node *np = hba->dev->of_node;
++	int ret;
++
++	if (ufs_mtk_uses_mt6771_fw(hba)) {
++		host->ram_probe = of_property_read_bool(np,
++						      "unihertz,ram-storage-probe");
++		ret = ufs_mt6771_init_ref_clk(hba);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (of_property_read_bool(np, "mediatek,ufs-boost-crypt"))
+ 		ufs_mtk_init_boost_crypt(hba);
+ 
+-	if (of_property_read_bool(np, "mediatek,ufs-support-va09"))
+-		ufs_mtk_init_va09_pwr_ctrl(hba);
++	if (of_property_read_bool(np, "mediatek,ufs-support-va09")) {
++		ret = ufs_mtk_init_va09_pwr_ctrl(hba);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (of_property_read_bool(np, "mediatek,ufs-disable-ah8"))
+ 		host->caps |= UFS_MTK_CAP_DISABLE_AH8;
+@@ -525,6 +699,7 @@
+ 		host->caps |= UFS_MTK_CAP_BROKEN_VCC;
+ 
+ 	dev_info(hba->dev, "caps: 0x%x", host->caps);
++	return 0;
+ }
+ 
+ /**
+@@ -540,6 +715,10 @@
+ {
+ 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+ 	bool clk_pwr_off = false;
++	bool ref_was_enabled;
++	bool phy_acquired = false;
++	bool base_acquired = false;
++	int cleanup;
+ 	int ret = 0;
+ 
+ 	/*
+@@ -549,6 +728,7 @@
+ 	 */
+ 	if (!host)
+ 		return 0;
++	ref_was_enabled = host->ref_clk_enabled;
+ 
+ 	if (!on && status == PRE_CHANGE) {
+ 		if (ufshcd_is_link_off(hba)) {
+@@ -570,15 +750,64 @@
+ 
+ 		if (clk_pwr_off) {
+ 			ufs_mtk_boost_crypt(hba, on);
+-			ufs_mtk_setup_ref_clk(hba, on);
+-			phy_power_off(host->mphy);
++			ret = ufs_mtk_setup_ref_clk(hba, on);
++			if (ret) {
++				ufs_mtk_boost_crypt(hba, true);
++				return ret;
++			}
++			ret = host->clk_phy_voted ?
++				phy_power_off(host->mphy) : 0;
++			if (!ret)
++				host->clk_phy_voted = false;
++			if (ret) {
++				cleanup = ufs_mtk_setup_ref_clk(hba,
++							  ref_was_enabled);
++				if (cleanup)
++					dev_warn(hba->dev,
++						 "refclk rollback failed: %d\n", cleanup);
++				ufs_mtk_boost_crypt(hba, true);
++			}
+ 		}
+ 	} else if (on && status == POST_CHANGE) {
+-		phy_power_on(host->mphy);
+-		ufs_mtk_setup_ref_clk(hba, on);
++		/* Generic resume restores clocks before the variant resume hook. */
++		if (ufs_mtk_uses_mt6771_fw(hba) && !host->mphy_powered_on) {
++			ret = ufs_mtk_mphy_power_on(hba, true);
++			if (ret)
++				return ret;
++			base_acquired = true;
++		}
++		if (!host->clk_phy_voted) {
++			ret = phy_power_on(host->mphy);
++			if (ret)
++				goto unwind_base;
++			host->clk_phy_voted = true;
++			phy_acquired = true;
++		}
++		ret = ufs_mtk_setup_ref_clk(hba, on);
++		if (ret) {
++			if (phy_acquired) {
++				cleanup = phy_power_off(host->mphy);
++				if (cleanup)
++					dev_warn(hba->dev,
++						 "PHY rollback failed: %d\n", cleanup);
++				else
++					host->clk_phy_voted = false;
++			}
++			goto unwind_base;
++		}
+ 		ufs_mtk_boost_crypt(hba, on);
+ 	}
+ 
++	return ret;
++
++unwind_base:
++	/* A failed callback-vote rollback must retain its underlying power. */
++	if (base_acquired && !host->clk_phy_voted) {
++		cleanup = ufs_mtk_mphy_power_on(hba, false);
++		if (cleanup)
++			dev_warn(hba->dev, "resume base-power cleanup failed: %d\n",
++				 cleanup);
++	}
+ 	return ret;
+ }
+ 
+@@ -627,7 +856,7 @@
+ 	const struct of_device_id *id;
+ 	struct device *dev = hba->dev;
+ 	struct ufs_mtk_host *host;
+-	int err = 0;
++	int err = 0, cleanup;
+ 
+ 	host = devm_kzalloc(dev, sizeof(*host), GFP_KERNEL);
+ 	if (!host) {
+@@ -642,34 +871,25 @@
+ 	id = of_match_device(ufs_mtk_of_match, dev);
+ 	if (!id) {
+ 		err = -EINVAL;
+-		goto out;
++		goto out_variant_clear;
+ 	}
+ 
+ 	/* Initialize host capability */
+-	ufs_mtk_init_host_caps(hba);
++	err = ufs_mtk_init_host_caps(hba);
++	if (err)
++		goto out_variant_clear;
+ 
+ 	err = ufs_mtk_bind_mphy(hba);
+ 	if (err)
+ 		goto out_variant_clear;
+ 
+-	ufs_mtk_init_reset(hba);
+-
+-	/* Enable runtime autosuspend */
+-	hba->caps |= UFSHCD_CAP_RPM_AUTOSUSPEND;
+-
+-	/* Enable clock-gating */
+-	hba->caps |= UFSHCD_CAP_CLK_GATING;
+-
+-	/* Enable inline encryption */
+-	hba->caps |= UFSHCD_CAP_CRYPTO;
+-
+-	/* Enable WriteBooster */
+-	hba->caps |= UFSHCD_CAP_WB_EN;
+-	hba->quirks |= UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL;
+-	hba->vps->wb_flush_threshold = UFS_WB_BUF_REMAIN_PERCENT(80);
+-
+-	if (host->caps & UFS_MTK_CAP_DISABLE_AH8)
+-		hba->caps |= UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
++	if (ufs_mtk_uses_mt6771_fw(hba)) {
++		err = ufs_mt6771_init_reset(hba);
++		if (err)
++			goto out_variant_clear;
++	} else {
++		ufs_mtk_init_reset(hba);
++	}
+ 
+ 	/*
+ 	 * ufshcd_vops_init() is invoked after
+@@ -678,11 +898,53 @@
+ 	 *
+ 	 * Enable phy clocks specifically here.
+ 	 */
+-	ufs_mtk_mphy_power_on(hba, true);
+-	ufs_mtk_setup_clocks(hba, true, POST_CHANGE);
++	err = ufs_mtk_mphy_power_on(hba, true);
++	if (err)
++		goto out_power_off;
++	err = ufs_mtk_setup_clocks(hba, true, POST_CHANGE);
++	if (err)
++		goto out_power_off;
++
++	if (host->ram_probe) {
++		/* SPM off-path and production PM are not implemented or qualified. */
++		hba->caps &= ~(UFSHCD_CAP_RPM_AUTOSUSPEND |
++			       UFSHCD_CAP_CLK_GATING |
++			       UFSHCD_CAP_HIBERN8_WITH_CLK_GATING |
++			       UFSHCD_CAP_WB_EN);
++	} else {
++		hba->caps |= UFSHCD_CAP_RPM_AUTOSUSPEND | UFSHCD_CAP_CLK_GATING;
++	}
++
++	/* MT6771 has no registered legacy crypto/key lifecycle implementation. */
++	if (ufs_mtk_uses_mt6771_fw(hba))
++		hba->caps &= ~UFSHCD_CAP_CRYPTO;
++	else
++		hba->caps |= UFSHCD_CAP_CRYPTO;
++
++	if (!host->ram_probe) {
++		hba->caps |= UFSHCD_CAP_WB_EN;
++		hba->quirks |= UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL;
++		hba->vps->wb_flush_threshold = UFS_WB_BUF_REMAIN_PERCENT(80);
++	}
++
++	if (!host->ram_probe && (host->caps & UFS_MTK_CAP_DISABLE_AH8))
++		hba->caps |= UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
+ 
+ 	goto out;
+ 
++out_power_off:
++	/* Release a leftover callback vote before removing base PHY power. */
++	if (host->clk_phy_voted) {
++		cleanup = phy_power_off(host->mphy);
++		if (cleanup) {
++			dev_warn(dev, "init PHY vote cleanup failed: %d\n", cleanup);
++			goto out_variant_clear;
++		}
++		host->clk_phy_voted = false;
++	}
++	cleanup = ufs_mtk_mphy_power_on(hba, false);
++	if (cleanup)
++		dev_warn(dev, "init power cleanup failed: %d\n", cleanup);
+ out_variant_clear:
+ 	ufshcd_set_variant(hba, NULL);
+ out:
+@@ -712,12 +974,42 @@
+ 	host_cap.desired_working_mode =
+ 				UFS_MTK_LIMIT_DESIRED_MODE;
+ 
++	if (ufs_mtk_uses_mt6771_fw(hba)) {
++		/* Captured board is one lane; stock defaults to HSG3B. */
++		if (hba->lanes_per_direction < 1 || hba->lanes_per_direction > 2)
++			return -EINVAL;
++		host_cap.tx_lanes = hba->lanes_per_direction;
++		host_cap.rx_lanes = hba->lanes_per_direction;
++		host_cap.hs_rx_gear = UFS_HS_G3;
++		host_cap.hs_tx_gear = UFS_HS_G3;
++	}
++
+ 	ret = ufshcd_get_pwr_dev_param(&host_cap,
+ 				       dev_max_params,
+ 				       dev_req_params);
+ 	if (ret) {
+ 		pr_info("%s: failed to determine capabilities\n",
+ 			__func__);
++	}
++
++	if (ufs_mtk_uses_mt6771_fw(hba)) {
++		unsigned int i;
++		static const u32 timing[] = {
++			0x1fff, 0xffff, 0x7fff, 0x1fff, 0xffff, 0x7fff
++		};
++
++		if (ret)
++			return ret;
++		/* Exact shipped PA power-mode timeout values. Fail, do not
++		 * silently proceed, if this engineering controller rejects them.
++		 */
++		for (i = 0; i < ARRAY_SIZE(timing); i++) {
++			ret = ufshcd_dme_set(hba,
++				UIC_ARG_MIB(PA_PWRMODEUSERDATA0 + i), timing[i]);
++			if (ret)
++				return ret;
++		}
++		return 0;
+ 	}
+ 
+ 	if (host->hw_ver.major >= 3) {
+@@ -775,11 +1067,51 @@
+ 	return ret;
+ }
+ 
++static int ufs_mt6771_pre_link(struct ufs_hba *hba)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++	u32 value;
++	int ret;
++
++	ret = ufshcd_dme_get(hba, UIC_ARG_MIB(VS_UNIPROPOWERDOWNCONTROL), &value);
++	if (ret)
++		return ret;
++	if (value == 1) {
++		ret = ufshcd_dme_set(hba,
++				     UIC_ARG_MIB(VS_UNIPROPOWERDOWNCONTROL), 0);
++		if (ret)
++			return ret;
++	}
++	host->unipro_lpm = false;
++	ret = ufshcd_dme_get(hba, UIC_ARG_MIB(VS_SAVEPOWERCONTROL), &value);
++	if (ret)
++		return ret;
++	ret = ufshcd_dme_set(hba, UIC_ARG_MIB(VS_SAVEPOWERCONTROL), value & ~BIT(6));
++	if (ret)
++		return ret;
++	/* Captured board has stock default scrambling disabled. */
++	return ufshcd_dme_set(hba, UIC_ARG_MIB(UFS_MT6771_PA_SCRAMBLING), 0);
++}
++
++static int ufs_mt6771_post_link(struct ufs_hba *hba)
++{
++	int ret;
++
++	ret = ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0);
++	/* The shipped callback reports this optional LCC failure and continues. */
++	if (ret)
++		dev_warn(hba->dev, "MT6771 post-link LCC disable failed: %d\n", ret);
++	ufs_mtk_cfg_unipro_cg(hba, true);
++	return 0;
++}
++
+ static int ufs_mtk_pre_link(struct ufs_hba *hba)
+ {
+ 	int ret;
+ 	u32 tmp;
+ 
++	if (ufs_mtk_uses_mt6771_fw(hba))
++		return ufs_mt6771_pre_link(hba);
+ 	ufs_mtk_get_controller_version(hba);
+ 
+ 	ret = ufs_mtk_unipro_set_pm(hba, false);
+@@ -826,6 +1158,8 @@
+ 
+ static int ufs_mtk_post_link(struct ufs_hba *hba)
+ {
++	if (ufs_mtk_uses_mt6771_fw(hba))
++		return ufs_mt6771_post_link(hba);
+ 	/* enable unipro clock gating feature */
+ 	ufs_mtk_cfg_unipro_cg(hba, true);
+ 
+@@ -864,11 +1198,14 @@
+ static int ufs_mtk_device_reset(struct ufs_hba *hba)
+ {
+ 	struct arm_smccc_res res;
++	int ret;
+ 
+ 	/* disable hba before device reset */
+ 	ufshcd_hba_stop(hba);
+ 
+-	ufs_mtk_device_reset_ctrl(0, res);
++	ret = ufs_mtk_device_reset_ctrl(hba, 0, res);
++	if (ret)
++		return ret;
+ 
+ 	/*
+ 	 * The reset signal is active low. UFS devices shall detect
+@@ -879,7 +1216,9 @@
+ 	 */
+ 	usleep_range(10, 15);
+ 
+-	ufs_mtk_device_reset_ctrl(1, res);
++	ret = ufs_mtk_device_reset_ctrl(hba, 1, res);
++	if (ret)
++		return ret;
+ 
+ 	/* Some devices may need time to respond to rst_n */
+ 	usleep_range(10000, 15000);
+@@ -945,7 +1284,10 @@
+ {
+ 	int err;
+ 	struct arm_smccc_res res;
+-
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++
++	if (host->ram_probe)
++		return -EOPNOTSUPP;
+ 	if (ufshcd_is_link_hibern8(hba)) {
+ 		err = ufs_mtk_link_set_lpm(hba);
+ 		if (err)
+@@ -953,6 +1295,16 @@
+ 	}
+ 
+ 	if (!ufshcd_is_link_active(hba)) {
++		if (ufs_mtk_uses_mt6771_fw(hba)) {
++			struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++
++			/* Release the clock vote before base PHY/VA09 power. */
++			err = ufs_mtk_setup_clocks(hba, false, PRE_CHANGE);
++			if (err)
++				goto fail;
++			if (host->clk_phy_voted)
++				goto fail;
++		}
+ 		/*
+ 		 * Make sure no error will be returned to prevent
+ 		 * ufshcd_suspend() re-enabling regulators while vreg is still
+@@ -964,8 +1316,11 @@
+ 			goto fail;
+ 	}
+ 
+-	if (ufshcd_is_link_off(hba))
+-		ufs_mtk_device_reset_ctrl(0, res);
++	if (ufshcd_is_link_off(hba)) {
++		err = ufs_mtk_device_reset_ctrl(hba, 0, res);
++		if (err)
++			goto fail;
++	}
+ 
+ 	return 0;
+ fail:
+@@ -981,7 +1336,10 @@
+ static int ufs_mtk_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
+ {
+ 	int err;
+-
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++
++	if (host->ram_probe)
++		return -EOPNOTSUPP;
+ 	err = ufs_mtk_mphy_power_on(hba, true);
+ 	if (err)
+ 		goto fail;
+@@ -1090,13 +1448,34 @@
+  *
+  * Return zero for success and non-zero for failure
+  */
++static void ufs_mt6771_release_pm_vote(void *data)
++{
++	pm_runtime_put_noidle(data);
++}
++
+ static int ufs_mtk_probe(struct platform_device *pdev)
+ {
+ 	int err;
+ 	struct device *dev = &pdev->dev;
+-	struct device_node *reset_node;
++	struct device_node *reset_node = NULL;
+ 	struct platform_device *reset_pdev;
+ 	struct device_link *link;
++
++	if (of_device_is_compatible(dev->of_node, "mediatek,mt6771-ufshci")) {
++		if (!of_property_read_bool(dev->of_node,
++					   "unihertz,ram-storage-probe"))
++			return -ENODEV;
++		/* Pin runtime PM before async scan can drop its own temporary vote.
++		 * Capability flags alone only control SCSI-device autosuspend.
++		 * This managed vote neither changes user policy nor schedules idle.
++		 */
++		pm_runtime_get_noresume(dev);
++		err = devm_add_action_or_reset(dev, ufs_mt6771_release_pm_vote, dev);
++		if (err)
++			return err;
++		/* The explicit infracfg reset provider is handled by reset core. */
++		goto skip_reset;
++	}
+ 
+ 	reset_node = of_find_compatible_node(NULL, NULL,
+ 					     "ti,syscon-reset");
+@@ -1111,6 +1490,8 @@
+ 	}
+ 	link = device_link_add(dev, &reset_pdev->dev,
+ 		DL_FLAG_AUTOPROBE_CONSUMER);
++	/* The link keeps its own supplier reference, independent of lookup. */
++	put_device(&reset_pdev->dev);
+ 	if (!link) {
+ 		dev_notice(dev, "add reset device_link fail\n");
+ 		goto skip_reset;
+@@ -1148,9 +1529,39 @@
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_PM_SLEEP
++/*
++ * The RAM storage binding has no tested low-power path, and ufshcd_suspend()
++ * would send START STOP UNIT and enter Hibern8 before ufs_mtk_suspend() can
++ * refuse. So system sleep (s2idle) leaves the host, link and device active.
++ */
++static int ufs_mtk_system_suspend(struct device *dev)
++{
++	struct ufs_hba *hba = dev_get_drvdata(dev);
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++
++	if (host->ram_probe)
++		return 0;
++	return ufshcd_pltfrm_suspend(dev);
++}
++
++static int ufs_mtk_system_resume(struct device *dev)
++{
++	struct ufs_hba *hba = dev_get_drvdata(dev);
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++
++	if (host->ram_probe)
++		return 0;
++	return ufshcd_pltfrm_resume(dev);
++}
++#else
++#define ufs_mtk_system_suspend	NULL
++#define ufs_mtk_system_resume	NULL
++#endif
++
+ static const struct dev_pm_ops ufs_mtk_pm_ops = {
+-	.suspend         = ufshcd_pltfrm_suspend,
+-	.resume          = ufshcd_pltfrm_resume,
++	.suspend         = ufs_mtk_system_suspend,
++	.resume          = ufs_mtk_system_resume,
+ 	.runtime_suspend = ufshcd_pltfrm_runtime_suspend,
+ 	.runtime_resume  = ufshcd_pltfrm_runtime_resume,
+ 	.runtime_idle    = ufshcd_pltfrm_runtime_idle,
+--- /dev/null
++++ b/drivers/scsi/ufs/ufs-mediatek-fw.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _UFS_MEDIATEK_FW_H
++#define _UFS_MEDIATEK_FW_H
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++/* These command numbers belong to SiP service 0x276, not service 0x270.
++ * MT6771 crypto uses a separate service, and reference-clock control uses
++ * its PMIC clock-buffer driver. Neither is implemented by aliasing 0x276.
++ */
++static inline int ufs_mtk_fw_validate(bool mt6771, u32 command, u32 value)
++{
++	if (value > 1)
++		return -EINVAL;
++
++	switch (command) {
++	case 1: /* VA09 power control */
++	case 2: /* device reset */
++		return 0;
++	case 4: /* newer firmware crypto control */
++	case 8: /* newer firmware reference-clock notification */
++		return mt6771 ? -EOPNOTSUPP : 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++/* The installed MT6771 ATF dispatch sign-extends its int result into x0.
++ * Accept both 32-bit and sign-extended SiP error encodings, never extra data.
++ */
++static inline int ufs_mt6771_fw_result(u64 result)
++{
++	u32 value = (u32)result;
++
++	if (result != (u64)value && result != (u64)(s64)(s32)value)
++		return -EIO;
++	switch (value) {
++	case 0:
++		return 0;
++	case 0xffffffffU:
++		return -EOPNOTSUPP;
++	case 0xfffffffeU:
++		return -EINVAL;
++	case 0xfffffffdU:
++		return -ERANGE;
++	case 0xfffffffcU:
++		return -EACCES;
++	default:
++		return -EIO;
++	}
++}
++
++#endif
+--- a/drivers/scsi/ufs/ufs-mediatek.h
++++ b/drivers/scsi/ufs/ufs-mediatek.h
+@@ -52,6 +52,8 @@
+ #define VS_DEBUGCLOCKENABLE         0xD0A1
+ #define VS_SAVEPOWERCONTROL         0xD0A6
+ #define VS_UNIPROPOWERDOWNCONTROL   0xD0A8
++/* Shipped MT6771 link-startup PA scrambling attribute. */
++#define UFS_MT6771_PA_SCRAMBLING     0x1585
+ 
+ /*
+  * Vendor specific link state
+@@ -116,6 +118,7 @@
+ 
+ struct ufs_mtk_host {
+ 	struct phy *mphy;
++	struct clk *legacy_ref_clk;
+ 	struct regulator *reg_va09;
+ 	struct ufs_mtk_hw_ver hw_ver;
+ 	struct reset_control *hci_reset;
+@@ -125,8 +128,14 @@
+ 	struct ufs_mtk_crypt_cfg *crypt;
+ 	enum ufs_mtk_host_caps caps;
+ 	bool mphy_powered_on;
++	bool mphy_enabled;
++	bool va09_reg_enabled;
++	/* Accepted request only: secure firmware status is not yet qualified. */
++	bool va09_fw_requested;
++	bool clk_phy_voted;
+ 	bool unipro_lpm;
+ 	bool ref_clk_enabled;
++	bool ram_probe;
+ 	u16 ref_clk_ungating_wait_us;
+ 	u16 ref_clk_gating_wait_us;
+ };
+--- /dev/null
++++ b/drivers/scsi/ufs/ufs-mt6771-hie.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _UFS_MT6771_HIE_H
++#define _UFS_MT6771_HIE_H
++#include <linux/errno.h>
++#include <linux/types.h>
++
++/* Wire-plan only, not a registered keyslot callback. All words are CPU endian.
++ * Preserve the BSP's final metadata word (17 input words, not just 16 key words).
++ * Caller must validate actual UFS capability ordering and wipe this plan after use.
++ */
++static inline int ufs_mt6771_hie_plan(const u32 words[17], int slot,
++				    unsigned int bsp_capability_index, bool enable,
++				    u32 requests[6][3])
++{
++	unsigned int i, row;
++	u32 mode;
++
++	if (slot < 0 || slot > 255 || bsp_capability_index > 1)
++		return -EINVAL;
++	mode = bsp_capability_index ? (1U << 5) : (1U << 3);
++	requests[0][0] = ((u32)slot << 24) | (mode << 16) | (0x40U << 8) |
++			 (!enable);
++	requests[0][1] = words[0];
++	requests[0][2] = words[1];
++	for (i = 2, row = 1; i < 16; i += 3, row++) {
++		requests[row][0] = words[i];
++		requests[row][1] = words[i + 1];
++		requests[row][2] = words[i + 2];
++	}
++	return 0;
++}
++#endif

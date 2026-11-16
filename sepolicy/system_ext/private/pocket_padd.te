@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Keyboard touchpad swipe scroll (packages/PocketInput/pad). Reads the mtk-pad
+# evdev node and sends drags through a uinput touchscreen.
+type pocket_padd, domain, coredomain;
+type pocket_padd_exec, system_file_type, exec_type, file_type;
+init_daemon_domain(pocket_padd)
+
+# Find mtk-pad by name (EVIOCGNAME) and read it. No grab, no writes.
+allow pocket_padd input_device:dir r_dir_perms;
+allow pocket_padd input_device:chr_file r_file_perms;
+# /dev/uinput.
+allow pocket_padd uhid_device:chr_file rw_file_perms;
+
+# Key guard state for PocketKeyHooks in system_server: "drag START" or "lift START END".
+system_internal_prop(pocket_pad_guard_prop)
+set_prop(pocket_padd, pocket_pad_guard_prop)
+get_prop(system_server, pocket_pad_guard_prop)

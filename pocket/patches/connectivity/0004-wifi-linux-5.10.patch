@@ -1,0 +1,1785 @@
+Wi-Fi (wmt_chrdev_wifi and wlan_drv_gen3, OPPO MT6765 wlan/) on Linux 5.10,
+applied to the staged tree by tools/prepare-connectivity-sources.py
+(patches.applied in connectivity-sources.json). wmt_chrdev_wifi needs no change.
+
+- ACPI_STATE_D0 to D3 renamed WLAN_ACPI_STATE_*: they clash with acpi/actypes.h.
+- procfs file_operations to proc_ops, struct timeval and do_gettimeofday to
+  struct __kernel_old_timeval and kalGetTimeOfDay(), rtc_time_to_tm to
+  rtc_time64_to_tm, struct timespec and get_monotonic_boottime to the 64-bit
+  ones, init_timer to timer_setup, access_ok without VERIFY_*, ioremap_nocache
+  to ioremap, (void) on getFwCfgItemNum for -Wstrict-prototypes.
+- wakeup_source_init and _trash as wakeup_source_add and _remove.
+- cfg80211 mgmt_frame_register to update_mgmt_frame_registrations, and the
+  5.10 ndo_select_queue signature.
+- File reads: set_fs and vfs_read/vfs_write to kernel_read/kernel_write, with
+  MODULE_IMPORT_NS for the VFS namespace those and filp_open are in.
+- kallsyms_lookup_name isn't exported: the MET trace lines use _THIS_IP_.
+- CPU boost: kalBoostCpu() asks for each cluster's top speed through freq
+  QoS. The EMI and VCORE OPP pm_qos requests are left out (no DVFSRC on 5.10).
+- As stock (observed in the stock module): ARP_MONITER_ENABLE off, OPPO's
+  /data/misc/firmware/active/ firmware path and its Algeria country group out
+  (both under their OPPO guards), and a stray OPPO ucProcessed assignment gone.
+- Every vendor command has .policy = VENDOR_CMD_RAW_DATA: 5.10
+  wiphy_register() fails without one. NLA_PARSE and NLA_PARSE_NESTED use the
+  _deprecated parsers, lenient as on 4.14.
+- wlanRemove and exitWlan drop the CPU boost request, so no freq QoS request
+  is left on a cpufreq policy after rmmod.
+- Stock bugs: the RTS range check uses && and the last u4BWMapping arm is a
+  plain else (values over 6 are already rejected).
+
+--- a/wifi/wlan/core/gen3/Makefile
++++ b/wifi/wlan/core/gen3/Makefile
+@@ -29,7 +29,9 @@
+ ccflags-y += -DWLAN_INCLUDE_PROC
+ ccflags-y += -DCFG_SUPPORT_AGPS_ASSIST=1
+ ccflags-y += -DCFG_SUPPORT_TSF_USING_BOOTTIME=1
+-ccflags-y += -DARP_MONITER_ENABLE=1
++# Off, as stock: its module has none of the qm*Arp*/qmHandleRxDhcpPackets
++# functions or their log lines.
++ccflags-y += -DARP_MONITER_ENABLE=0
+ 
+ ifeq ($(CONFIG_MTK_AEE_FEATURE), y)
+     ccflags-y += -DCFG_SUPPORT_AEE=1
+--- a/wifi/wlan/core/gen3/common/debug.c
++++ b/wifi/wlan/core/gen3/common/debug.c
+@@ -706,7 +706,7 @@
+ 	PUINT_8 pucEth = NULL;
+ 	UINT_32 u4Length = 0;
+ 	PUINT_8 pucUdp = NULL;
+-	struct timeval tval;
++	struct __kernel_old_timeval tval;
+ 
+ 	if (!prAdapter || !prAdapter->rDebugInfo.fgVoE5_7Test || !skb)
+ 		return;
+@@ -720,7 +720,7 @@
+ 	pucUdp = &pucEth[ETH_HLEN+28];
+ 	if (kalStrnCmp(pucUdp, "1345678", 7))
+ 		return;
+-	do_gettimeofday(&tval);
++	kalGetTimeOfDay(&tval);
+ 	switch (ucPhase) {
+ 	case PHASE_XMIT_RCV: /* xmit */
+ 		pucUdp += 20;
+--- a/wifi/wlan/core/gen3/common/fwcfg.c
++++ b/wifi/wlan/core/gen3/common/fwcfg.c
+@@ -60,7 +60,7 @@
+ *                              F U N C T I O N S
+ *********************************************************************************
+ */
+-INT_32 __weak getFwCfgItemNum()
++INT_32 __weak getFwCfgItemNum(void)
+ {
+ 	return ARRAY_SIZE(fwCfgArray);
+ }
+--- a/wifi/wlan/core/gen3/common/wlan_lib.c
++++ b/wifi/wlan/core/gen3/common/wlan_lib.c
+@@ -704,7 +704,7 @@
+ 
+ 		/* Power state initialization */
+ 		prAdapter->fgWiFiInSleepyState = FALSE;
+-		prAdapter->rAcpiState = ACPI_STATE_D0;
++		prAdapter->rAcpiState = WLAN_ACPI_STATE_D0;
+ 
+ 		/* Online scan option */
+ 		if (prRegInfo->fgDisOnlineScan == 0)
+@@ -992,7 +992,7 @@
+ 	}
+ 
+ 	kalSetEmiMpuProtection(gConEmiPhyBase, WIFI_EMI_MEM_SIZE, FALSE);
+-	prWifiEmiBaseAddr = ioremap_nocache(gConEmiPhyBase, WIFI_EMI_AVAILABLE_MEM_SIZE);
++	prWifiEmiBaseAddr = ioremap(gConEmiPhyBase, WIFI_EMI_AVAILABLE_MEM_SIZE);
+ 
+ 	/* IEMI + DEMI */
+ 	for (i = ENTRY_DIRECTLY_TO_CHIP; i < prFwHead->u4NumOfEntries; i++) {
+@@ -1096,7 +1096,7 @@
+ 
+ #endif
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D0 &&
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D0 &&
+ 	    !wlanIsChipNoAck(prAdapter) && !kalIsCardRemoved(prAdapter->prGlueInfo)) {
+ 		UINT_32 u4RegValue = 0;
+ 		UINT_32 u4RegValueNew = 0;
+@@ -4797,8 +4797,8 @@
+ *
+ * @param prAdapter      Pointer of Adapter Data Structure
+ *
+-* @return ACPI_STATE_D0 Normal Operation Mode
+-*         ACPI_STATE_D3 Suspend Mode
++* @return WLAN_ACPI_STATE_D0 Normal Operation Mode
++*         WLAN_ACPI_STATE_D3 Suspend Mode
+ */
+ /*----------------------------------------------------------------------------*/
+ ENUM_ACPI_STATE_T wlanGetAcpiState(IN P_ADAPTER_T prAdapter)
+@@ -4813,8 +4813,8 @@
+ * @brief This function is to update current ACPI state only
+ *
+ * @param prAdapter      Pointer of Adapter Data Structure
+-* @param ePowerState    ACPI_STATE_D0 Normal Operation Mode
+-*                       ACPI_STATE_D3 Suspend Mode
++* @param ePowerState    WLAN_ACPI_STATE_D0 Normal Operation Mode
++*                       WLAN_ACPI_STATE_D3 Suspend Mode
+ *
+ * @return none
+ */
+@@ -4822,7 +4822,7 @@
+ VOID wlanSetAcpiState(IN P_ADAPTER_T prAdapter, IN ENUM_ACPI_STATE_T ePowerState)
+ {
+ 	ASSERT(prAdapter);
+-	ASSERT(ePowerState <= ACPI_STATE_D3);
++	ASSERT(ePowerState <= WLAN_ACPI_STATE_D3);
+ 
+ 	prAdapter->rAcpiState = ePowerState;
+ }
+@@ -5499,7 +5499,7 @@
+ 
+ 	*pu4QueryInfoLen = sizeof(PARAM_802_11_STATISTICS_STRUCT_T);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+--- a/wifi/wlan/core/gen3/common/wlan_oid.c
++++ b/wifi/wlan/core/gen3/common/wlan_oid.c
+@@ -470,7 +470,7 @@
+ 
+ 	prGlueInfo = prAdapter->prGlueInfo;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in qeury BSSID list! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -557,7 +557,7 @@
+ 
+ 	DEBUGFUNC("wlanoidSetBssidListScan()");
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set BSSID list scan! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -632,7 +632,7 @@
+ 
+ 	DEBUGFUNC("wlanoidSetBssidListScanExt()");
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, ERROR,
+ 		       "Fail in set BSSID list scan! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -721,7 +721,7 @@
+ 
+ 	DEBUGFUNC("wlanoidSetBssidListScanAdv()");
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set BSSID list scan! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -829,7 +829,7 @@
+ 	if (u4SetBufferLen != MAC_ADDR_LEN) {
+ 		*pu4SetInfoLen = MAC_ADDR_LEN;
+ 		return WLAN_STATUS_INVALID_LENGTH;
+-	} else if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	} else if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail in set ssid! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -937,7 +937,7 @@
+ 
+ 	if (u4SetBufferLen < sizeof(PARAM_SSID_T) || u4SetBufferLen > sizeof(PARAM_SSID_T))
+ 		return WLAN_STATUS_INVALID_LENGTH;
+-	else if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	else if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail in set ssid! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -1079,7 +1079,7 @@
+ 
+ 	if (u4SetBufferLen != sizeof(PARAM_CONNECT_T))
+ 		return WLAN_STATUS_INVALID_LENGTH;
+-	else if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	else if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail in set ssid! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -1411,7 +1411,7 @@
+ 
+ 	*pu4SetInfoLen = sizeof(ENUM_PARAM_OP_MODE_T);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set infrastructure mode! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -1595,7 +1595,7 @@
+ 	/* return WLAN_STATUS_SUCCESS; */
+ 	/* } */
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set Authentication mode! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -1826,7 +1826,7 @@
+ 	if (u4SetBufferLen < sizeof(ENUM_PARAM_PRIVACY_FILTER_T))
+ 		return WLAN_STATUS_INVALID_LENGTH;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set Authentication mode! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -1890,7 +1890,7 @@
+ 	/* return WLAN_STATUS_SUCCESS; */
+ 	/* } */
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set Reload default! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -2033,7 +2033,7 @@
+ 	ASSERT(pvSetBuffer);
+ 	ASSERT(pu4SetInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail in set add WEP! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -2150,7 +2150,7 @@
+ 	DBGLOG(OID, INFO, "Set: Dump PARAM_KEY_INDEX content\n");
+ 	DBGLOG(OID, INFO, "Index : 0x%08x\n", u4KeyId);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set remove WEP! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -2229,7 +2229,7 @@
+ 	ASSERT(pvSetBuffer);
+ 	ASSERT(pu4SetInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail in set add key! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -2707,7 +2707,7 @@
+ 	if (u4SetBufferLen < sizeof(PARAM_REMOVE_KEY_T))
+ 		return WLAN_STATUS_INVALID_LENGTH;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set remove key! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -2954,7 +2954,7 @@
+ 	/* return WLAN_STATUS_SUCCESS; */
+ 	/* } */
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set encryption status! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -3850,7 +3850,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -3917,7 +3917,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -3982,7 +3982,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6238,7 +6238,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6304,7 +6304,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6370,7 +6370,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6435,7 +6435,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6504,7 +6504,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6569,7 +6569,7 @@
+ 		ASSERT(pvQueryBuffer);
+ 	ASSERT(pu4QueryInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6731,7 +6731,7 @@
+ 	if (u4SetBufferLen)
+ 		ASSERT(pvSetBuffer);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set multicast list! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -6801,7 +6801,7 @@
+ 
+ 	DBGLOG(OID, TRACE, "New packet filter: %#08x\n", u4NewPacketFilter);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set current packet filter! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -7218,7 +7218,7 @@
+ 
+ 	*pu4SetInfoLen = 0;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set disassociate! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -8725,7 +8725,7 @@
+ 	ASSERT(pvSetBuffer);
+ 	ASSERT(pu4SetInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set add key! (Adapter not ready). ACPI=D%d, Radio=%d\r\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -9793,7 +9793,7 @@
+ 		return WLAN_STATUS_INVALID_LENGTH;
+ 	}
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail to set BT profile because of ACPI_D3\n");
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+ 	}
+@@ -9924,7 +9924,7 @@
+ 	if (IS_ARB_IN_RFTEST_STATE(prAdapter))
+ 		return WLAN_STATUS_SUCCESS;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail to set antenna because of ACPI_D3\n");
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+ 	}
+@@ -9998,7 +9998,7 @@
+ 	if (IS_ARB_IN_RFTEST_STATE(prAdapter))
+ 		return WLAN_STATUS_SUCCESS;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail to set BT setting because of ACPI_D3\n");
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+ 	}
+@@ -10311,7 +10311,7 @@
+ 	ASSERT(pvSetBuffer);
+ 	ASSERT(pu4SetInfoLen);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN, "Fail in set add key! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -10465,7 +10465,7 @@
+ 
+ 	DEBUGFUNC("wlanoidSetStartSchedScan()");
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, WARN,
+ 		       "Fail in set scheduled scan! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+@@ -10901,7 +10901,7 @@
+ {
+ 	P_CMD_SET_PSCAN_ENABLE prCmdPscnAction;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(SCN, ERROR, "Adapter not ready: ACPI=%d, Radio=%d\n",
+ 				   prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -10967,7 +10967,7 @@
+ {
+ 	P_PARAM_WIFI_GSCAN_CMD_PARAMS prCmdGscnParam;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(SCN, ERROR, "Adapter not ready: ACPI=%d, Radio=%d\n",
+ 				   prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -11024,7 +11024,7 @@
+ 	P_PARAM_WIFI_GSCAN_CMD_PARAMS prCmdGscnConfigParam;
+ 	CMD_GSCN_SCN_COFIG_T rCmdGscnConfig;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(SCN, ERROR, "Adapter not ready: ACPI=%d, Radio=%d\n",
+ 				   prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -11087,7 +11087,7 @@
+ 	P_PARAM_WIFI_GSCAN_GET_RESULT_PARAMS prGetGscnScnResultParm;
+ 	CMD_GET_GSCAN_RESULT_T rGetGscnScnResultCmd;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(SCN, ERROR, "Adapter not ready: ACPI=%d, Radio=%d\n",
+ 				   prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+ 		return WLAN_STATUS_ADAPTER_NOT_READY;
+@@ -12577,7 +12577,7 @@
+ 
+ 	*pu4SetInfoLen = 0;
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(OID, ERROR,
+ 		       "Fail in query receive error! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 		       prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+--- a/wifi/wlan/core/gen3/common/wlan_p2p.c
++++ b/wifi/wlan/core/gen3/common/wlan_p2p.c
+@@ -906,7 +906,7 @@
+ 	if (u4SetBufferLen)
+ 		ASSERT(pvSetBuffer);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(REQ, WARN,
+ 		       "Fail in set multicast list! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 			prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+--- a/wifi/wlan/core/gen3/include/nic/hal.h
++++ b/wifi/wlan/core/gen3/include/nic/hal.h
+@@ -75,7 +75,7 @@
+ #define HAL_MCR_HIF_RD(_prAdapter, _u4Offset, _pu4Value) \
+ do { \
+ 	if (HAL_TEST_FLAG(_prAdapter, ADAPTER_FLAG_HW_ERR) == FALSE) { \
+-		if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++		if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 			ASSERT(0); \
+ 		} \
+ 		if (kalDevRegRead(_prAdapter->prGlueInfo, _u4Offset, _pu4Value) == FALSE) {\
+@@ -97,7 +97,7 @@
+ #define HAL_MCR_HIF_WR(_prAdapter, _u4Offset, _u4Value) \
+ do { \
+ 	if (HAL_TEST_FLAG(_prAdapter, ADAPTER_FLAG_HW_ERR) == FALSE) { \
+-		if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++		if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 			ASSERT(0); \
+ 		} \
+ 		if (kalDevRegWrite(_prAdapter->prGlueInfo, _u4Offset, _u4Value) == FALSE) {\
+@@ -115,7 +115,7 @@
+ 
+ #define HAL_PORT_RD(_prAdapter, _u4Port, _u4Len, _pucBuf, _u4ValidBufSize) \
+ { \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (HAL_TEST_FLAG(_prAdapter, ADAPTER_FLAG_HW_ERR) == FALSE) { \
+@@ -140,7 +140,7 @@
+ 
+ #define HAL_PORT_WR(_prAdapter, _u4Port, _u4Len, _pucBuf, _u4ValidBufSize) \
+ { \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (HAL_TEST_FLAG(_prAdapter, ADAPTER_FLAG_HW_ERR) == FALSE) { \
+@@ -165,7 +165,7 @@
+ 
+ #define HAL_BYTE_WR(_prAdapter, _u4Port, _ucBuf) \
+ { \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (HAL_TEST_FLAG(_prAdapter, ADAPTER_FLAG_HW_ERR) == FALSE) { \
+@@ -188,7 +188,7 @@
+ #define HAL_DRIVER_OWN_BY_SDIO_CMD52(_prAdapter, _pfgDriverIsOwnReady) \
+ { \
+ 	UINT_8 ucBuf = BIT(1); \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (HAL_TEST_FLAG(_prAdapter, ADAPTER_FLAG_HW_ERR) == FALSE) { \
+@@ -228,7 +228,7 @@
+ 
+ #define HAL_MCR_HIF_RD(_prAdapter, _u4Offset, _pu4Value) \
+ do { \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (kalIsResetting() || kalIsResetTriggered()) { \
+@@ -255,7 +255,7 @@
+ 
+ #define HAL_MCR_HIF_WR(_prAdapter, _u4Offset, _u4Value) \
+ do { \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (kalIsResetting() || kalIsResetTriggered()) {\
+@@ -267,7 +267,7 @@
+ 
+ #define HAL_PORT_RD(_prAdapter, _u4Port, _u4Len, _pucBuf, _u4ValidBufSize) \
+ do { \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (_prAdapter->fgIsFwOwn == TRUE) { \
+@@ -283,7 +283,7 @@
+ 
+ #define HAL_PORT_WR(_prAdapter, _u4Port, _u4Len, _pucBuf, _u4ValidBufSize) \
+ do { \
+-	if (_prAdapter->rAcpiState == ACPI_STATE_D3) { \
++	if (_prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) { \
+ 		ASSERT(0); \
+ 	} \
+ 	if (_prAdapter->fgIsFwOwn == TRUE) { \
+--- a/wifi/wlan/core/gen3/include/nic/wlan_def.h
++++ b/wifi/wlan/core/gen3/include/nic/wlan_def.h
+@@ -526,10 +526,10 @@
+ } ENUM_MODULATION_TYPE_T, *P_ENUM_MODULATION_TYPE_T;
+ 
+ typedef enum _ENUM_ACPI_STATE_T {
+-	ACPI_STATE_D0 = 0,
+-	ACPI_STATE_D1,
+-	ACPI_STATE_D2,
+-	ACPI_STATE_D3
++	WLAN_ACPI_STATE_D0 = 0,
++	WLAN_ACPI_STATE_D1,
++	WLAN_ACPI_STATE_D2,
++	WLAN_ACPI_STATE_D3
+ } ENUM_ACPI_STATE_T;
+ 
+ /* The operation mode of a specific Network */
+--- a/wifi/wlan/core/gen3/mgmt/rlm_domain.c
++++ b/wifi/wlan/core/gen3/mgmt/rlm_domain.c
+@@ -692,6 +692,7 @@
+ 	 }
+ 	}
+ 	,
++#ifdef VENDOR_EDIT
+ 	{
+ 		 (uint16_t *) g_u2CountryGroup21, sizeof(g_u2CountryGroup21) / 2,
+ 		 {
+@@ -710,6 +711,7 @@
+ 		 }
+ 	}
+ 	,
++#endif /* VENDOR_EDIT */
+ #ifdef VENDOR_EDIT
+         //Add for: disable channel 12, 13 in Taiwan province
+         {
+--- a/wifi/wlan/core/gen3/mgmt/stats.c
++++ b/wifi/wlan/core/gen3/mgmt/stats.c
+@@ -140,7 +140,7 @@
+ 	UINT_64 u8IntTime = 0;
+ 	UINT_64 u8RxTime = 0;
+ 	UINT_32 u4Delay = 0;
+-	struct timeval tval;
++	struct __kernel_old_timeval tval;
+ 	struct rtc_time tm;
+ 
+ 	if ((g_ucTxRxFlag & BIT(1)) == 0)
+@@ -162,8 +162,8 @@
+ 	u8IntTime = GLUE_RX_GET_PKT_INT_TIME(prSkb);
+ 	u4Delay = ((UINT_32)(sched_clock() - u8IntTime))/NSEC_PER_USEC;
+ 	u8RxTime = GLUE_RX_GET_PKT_RX_TIME(prSkb);
+-	do_gettimeofday(&tval);
+-	rtc_time_to_tm(tval.tv_sec, &tm);
++	kalGetTimeOfDay(&tval);
++	rtc_time64_to_tm(tval.tv_sec, &tm);
+ 
+ 	switch (ucIpProto) {
+ 	case IP_PRO_TCP:
+--- a/wifi/wlan/core/gen3/mgmt/wmm.c
++++ b/wifi/wlan/core/gen3/mgmt/wmm.c
+@@ -1275,12 +1275,12 @@
+ 	struct SOFT_ACM_CTRL *prAcmCtrl = NULL;
+ 	struct WMM_INFO *prWmmInfo = &prAdapter->rWifiVar.rWmmInfo;
+ 	UINT_32 u4CurTime = 0;
+-	struct timespec ts;
++	struct timespec64 ts;
+ 
+ 	prAcmCtrl = &prWmmInfo->arAcmCtrl[ucAc];
+ 	if (!prAcmCtrl->u4AdmittedTime)
+ 		return FALSE;
+-	get_monotonic_boottime(&ts);
++	ktime_get_boottime_ts64(&ts);
+ 	u4CurTime = ts.tv_sec;
+ 	if (!TIME_BEFORE(u4CurTime, prAcmCtrl->u4IntervalEndSec)) {
+ 		u4CurTime++;
+@@ -1320,7 +1320,7 @@
+ 	if (!timerPendingTimer(&prWmmInfo->rAcmDeqTimer)) {
+ 		UINT_32 u4EndMsec = prAcmCtrl->u4IntervalEndSec * 1000;
+ 
+-		get_monotonic_boottime(&ts);
++		ktime_get_boottime_ts64(&ts);
+ 		u4CurTime = ts.tv_sec * MSEC_PER_SEC;
+ 		u4CurTime += ts.tv_nsec / NSEC_PER_MSEC;
+ 		/* It is impossible that u4EndMsec is less than u4CurTime */
+--- a/wifi/wlan/core/gen3/nic/nic.c
++++ b/wifi/wlan/core/gen3/nic/nic.c
+@@ -508,7 +508,7 @@
+ 
+ 	ASSERT(prAdapter);
+ 
+-	if (prAdapter->rAcpiState == ACPI_STATE_D3) {
++	if (prAdapter->rAcpiState == WLAN_ACPI_STATE_D3) {
+ 		DBGLOG(REQ, WARN,
+ 		       "Fail in set nicProcessIST! (Adapter not ready). ACPI=D%d, Radio=%d\n",
+ 			prAdapter->rAcpiState, prAdapter->fgIsRadioOff);
+--- a/wifi/wlan/core/gen3/nic/nic_pwr_mgt.c
++++ b/wifi/wlan/core/gen3/nic/nic_pwr_mgt.c
+@@ -307,7 +307,7 @@
+ 		/* 0. Reset variables in ADAPTER_T */
+ 		prAdapter->fgIsFwOwn = TRUE;
+ 		prAdapter->fgWiFiInSleepyState = FALSE;
+-		prAdapter->rAcpiState = ACPI_STATE_D0;
++		prAdapter->rAcpiState = WLAN_ACPI_STATE_D0;
+ 		prAdapter->fgIsEnterD3ReqIssued = FALSE;
+ 
+ 		/* 1. Request Ownership to enter F/W download state */
+@@ -501,7 +501,7 @@
+ 	nicpmSetFWOwn(prAdapter, FALSE);
+ 
+ 	/* 7. Set variables */
+-	prAdapter->rAcpiState = ACPI_STATE_D3;
++	prAdapter->rAcpiState = WLAN_ACPI_STATE_D3;
+ 
+ 	return TRUE;
+ }
+--- a/wifi/wlan/core/gen3/nic/nic_rx.c
++++ b/wifi/wlan/core/gen3/nic/nic_rx.c
+@@ -3910,7 +3910,6 @@
+ 	{
+ 
+ 		aisFuncValidateRxActionFrame(prAdapter, prSwRfb);
+-		ucProcessed = 1;
+ #if CFG_ENABLE_WIFI_DIRECT
+ 		if (prAdapter->fgIsP2PRegistered) {
+ 			rlmProcessPublicAction(prAdapter, prSwRfb);
+--- a/wifi/wlan/core/gen3/os/linux/gl_bow.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_bow.c
+@@ -354,9 +354,9 @@
+ 		return -EFAULT;
+ 	/* permission check */
+ 	if (_IOC_DIR(cmd) & _IOC_READ)
+-		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
++		err = !access_ok((void __user *)arg, _IOC_SIZE(cmd));
+ 	else if (_IOC_DIR(cmd) & _IOC_WRITE)
+-		err = !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
++		err = !access_ok((void __user *)arg, _IOC_SIZE(cmd));
+ 	if (err)
+ 		return -EFAULT;
+ 
+--- a/wifi/wlan/core/gen3/os/linux/gl_cfg80211.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_cfg80211.c
+@@ -1778,6 +1778,22 @@
+ 
+ }				/* mtk_cfg80211_mgmt_frame_register */
+ 
++/*
++ * Linux 5.10 passes every subtype registered on the interface as one bitmap
++ * (bit = subtype >> 4) in place of one call per frame type.
++ */
++void mtk_cfg80211_update_mgmt_frame_registrations(struct wiphy *wiphy,
++						  struct wireless_dev *wdev,
++						  struct mgmt_frame_regs *upd)
++{
++	u32 stypes = upd->interface_stypes;
++
++	mtk_cfg80211_mgmt_frame_register(wiphy, wdev, MAC_FRAME_PROBE_REQ,
++					 stypes & BIT(IEEE80211_STYPE_PROBE_REQ >> 4));
++	mtk_cfg80211_mgmt_frame_register(wiphy, wdev, MAC_FRAME_ACTION,
++					 stypes & BIT(IEEE80211_STYPE_ACTION >> 4));
++}
++
+ /*----------------------------------------------------------------------------*/
+ /*!
+  * @brief This routine is responsible for requesting to stay on a
+--- a/wifi/wlan/core/gen3/os/linux/gl_hook_api.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_hook_api.c
+@@ -475,7 +475,7 @@
+ 		u4BWMapping = 5;
+ 	else if (u4BW == 5)
+ 		u4BWMapping = 3;
+-	else if (u4BW == 6)
++	else /* 6: larger values are rejected above */
+ 		u4BWMapping = 4;
+ 
+ 	rRfATInfo.u4FuncIndex = RF_AT_FUNCID_SET_CBW;
+@@ -716,7 +716,7 @@
+ 		u4BWMapping = 5;
+ 	else if (u4BW == 5)
+ 		u4BWMapping = 3;
+-	else if (u4BW == 6)
++	else /* 6: larger values are rejected above */
+ 		u4BWMapping = 4;
+ 
+ 	rRfATInfo.u4FuncIndex = RF_AT_FUNCID_SET_DBW;
+--- a/wifi/wlan/core/gen3/os/linux/gl_init.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_init.c
+@@ -318,7 +318,7 @@
+ 	.cancel_remain_on_channel = mtk_cfg80211_cancel_remain_on_channel,
+ 	.mgmt_tx = mtk_cfg80211_mgmt_tx,
+ 	/* .mgmt_tx_cancel_wait        = mtk_cfg80211_mgmt_tx_cancel_wait, */
+-	.mgmt_frame_register = mtk_cfg80211_mgmt_frame_register,
++	.update_mgmt_frame_registrations = mtk_cfg80211_update_mgmt_frame_registrations,
+ #ifdef CONFIG_NL80211_TESTMODE
+ 	.testmode_cmd = mtk_cfg80211_testmode_cmd,
+ #endif
+@@ -335,6 +335,7 @@
+ #endif
+ };
+ 
++/* 5.10 wiphy_register() needs a policy on every vendor command; these parse their own data. */
+ static const struct wiphy_vendor_command mtk_wlan_vendor_ops[] = {
+ 	{
+ 		{
+@@ -342,7 +343,8 @@
+ 			.subcmd = WIFI_SUBCMD_GET_CHANNEL_LIST
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_channel_list
++		.doit = mtk_cfg80211_vendor_get_channel_list,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -350,7 +352,8 @@
+ 			.subcmd = WIFI_SUBCMD_SET_COUNTRY_CODE
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_country_code
++		.doit = mtk_cfg80211_vendor_set_country_code,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* Roaming */
+ 	{
+@@ -359,7 +362,8 @@
+ 			.subcmd = WIFI_SUBCMD_GET_ROAMING_CAPABILITIES
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_roaming_capabilities
++		.doit = mtk_cfg80211_vendor_get_roaming_capabilities,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -367,7 +371,8 @@
+ 			.subcmd = WIFI_SUBCMD_CONFIG_ROAMING
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_config_roaming
++		.doit = mtk_cfg80211_vendor_config_roaming,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -375,7 +380,8 @@
+ 			.subcmd = WIFI_SUBCMD_ENABLE_ROAMING
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_enable_roaming
++		.doit = mtk_cfg80211_vendor_enable_roaming,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* GSCAN */
+ #if CFG_SUPPORT_GSCN
+@@ -385,7 +391,8 @@
+ 			.subcmd = GSCAN_SUBCMD_GET_CAPABILITIES
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_gscan_capabilities
++		.doit = mtk_cfg80211_vendor_get_gscan_capabilities,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -393,7 +400,8 @@
+ 			.subcmd = GSCAN_SUBCMD_SET_CONFIG
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_config
++		.doit = mtk_cfg80211_vendor_set_config,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -401,7 +409,8 @@
+ 			.subcmd = GSCAN_SUBCMD_SET_SCAN_CONFIG
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_scan_config
++		.doit = mtk_cfg80211_vendor_set_scan_config,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -409,7 +418,8 @@
+ 			.subcmd = GSCAN_SUBCMD_ENABLE_GSCAN
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_enable_scan
++		.doit = mtk_cfg80211_vendor_enable_scan,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -417,7 +427,8 @@
+ 			.subcmd = GSCAN_SUBCMD_ENABLE_FULL_SCAN_RESULTS
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_enable_full_scan_results
++		.doit = mtk_cfg80211_vendor_enable_full_scan_results,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -425,7 +436,8 @@
+ 			.subcmd = GSCAN_SUBCMD_GET_SCAN_RESULTS
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_gscan_result
++		.doit = mtk_cfg80211_vendor_get_gscan_result,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -433,7 +445,8 @@
+ 			.subcmd = GSCAN_SUBCMD_SET_SIGNIFICANT_CHANGE_CONFIG
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_significant_change
++		.doit = mtk_cfg80211_vendor_set_significant_change,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -441,7 +454,8 @@
+ 			.subcmd = GSCAN_SUBCMD_SET_HOTLIST
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_hotlist
++		.doit = mtk_cfg80211_vendor_set_hotlist,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ #endif
+ 	/* RTT */
+@@ -451,7 +465,8 @@
+ 			.subcmd = RTT_SUBCMD_GETCAPABILITY
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_rtt_capabilities
++		.doit = mtk_cfg80211_vendor_get_rtt_capabilities,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* Link Layer Statistics */
+ 	{
+@@ -460,7 +475,8 @@
+ 			.subcmd = LSTATS_SUBCMD_GET_INFO
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_llstats_get_info
++		.doit = mtk_cfg80211_vendor_llstats_get_info,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* RSSI Monitoring */
+ 	{
+@@ -469,7 +485,8 @@
+ 			.subcmd = WIFI_SUBCMD_SET_RSSI_MONITOR
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_rssi_monitoring
++		.doit = mtk_cfg80211_vendor_set_rssi_monitoring,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* Packet Keep Alive */
+ 	{
+@@ -478,7 +495,8 @@
+ 			.subcmd = WIFI_OFFLOAD_START_MKEEP_ALIVE
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_packet_keep_alive_start
++		.doit = mtk_cfg80211_vendor_packet_keep_alive_start,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -486,7 +504,8 @@
+ 			.subcmd = WIFI_OFFLOAD_STOP_MKEEP_ALIVE
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_packet_keep_alive_stop
++		.doit = mtk_cfg80211_vendor_packet_keep_alive_stop,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -495,7 +514,8 @@
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV
+ 			| WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_scan_mac_oui
++		.doit = mtk_cfg80211_vendor_set_scan_mac_oui,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -503,7 +523,8 @@
+ 			.subcmd = QCA_NL80211_VENDOR_SUBCMD_ROAMING
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_roaming_policy
++		.doit = mtk_cfg80211_vendor_set_roaming_policy,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* Get Supported Feature Set */
+ 	{
+@@ -513,7 +534,8 @@
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+ 				WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_supported_feature_set
++		.doit = mtk_cfg80211_vendor_get_supported_feature_set,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* Get Driver Version or Firmware Version */
+ 	{
+@@ -523,7 +545,8 @@
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+ 				WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_version
++		.doit = mtk_cfg80211_vendor_get_version,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* Set Tx Power Scenario */
+ 	{
+@@ -533,7 +556,8 @@
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+ 				WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_tx_power_scenario
++		.doit = mtk_cfg80211_vendor_set_tx_power_scenario,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	/* Get Driver Memory Dump */
+ 	{
+@@ -543,7 +567,8 @@
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+ 				WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_driver_memory_dump
++		.doit = mtk_cfg80211_vendor_driver_memory_dump,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	}
+ 
+ };
+@@ -689,7 +714,7 @@
+ #endif
+ 
+ UINT_16 wlanSelectQueue(struct net_device *dev, struct sk_buff *skb,
+-			void *accel_priv, select_queue_fallback_t fallback)
++			struct net_device *sb_dev)
+ {
+ 	UINT_16 au16Wlan1dToQueueIdx[8] = { 1, 0, 0, 1, 2, 2, 3, 3 };
+ 
+@@ -2803,6 +2828,9 @@
+ 
+ 	DBGLOG(INIT, INFO, "wlan thread stopped\n");
+ 
++	/* The perf monitor timer runs on the main thread, now stopped: drop any CPU boost request. */
++	kalBoostCpu(0);
++
+ 	/* prGlueInfo->rHifInfo.main_thread = NULL; */
+ 	prGlueInfo->main_thread = NULL;
+ #if CFG_SUPPORT_MULTITHREAD
+@@ -2953,6 +2981,9 @@
+ 
+ 	glUnregisterBus(wlanRemove);
+ 
++	/* No freq QoS request may outlive the module, even if wlanRemove returned early. */
++	kalBoostCpu(0);
++
+ 	/* free pre-allocated memory */
+ 	kalUninitIOBuffer();
+ 	destroyWirelessDevice();
+@@ -2989,3 +3020,5 @@
+ MODULE_DESCRIPTION(NIC_DESC);
+ MODULE_SUPPORTED_DEVICE(NIC_NAME);
+ MODULE_LICENSE("GPL");
++/* filp_open, kernel_read and kernel_write for the firmware and config files. */
++MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+--- a/wifi/wlan/core/gen3/os/linux/gl_kal.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_kal.c
+@@ -49,7 +49,11 @@
+ #include "connectivity_build_in_adapter.h"
+ #endif
+ 
+-#if defined(CONFIG_MTK_QOS_SUPPORT)
++/*
++ * Linux 5.10: the VCORE OPP requests need the 4.14 DVFSRC, which
++ * 5.10 here lacks, so CFG_WLAN_VCORE_QOS is never set and they are left out.
++ */
++#if defined(CFG_WLAN_VCORE_QOS)
+ #include <linux/pm_qos.h>
+ #include <helio-dvfsrc-opp.h>
+ #endif
+@@ -110,7 +114,7 @@
+ BOOLEAN wlan_perf_monitor_force_enable = FALSE;
+ #endif
+ 
+-#if defined(CONFIG_MTK_QOS_SUPPORT)
++#if defined(CFG_WLAN_VCORE_QOS)
+ static struct pm_qos_request vcore_req;
+ static atomic_t vcore_req_cnt;
+ static atomic_t vcore_changed;
+@@ -135,13 +139,12 @@
+ static struct file *filp;
+ static uid_t orgfsuid;
+ static gid_t orgfsgid;
+-static mm_segment_t orgfs;
+ 
+ static PUINT_8 apucFwPath[] = {
+-	//#ifdef OPLUS_FEATURE_WIFI_RUSUPGRADE
++#ifdef OPLUS_FEATURE_WIFI_RUSUPGRADE
+ 	//add for: support auto update function, include mtk fw, mtk wifi.cfg, qcom fw, qcom bdf, qcom ini
+         (PUINT_8) "/data/misc/firmware/active/",
+-        //#endif /* OPLUS_FEATURE_WIFI_RUSUPGRADE */
++#endif /* OPLUS_FEATURE_WIFI_RUSUPGRADE */
+ 	(PUINT_8) "/storage/sdcard0/",
+ 	(PUINT_8) "/etc/firmware/",
+ 	(PUINT_8) "/vendor/firmware/",
+@@ -235,9 +238,6 @@
+ 
+ 	ASSERT(prGlueInfo);
+ 
+-	orgfs = get_fs();
+-	set_fs(get_ds());
+-
+ 	/* Get FW name table */
+ 	if (ucMaxEcoVer < ucCurEcoVer)
+ 		apucNameTable = apucFwName;
+@@ -296,7 +296,6 @@
+ 
+ error_open:
+ 	/* restore */
+-	set_fs(orgfs);
+ 	cred->fsuid.val = orgfsuid;
+ 	cred->fsgid.val = orgfsgid;
+ 	put_cred(cred);
+@@ -324,7 +323,6 @@
+ 		filp_close(filp, NULL);
+ 
+ 		/* restore */
+-		set_fs(orgfs);
+ 		{
+ 			struct cred *cred = (struct cred *)get_current_cred();
+ 
+@@ -3606,9 +3604,8 @@
+ 
+ 	ASSERT(prGlueInfo);
+ 
+-	init_timer(&(prGlueInfo->tickfn));
+-	prGlueInfo->tickfn.function = prTimerHandler;
+-	prGlueInfo->tickfn.data = (unsigned long)prGlueInfo;
++	/* Linux 5.10 timers: the handler finds prGlueInfo with from_timer(). */
++	timer_setup(&prGlueInfo->tickfn, (void (*)(struct timer_list *))prTimerHandler, 0);
+ }
+ 
+ /* Todo */
+@@ -3707,10 +3704,10 @@
+  * \retval (none)
+  */
+ /*----------------------------------------------------------------------------*/
+-VOID kalTimeoutHandler(unsigned long arg)
++VOID kalTimeoutHandler(struct timer_list *t)
+ {
+ 
+-	P_GLUE_INFO_T prGlueInfo = (P_GLUE_INFO_T) arg;
++	P_GLUE_INFO_T prGlueInfo = from_timer(prGlueInfo, t, tickfn);
+ 
+ 	ASSERT(prGlueInfo);
+ 
+@@ -4188,13 +4185,9 @@
+ struct file *kalFileOpen(const char *path, int flags, int rights)
+ {
+ 	struct file *filp = NULL;
+-	mm_segment_t oldfs;
+ 	int err = 0;
+ 
+-	oldfs = get_fs();
+-	set_fs(get_ds());
+ 	filp = filp_open(path, flags, rights);
+-	set_fs(oldfs);
+ 	if (IS_ERR(filp)) {
+ 		err = PTR_ERR(filp);
+ 		return NULL;
+@@ -4209,30 +4202,16 @@
+ 
+ UINT_32 kalFileRead(struct file *file, unsigned long long offset, unsigned char *data, unsigned int size)
+ {
+-	mm_segment_t oldfs;
+-	int ret;
++	loff_t pos = offset;
+ 
+-	oldfs = get_fs();
+-	set_fs(get_ds());
+-
+-	ret = vfs_read(file, data, size, &offset);
+-
+-	set_fs(oldfs);
+-	return ret;
++	return kernel_read(file, data, size, &pos);
+ }
+ 
+ UINT_32 kalFileWrite(struct file *file, unsigned long long offset, unsigned char *data, unsigned int size)
+ {
+-	mm_segment_t oldfs;
+-	int ret;
++	loff_t pos = offset;
+ 
+-	oldfs = get_fs();
+-	set_fs(get_ds());
+-
+-	ret = vfs_write(file, data, size, &offset);
+-
+-	set_fs(oldfs);
+-	return ret;
++	return kernel_write(file, data, size, &pos);
+ }
+ 
+ UINT_32 kalWriteToFile(const PUINT_8 pucPath, BOOLEAN fgDoAppend, PUINT_8 pucData, UINT_32 u4Size)
+@@ -5044,8 +5023,12 @@
+ static unsigned long __read_mostly tracing_mark_write_addr;
+ static inline void __mt_update_tracing_mark_write_addr(void)
+ {
++	/*
++	 * Linux 5.10 doesn't export kallsyms_lookup_name, so the MET trace lines
++	 * carry this address in place of tracing_mark_write's.
++	 */
+ 	if (unlikely(tracing_mark_write_addr == 0))
+-		tracing_mark_write_addr = kallsyms_lookup_name("tracing_mark_write");
++		tracing_mark_write_addr = _THIS_IP_;
+ }
+ 
+ VOID kalMetTagPacket(IN P_GLUE_INFO_T prGlueInfo, IN P_NATIVE_PACKET prPacket, IN ENUM_TX_PROFILING_TAG_T eTag)
+@@ -5191,12 +5174,12 @@
+ .write = kalMetWriteProcfs
+ };
+ #endif
+-const struct file_operations rMetProcCtrlFops = {
+-.write = kalMetCtrlWriteProcfs
++const struct proc_ops rMetProcCtrlFops = {
++	.proc_write = kalMetCtrlWriteProcfs
+ };
+ 
+-const struct file_operations rMetProcPortFops = {
+-.write = kalMetPortWriteProcfs
++const struct proc_ops rMetProcPortFops = {
++	.proc_write = kalMetPortWriteProcfs
+ };
+ 
+ int kalMetInitProcfs(IN P_GLUE_INFO_T prGlueInfo)
+@@ -5277,10 +5260,10 @@
+ 
+ UINT_64 kalGetBootTime(void)
+ {
+-	struct timespec ts;
++	struct timespec64 ts;
+ 	UINT_64 bootTime = 0;
+ 
+-	get_monotonic_boottime(&ts);
++	ktime_get_boottime_ts64(&ts);
+ 	bootTime = ts.tv_sec;
+ 	bootTime *= USEC_PER_SEC;
+ 	bootTime += ts.tv_nsec / NSEC_PER_USEC;
+@@ -5885,7 +5868,7 @@
+ 
+ VOID kalVcoreInitUninit(BOOLEAN fgInit)
+ {
+-#ifdef CONFIG_MTK_QOS_SUPPORT
++#ifdef CFG_WLAN_VCORE_QOS
+ 	if (fgInit) {
+ 		atomic_set(&vcore_req_cnt, 0);
+ 		atomic_set(&vcore_changed, 0);
+@@ -5900,7 +5883,7 @@
+ 
+ inline VOID kalMayChangeVcore(VOID)
+ {
+-#ifdef CONFIG_MTK_QOS_SUPPORT
++#ifdef CFG_WLAN_VCORE_QOS
+ 	if (unlikely(!atomic_read(&vcore_changed))) {
+ 		atomic_inc(&vcore_changed);
+ 		kalTakeVcoreAction(VCORE_SET_HIGHER);
+@@ -5910,7 +5893,7 @@
+ 
+ VOID kalTakeVcoreAction(UINT_8 ucAction)
+ {
+-#if defined(CONFIG_MTK_QOS_SUPPORT)
++#if defined(CFG_WLAN_VCORE_QOS)
+ 	mutex_lock(&vcore_mutex);
+ 	switch (ucAction) {
+ 	case VCORE_ADD_HIGHER_REQ:
+--- a/wifi/wlan/core/gen3/os/linux/gl_p2p.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_p2p.c
+@@ -94,7 +94,7 @@
+ 	.set_wiphy_params = mtk_p2p_cfg80211_set_wiphy_params,
+ 	.del_station = mtk_p2p_cfg80211_del_station,
+ 	.set_bitrate_mask = mtk_p2p_cfg80211_set_bitrate_mask,
+-	.mgmt_frame_register = mtk_p2p_cfg80211_mgmt_frame_register,
++	.update_mgmt_frame_registrations = mtk_p2p_cfg80211_update_mgmt_frame_registrations,
+ 	.get_station = mtk_p2p_cfg80211_get_station,
+ 	.add_key = mtk_p2p_cfg80211_add_key,
+ 	.get_key = mtk_p2p_cfg80211_get_key,
+@@ -111,6 +111,7 @@
+ #endif
+ };
+ 
++/* 5.10 wiphy_register() needs a policy on every vendor command; these parse their own data. */
+ static const struct wiphy_vendor_command mtk_p2p_vendor_ops[] = {
+ 	{
+ 		{
+@@ -118,7 +119,8 @@
+ 			.subcmd = WIFI_SUBCMD_GET_CHANNEL_LIST
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_channel_list
++		.doit = mtk_cfg80211_vendor_get_channel_list,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ 	{
+ 		{
+@@ -126,7 +128,8 @@
+ 			.subcmd = WIFI_SUBCMD_SET_COUNTRY_CODE
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV | WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_set_country_code
++		.doit = mtk_cfg80211_vendor_set_country_code,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ #if CFG_AUTO_CHANNEL_SEL_SUPPORT
+ 	{
+@@ -137,7 +140,8 @@
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV
+ 				| WIPHY_VENDOR_CMD_NEED_NETDEV
+ 				| WIPHY_VENDOR_CMD_NEED_RUNNING,
+-		.doit = mtk_cfg80211_vendor_acs
++		.doit = mtk_cfg80211_vendor_acs,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ #endif
+ 	{
+@@ -147,7 +151,8 @@
+ 		},
+ 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV
+ 				| WIPHY_VENDOR_CMD_NEED_NETDEV,
+-		.doit = mtk_cfg80211_vendor_get_features
++		.doit = mtk_cfg80211_vendor_get_features,
++		.policy = VENDOR_CMD_RAW_DATA
+ 	},
+ };
+ 
+--- a/wifi/wlan/core/gen3/os/linux/gl_p2p_cfg80211.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_p2p_cfg80211.c
+@@ -1746,6 +1746,25 @@
+ 
+ }				/* mtk_p2p_cfg80211_mgmt_frame_register */
+ 
++/* Linux 5.10: one bitmap of registered subtypes (bit = subtype >> 4). */
++void mtk_p2p_cfg80211_update_mgmt_frame_registrations(struct wiphy *wiphy,
++						      struct wireless_dev *wdev,
++						      struct mgmt_frame_regs *upd)
++{
++	u32 stypes = upd->interface_stypes;
++
++	mtk_p2p_cfg80211_mgmt_frame_register(wiphy, wdev, MAC_FRAME_PROBE_REQ,
++					     stypes & BIT(IEEE80211_STYPE_PROBE_REQ >> 4));
++	mtk_p2p_cfg80211_mgmt_frame_register(wiphy, wdev, MAC_FRAME_ACTION,
++					     stypes & BIT(IEEE80211_STYPE_ACTION >> 4));
++#if CFG_SUPPORT_SOFTAP_WPA3
++	mtk_p2p_cfg80211_mgmt_frame_register(wiphy, wdev, MAC_FRAME_AUTH,
++					     stypes & BIT(IEEE80211_STYPE_AUTH >> 4));
++	mtk_p2p_cfg80211_mgmt_frame_register(wiphy, wdev, MAC_FRAME_ASSOC_REQ,
++					     stypes & BIT(IEEE80211_STYPE_ASSOC_REQ >> 4));
++#endif
++}
++
+ #if CONFIG_NL80211_TESTMODE
+ 
+ int mtk_p2p_cfg80211_testmode_cmd(IN struct wiphy *wiphy, IN struct wireless_dev *wdev, IN void *data, IN int len)
+--- a/wifi/wlan/core/gen3/os/linux/gl_proc.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_proc.c
+@@ -204,10 +204,9 @@
+ }
+ 
+ 
+-static const struct file_operations dbglevel_ops = {
+-	.owner = THIS_MODULE,
+-	.read = procDbgLevelRead,
+-	.write = procDbgLevelWrite,
++static const struct proc_ops dbglevel_ops = {
++	.proc_read = procDbgLevelRead,
++	.proc_write = procDbgLevelWrite,
+ };
+ 
+ static ssize_t procPktDelayDbgCfgRead(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+@@ -322,10 +321,9 @@
+ 	return count;
+ }
+ 
+-static const struct file_operations proc_pkt_delay_dbg_ops = {
+-	.owner = THIS_MODULE,
+-	.read  = procPktDelayDbgCfgRead,
+-	.write = procPktDelayDbgCfgWrite,
++static const struct proc_ops proc_pkt_delay_dbg_ops = {
++	.proc_read = procPktDelayDbgCfgRead,
++	.proc_write = procPktDelayDbgCfgWrite,
+ };
+ 
+ static ssize_t procSetCamCfgWrite(struct file *file, const char __user *buffer, size_t count, loff_t *data)
+@@ -378,9 +376,8 @@
+ 	return count;
+ }
+ 
+-static const struct file_operations proc_set_cam_ops = {
+-	.owner = THIS_MODULE,
+-	.write = procSetCamCfgWrite,
++static const struct proc_ops proc_set_cam_ops = {
++	.proc_write = procSetCamCfgWrite,
+ };
+ 
+ /*******************************************************************************
+@@ -504,10 +501,9 @@
+ 
+ }				/* end of procMCRWrite() */
+ 
+-static const struct file_operations mcr_ops = {
+-	.owner = THIS_MODULE,
+-	.read = procMCRRead,
+-	.write = procMCRWrite,
++static const struct proc_ops mcr_ops = {
++	.proc_read = procMCRRead,
++	.proc_write = procMCRWrite,
+ };
+ 
+ #if CFG_SUPPORT_DEBUG_FS
+@@ -571,10 +567,9 @@
+ 	return count;
+ }
+ 
+-static const struct file_operations roam_ops = {
+-	.owner = THIS_MODULE,
+-	.read = procRoamRead,
+-	.write = procRoamWrite,
++static const struct proc_ops roam_ops = {
++	.proc_read = procRoamRead,
++	.proc_write = procRoamWrite,
+ };
+ 
+ static ssize_t procCountryRead(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+@@ -635,10 +630,9 @@
+ 	return count;
+ }
+ 
+-static const struct file_operations country_ops = {
+-	.owner = THIS_MODULE,
+-	.read = procCountryRead,
+-	.write = procCountryWrite,
++static const struct proc_ops country_ops = {
++	.proc_read = procCountryRead,
++	.proc_write = procCountryWrite,
+ };
+ #endif
+ 
+@@ -717,10 +711,9 @@
+ 	return count;
+ }
+ 
+-static const struct file_operations wifi_cfg_ops = {
+-	.owner = THIS_MODULE,
+-	.read = procWifiCfgRead,
+-	.write = procWifiCfgWrite,
++static const struct proc_ops wifi_cfg_ops = {
++	.proc_read = procWifiCfgRead,
++	.proc_write = procWifiCfgWrite,
+ };
+ #endif
+ static ssize_t procAutoPerfCfgRead(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+@@ -796,10 +789,9 @@
+ 	return -EFAULT;
+ }
+ 
+-static const struct file_operations auto_perf_ops = {
+-	.owner = THIS_MODULE,
+-	.read = procAutoPerfCfgRead,
+-	.write = procAutoPerfCfgWrite,
++static const struct proc_ops auto_perf_ops = {
++	.proc_read = procAutoPerfCfgRead,
++	.proc_write = procAutoPerfCfgWrite,
+ };
+ 
+ VOID glWriteStatus(PPUINT_8 ppucWrPos, PUINT_32 pu4RemainLen, PUINT_8 pucFwt, ...)
+@@ -809,14 +801,14 @@
+ 	INT_32 i4BufUsed = 0;
+ 	INT_32 i4TimeUsed = 0;
+ 	va_list ap;
+-	struct timeval tval;
++	struct __kernel_old_timeval tval;
+ 	struct rtc_time tm;
+ 	static UINT_8 aucBuf[TEMP_BUF_LEN];
+ 
+ 	pucTemp = &aucBuf[0];
+-	do_gettimeofday(&tval);
++	kalGetTimeOfDay(&tval);
+ 	tval.tv_sec -= sys_tz.tz_minuteswest * 60;
+-	rtc_time_to_tm(tval.tv_sec, &tm);
++	rtc_time64_to_tm(tval.tv_sec, &tm);
+ 	i4TimeUsed = kalSnprintf(pucTemp, TEMP_BUF_LEN, "%04d-%02d-%02d %02d:%02d:%02d.%03d ",
+ 				 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+ 				 tm.tm_min, tm.tm_sec, (INT_32)(tval.tv_usec / USEC_PER_MSEC));
+@@ -1092,10 +1084,9 @@
+ 	return -EINVAL;
+ }
+ 
+-static const struct file_operations drv_status_ops = {
+-	.owner = THIS_MODULE,
+-	.read = procReadDrvStatus,
+-	.write = procDrvStatusCfg,
++static const struct proc_ops drv_status_ops = {
++	.proc_read = procReadDrvStatus,
++	.proc_write = procDrvStatusCfg,
+ };
+ 
+ INT_32 procInitFs(VOID)
+@@ -1557,10 +1548,9 @@
+ 	return count;
+ }
+ 
+-static const struct file_operations cfg_ops = {
+-	.owner = THIS_MODULE,
+-	.read = cfgRead,
+-	.write = cfgWrite,
++static const struct proc_ops cfg_ops = {
++	.proc_read = cfgRead,
++	.proc_write = cfgWrite,
+ };
+ 
+ INT_32 cfgRemoveProcEntry(void)
+--- a/wifi/wlan/core/gen3/os/linux/gl_wext.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_wext.c
+@@ -2066,7 +2066,7 @@
+ 
+ 	if (prRts->disabled == 1)
+ 		u4RtsThresh = 2347;
+-	else if (prRts->value >= 0 || prRts->value <= 2347)
++	else if (prRts->value >= 0 && prRts->value <= 2347)
+ 		u4RtsThresh = (PARAM_RTS_THRESHOLD) prRts->value;
+ 	else
+ 		return -EINVAL;
+@@ -2192,12 +2192,12 @@
+ 			DBGLOG(INIT, INFO, "######set assoc ok\n");
+ 		}
+ 		/* <2> mark to power state flag */
+-		ePowerState = ACPI_STATE_D0;
++		ePowerState = WLAN_ACPI_STATE_D0;
+ 		DBGLOG(INIT, INFO, "set to acpi d3(0)\n");
+ 		wlanSetAcpiState(prGlueInfo->prAdapter, ePowerState);
+ 
+ 	} else {
+-		ePowerState = ACPI_STATE_D0;
++		ePowerState = WLAN_ACPI_STATE_D0;
+ 		DBGLOG(INIT, INFO, "set to acpi d0\n");
+ 		wlanSetAcpiState(prGlueInfo->prAdapter, ePowerState);
+ 	}
+--- a/wifi/wlan/core/gen3/os/linux/gl_wext_priv.c
++++ b/wifi/wlan/core/gen3/os/linux/gl_wext_priv.c
+@@ -2158,7 +2158,7 @@
+ 
+ 	ASSERT(IW_IS_GET(u2Cmd));
+ 	if (prIwReqData->data.length != 0) {
+-		if (!access_ok(VERIFY_READ, prIwReqData->data.pointer, prIwReqData->data.length)) {
++		if (!access_ok(prIwReqData->data.pointer, prIwReqData->data.length)) {
+ 			DBGLOG(REQ, INFO, "%s access_ok Read fail written = %d\n", __func__, i4BytesWritten);
+ 			return -EFAULT;
+ 		}
+@@ -2193,7 +2193,7 @@
+ 	/* trick,hack in ./net/wireless/wext-priv.c ioctl_private_iw_point */
+ 	/* because the cmd number is even (set), the return string will not be copy_to_user */
+ 	ASSERT(IW_IS_SET(u2Cmd));
+-	if (!access_ok(VERIFY_WRITE, prIwReqData->data.pointer, i4BytesWritten)) {
++	if (!access_ok(prIwReqData->data.pointer, i4BytesWritten)) {
+ 		DBGLOG(REQ, INFO, "%s access_ok Write fail written = %d\n", __func__, i4BytesWritten);
+ 		return -EFAULT;
+ 	}
+--- a/wifi/wlan/core/gen3/os/linux/include/gl_cfg80211.h
++++ b/wifi/wlan/core/gen3/os/linux/include/gl_cfg80211.h
+@@ -256,6 +256,10 @@
+ 				      IN struct wireless_dev *wdev,
+ 				      IN u16 frame_type, IN bool reg);
+ 
++void mtk_cfg80211_update_mgmt_frame_registrations(struct wiphy *wiphy,
++						  struct wireless_dev *wdev,
++						  struct mgmt_frame_regs *upd);
++
+ int mtk_cfg80211_mgmt_tx_cancel_wait(struct wiphy *wiphy,
+ 				     struct wireless_dev *wdev,
+ 				     u64 cookie);
+--- a/wifi/wlan/core/gen3/os/linux/include/gl_kal.h
++++ b/wifi/wlan/core/gen3/os/linux/include/gl_kal.h
+@@ -487,11 +487,28 @@
+ #define KAL_WAKE_LOCK_ACTIVE(_prAdapter, _prWakeLock) \
+ 	wake_lock_active(_prWakeLock)
+ #else
++/*
++ * Linux 5.10 has no wakeup_source_init or _trash. These wakeup sources are
++ * embedded, so they are added and removed as 4.14 did: the name is not copied.
++ */
++static inline VOID kalWakeupSourceInit(struct wakeup_source *ws, const char *name)
++{
++	memset(ws, 0, sizeof(*ws));
++	ws->name = name;
++	wakeup_source_add(ws);
++}
++
++static inline VOID kalWakeupSourceTrash(struct wakeup_source *ws)
++{
++	wakeup_source_remove(ws);
++	__pm_relax(ws);
++}
++
+ #define KAL_WAKE_LOCK_INIT(_prAdapter, _prWakeLock, _pcName) \
+-	wakeup_source_init(_prWakeLock, _pcName)
++	kalWakeupSourceInit(_prWakeLock, _pcName)
+ 
+ #define KAL_WAKE_LOCK_DESTROY(_prAdapter, _prWakeLock) \
+-	wakeup_source_trash(_prWakeLock)
++	kalWakeupSourceTrash(_prWakeLock)
+ 
+ #define KAL_WAKE_LOCK(_prAdapter, _prWakeLock) \
+ 		__pm_stay_awake(_prWakeLock)
+@@ -984,7 +1001,7 @@
+ 
+ UINT_32 kalRandomNumber(VOID);
+ 
+-VOID kalTimeoutHandler(unsigned long arg);
++VOID kalTimeoutHandler(struct timer_list *t);
+ 
+ VOID kalSetEvent(P_GLUE_INFO_T pr);
+ 
+@@ -1131,6 +1148,16 @@
+ #endif
+ UINT_64 kalGetBootTime(VOID);
+ 
++/* Linux 5.10 has no do_gettimeofday; the same wall-clock value, for log stamps. */
++static inline VOID kalGetTimeOfDay(struct __kernel_old_timeval *tv)
++{
++	struct timespec64 now;
++
++	ktime_get_real_ts64(&now);
++	tv->tv_sec = now.tv_sec;
++	tv->tv_usec = now.tv_nsec / NSEC_PER_USEC;
++}
++
+ int kalMetInitProcfs(IN P_GLUE_INFO_T prGlueInfo);
+ int kalMetRemoveProcfs(void);
+ #if CFG_SUPPORT_WAKEUP_REASON_DEBUG
+--- a/wifi/wlan/core/gen3/os/linux/include/gl_os.h
++++ b/wifi/wlan/core/gen3/os/linux/include/gl_os.h
+@@ -953,7 +953,7 @@
+ P_GLUE_INFO_T wlanGetGlueInfo(VOID);
+ 
+ UINT_16 wlanSelectQueue(struct net_device *dev, struct sk_buff *skb,
+-			void *accel_priv, select_queue_fallback_t fallback);
++			struct net_device *sb_dev);
+ 
+ VOID wlanDebugInit(VOID);
+ 
+--- a/wifi/wlan/core/gen3/os/linux/include/gl_p2p_ioctl.h
++++ b/wifi/wlan/core/gen3/os/linux/include/gl_p2p_ioctl.h
+@@ -408,6 +408,10 @@
+ 					  struct wireless_dev *wdev,
+ 					  IN u16 frame_type, IN bool reg);
+ 
++void mtk_p2p_cfg80211_update_mgmt_frame_registrations(struct wiphy *wiphy,
++						      struct wireless_dev *wdev,
++						      struct mgmt_frame_regs *upd);
++
+ int
+ mtk_p2p_cfg80211_set_bitrate_mask(IN struct wiphy *wiphy,
+ 				  IN struct net_device *dev,
+--- a/wifi/wlan/core/gen3/os/linux/include/gl_vendor.h
++++ b/wifi/wlan/core/gen3/os/linux/include/gl_vendor.h
+@@ -427,7 +427,13 @@
+ #define NLA_PUT_U64(skb, attrtype, value) \
+ 	NLA_PUT_TYPE(skb, NLA_PUT_DATE_U64, attrtype, value)
+ 
+-#if (KERNEL_VERSION(4, 12, 0) <= LINUX_VERSION_CODE)
++#if (KERNEL_VERSION(5, 2, 0) <= LINUX_VERSION_CODE)
++/* The _deprecated parsers keep the lenient checks nla_parse had on 4.14. */
++#define NLA_PARSE_NESTED(nlattr, maxtype, nla, policy)	\
++	nla_parse_nested_deprecated(nlattr, maxtype, nla, policy, NULL)
++#define NLA_PARSE(tb, maxtype, head, len, policy) \
++	nla_parse_deprecated(tb, maxtype, head, len, policy, NULL)
++#elif (KERNEL_VERSION(4, 12, 0) <= LINUX_VERSION_CODE)
+ #define NLA_PARSE_NESTED(nlattr, maxtype, nla, policy)	\
+ 	nla_parse_nested(nlattr, maxtype, nla, policy, NULL)
+ #define NLA_PARSE(tb, maxtype, head, len, policy) \
+--- a/wifi/wlan/core/gen3/os/linux/plat/mt6771/plat_priv.c
++++ b/wifi/wlan/core/gen3/os/linux/plat/mt6771/plat_priv.c
+@@ -13,67 +13,48 @@
+ */
+ 
+ #include <linux/version.h>
+-
+-#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 4, 146)
+-#include "legacy_controller.h"
+-#else
+-#include <cpu_ctrl.h>
+-#endif
+-
++#include <linux/cpufreq.h>
++#include <linux/mutex.h>
+ #include <linux/pm_qos.h>
+ 
+ #ifdef CONFIG_MTK_EMI
+ #include <mt_emi_api.h>
+ #endif
+ 
+-#ifdef CONFIG_MTK_QOS_SUPPORT
+-#include <helio-dvfsrc-opp.h>
+-#endif
+-
+ #include "gl_typedef.h"
+ 
+-#define MAX_CPU_FREQ 2340000 /* in kHZ */
++/*
++ * Linux 5.10: the boost asks cpufreq for each cluster's top speed
++ * through freq QoS, in place of the 4.14 update_userlimit_cpu_freq() (PPM).
++ * The 4.14 EMI OPP request is left out: there is no DVFSRC on 5.10 here.
++ */
+ #define CLUSTER_NUM  2       /* 2 clusters, 4 big cores + 4 little cores */
+ 
+-#ifdef CONFIG_MTK_QOS_SUPPORT
+-
+-static DEFINE_MUTEX(grPmQosLock);
+-
+-#endif
++/* First CPU of each cluster: 0 to 3 little, 4 to 7 big. */
++static const unsigned int boost_cpu[CLUSTER_NUM] = { 0, 4 };
++static struct freq_qos_request boost_req[CLUSTER_NUM];
++static DEFINE_MUTEX(boost_lock);
+ 
++/* Process context only: freq QoS updates sleep. */
+ int kalBoostCpu(unsigned int level)
+ {
+-	int i = 0;
+-	static unsigned int requested;
+-	struct ppm_limit_data freq_to_set[CLUSTER_NUM];
+-
+-#ifdef CONFIG_MTK_QOS_SUPPORT
+-	static struct pm_qos_request wifi_qos_request;
+-#endif
++	struct cpufreq_policy *policy;
++	int i;
+ 
++	mutex_lock(&boost_lock);
+ 	for (i = 0; i < CLUSTER_NUM; i++) {
+-		freq_to_set[i].max = -1; /* -1 means don't care */
+-		freq_to_set[i].min = level ? MAX_CPU_FREQ : -1;
+-	}
+-	update_userlimit_cpu_freq(CPU_KIR_WIFI, CLUSTER_NUM, freq_to_set);
+-
+-#ifdef CONFIG_MTK_QOS_SUPPORT
+-
+-	mutex_lock(&grPmQosLock);
+-	if (level) {
+-		if (!requested) {
+-			requested = 1;
+-			pm_qos_add_request(&wifi_qos_request, PM_QOS_EMI_OPP, DDR_OPP_0);
++		if (level && !freq_qos_request_active(&boost_req[i])) {
++			policy = cpufreq_cpu_get(boost_cpu[i]);
++			if (!policy)
++				continue;
++			freq_qos_add_request(&policy->constraints, &boost_req[i], FREQ_QOS_MIN,
++					     policy->cpuinfo.max_freq);
++			cpufreq_cpu_put(policy);
++		} else if (!level && freq_qos_request_active(&boost_req[i])) {
++			freq_qos_remove_request(&boost_req[i]);
+ 		}
+-		pm_qos_update_request(&wifi_qos_request, DDR_OPP_0);
+-	} else if (requested) {
+-		pm_qos_update_request(&wifi_qos_request, DDR_OPP_UNREQ);
+-		pm_qos_remove_request(&wifi_qos_request);
+-		requested = 0;
+ 	}
+-	mutex_unlock(&grPmQosLock);
+-
+-#endif
++	mutex_unlock(&boost_lock);
+ 
+ 	return 0;
+ }

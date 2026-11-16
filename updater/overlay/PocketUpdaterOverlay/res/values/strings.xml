@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <!-- JSON list of builds, in the owner repo's main branch. Its url fields are Release assets. -->
+    <string name="updater_server_url" translatable="false">https://raw.githubusercontent.com/roge-rm/titan-pocket-lineage/main/updates/{device}.json</string>
+</resources>

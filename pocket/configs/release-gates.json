@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "product": "Titan_pocket",
+  "supported_stock_firmware": [
+    "Titan_pocket_20240514"
+  ],
+  "qualified": {
+    "stock_usb_logger": true,
+    "kernel_board_boot": false,
+    "ufs_encryption": false,
+    "vndk_fcm_compatibility": false,
+    "combined_enforcing_policy": false,
+    "keyboard_and_hardware_parity": false,
+    "installer_recovery_rollback": false
+  },
+  "stock_usb_logger_evidence": "evidence/kernel-upgrade/recovery-configfs-trial-20261029T210738Z/result.json",
+  "qualification_scope": "Local January 2023 engineering handset; public-device fleet and other firmware versions unqualified"
+}

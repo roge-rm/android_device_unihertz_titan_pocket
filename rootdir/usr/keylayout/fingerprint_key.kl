@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# fingerprint_key: the keys sunwave-fp reports for the Sunwave HAL. With stock's
+# sw_config.xml the front strip only sends 172, held while touched. The rest are as
+# Generic.kl, for the HAL's navigation mode.
+
+key 172   HOME
+key 102   MOVE_HOME
+key 158   BACK
+key 139   MENU
+key 103   DPAD_UP
+key 105   DPAD_LEFT
+key 106   DPAD_RIGHT
+key 108   DPAD_DOWN
+key 28    ENTER
+key 87    F11
+key 143   WAKEUP

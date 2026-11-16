@@ -1,0 +1,78 @@
+--- a/include/linux/regmap.h
++++ b/include/linux/regmap.h
+@@ -278,6 +278,7 @@
+  * @disable_locking: This regmap is either protected by external means or
+  *                   is guaranteed not to be accessed from multiple threads.
+  *                   Don't use any locking mechanisms.
++ * @disable_debugfs: Optional, don't create debugfs entries for this regmap.
+  * @lock:	  Optional lock callback (overrides regmap's default lock
+  *		  function, based on spinlock or mutex).
+  * @unlock:	  As above for unlocking.
+@@ -361,6 +362,7 @@
+ 	bool (*readable_noinc_reg)(struct device *dev, unsigned int reg);
+ 
+ 	bool disable_locking;
++	bool disable_debugfs;
+ 	regmap_lock lock;
+ 	regmap_unlock unlock;
+ 	void *lock_arg;
+--- a/drivers/base/regmap/regmap.c
++++ b/drivers/base/regmap/regmap.c
+@@ -738,6 +738,9 @@
+ 		goto err_map;
+ 
+ 	ret = -EINVAL; /* Later error paths rely on this */
++
++	if (config->disable_debugfs)
++		regmap_debugfs_disable(map);
+ 
+ 	if (config->disable_locking) {
+ 		map->lock = map->unlock = regmap_lock_unlock_none;
+--- a/drivers/mfd/syscon.c
++++ b/drivers/mfd/syscon.c
+@@ -38,6 +38,25 @@
+ 	.reg_bits = 32,
+ 	.val_bits = 32,
+ 	.reg_stride = 4,
++};
++
++/*
++ * MT6771 blocks behind a power domain. Reading their registers through
++ * debugfs while the domain is off can hang the bus, so they get no debugfs.
++ */
++static const struct of_device_id syscon_no_debugfs_ids[] = {
++	{ .compatible = "mediatek,audio" },
++	{ .compatible = "mediatek,camsys" },
++	{ .compatible = "mediatek,imgsys" },
++	{ .compatible = "mediatek,mfgcfg" },
++	{ .compatible = "mediatek,mmsys_config" },
++	{ .compatible = "mediatek,vdec_gcon" },
++	{ .compatible = "mediatek,venc_gcon" },
++	{ .compatible = "mediatek,ipu_conn" },
++	{ .compatible = "mediatek,ipu_adl" },
++	{ .compatible = "mediatek,ipu0" },
++	{ .compatible = "mediatek,ipu1" },
++	{ }
+ };
+ 
+ static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
+@@ -110,6 +129,7 @@
+ 	syscon_config.reg_stride = reg_io_width;
+ 	syscon_config.val_bits = reg_io_width * 8;
+ 	syscon_config.max_register = resource_size(&res) - reg_io_width;
++	syscon_config.disable_debugfs = !!of_match_node(syscon_no_debugfs_ids, np);
+ 
+ 	regmap = regmap_init_mmio(NULL, base, &syscon_config);
+ 	kfree(syscon_config.name);
+--- a/drivers/clk/clk.c
++++ b/drivers/clk/clk.c
+@@ -3234,7 +3234,8 @@
+ }
+ DEFINE_SHOW_ATTRIBUTE(clk_dump);
+ 
+-#define CLOCK_ALLOW_WRITE_DEBUGFS
++/* Read-only: a write to a gate whose power domain is off can hang the bus */
++#undef CLOCK_ALLOW_WRITE_DEBUGFS
+ #ifdef CLOCK_ALLOW_WRITE_DEBUGFS
+ /*
+  * This can be dangerous, therefore don't provide any real compile time

@@ -1,0 +1,6017 @@
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/Makefile
+@@ -0,0 +1,29 @@
++#
++# Copyright (C) 2015 MediaTek Inc.
++#
++# This program is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License version 2 as
++# published by the Free Software Foundation.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++# GNU General Public License for more details.
++#
++
++ccflags-y += -I$(srctree)/drivers/staging/android/ion \
++             -I$(srctree)/drivers/staging/android/ion/mtk
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/m4u/$(MTK_PLATFORM)/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/ccu/src/$(MTK_PLATFORM)/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/ccu/src/$(MTK_PLATFORM)/ccu_ext_interface/
++ccflags-y += -I$(srctree)/drivers/i2c/busses
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/ccu/src/2.0
++
++ccflags-y += -I$(srctree)/drivers/iommu/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/imgsensor/inc
++
++#$(warning $(subdir-ccflags-y))
++
++#obj-$(CONFIG_MTK_VPU) += ccu_drv.o ccu_algo.o ccu_dbg.o
++obj-y += ccu_drv.o ccu_n3d_a.o ccu_i2c.o
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/ccu_cmn.h
+@@ -0,0 +1,278 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CCU_CMN_H__
++#define __CCU_CMN_H__
++
++#include <linux/wait.h>
++#include <linux/seq_file.h>
++#include <linux/interrupt.h>
++#include "ccu_drv.h"
++
++/* Common Structure */
++enum ccu_req_type_e {
++	CCU_IRQ_TYPE_XXX,
++	CCU_IRQ_NUM_TYPES
++};
++
++struct ccu_device_s {
++	struct proc_dir_entry *proc_dir;
++	struct device *dev;
++	struct dentry *debug_root;
++	unsigned long ccu_base;
++	unsigned long camsys_base;
++	unsigned long bin_base;
++	unsigned long dmem_base;
++	unsigned long n3d_a_base;
++	unsigned int irq_num;
++	struct mutex dev_mutex;
++	struct mutex user_mutex;
++	struct mutex clk_mutex;
++	struct mutex ion_client_mutex;
++	/* list of vlist_type(ccu_user_t) */
++	struct list_head user_list;
++	/* notify enque thread */
++	wait_queue_head_t cmd_wait;
++};
++
++struct ccu_user_s {
++	pid_t open_pid;
++	pid_t open_tgid;
++	uint32_t id;
++	/* to enque/deque must have mutex protection */
++	struct mutex data_mutex;
++
++	bool running;
++	bool flush;
++	/* list of vlist_type(ccu_cmd_st) */
++	struct list_head enque_ccu_cmd_list;
++	struct list_head deque_ccu_cmd_list;
++	wait_queue_head_t deque_wait;
++};
++
++/*type must be struct*/
++/*#define DECLARE_VLIST(type) \*/
++/*typedef struct { \*/
++		/*type node; \*/
++		/*struct list_head link; \*/
++/*} type ## _list*/
++
++/*
++ * vlist_node_of - get the pointer to the node which has specific vlist
++ * @ptr:        the pointer to struct list_head
++ * @type:        the type of list node
++ */
++#define vlist_node_of(ptr, type) ({ \
++		const struct list_head *__mptr = (ptr); \
++		(type *)((char *)__mptr - offsetof(type ## _list, link)); })
++
++/*
++ * vlist_link - get the pointer to struct list_head
++ * @ptr:        the pointer to struct vlist
++ * @type:        the type of list node
++ */
++#define vlist_link(ptr, type) (&((type ## _list *)ptr)->link)
++
++/*
++ * vlist_type - get the type of struct vlist
++ * @type:        the type of list node
++ */
++#define vlist_type(type) type ## _list
++
++/*
++ * vlist_node - get the pointer to the node of vlist
++ * @ptr:        the pointer to struct vlist
++ * @type:        the type of list node
++ */
++#define vlist_node(ptr, type)  ((type *) ptr)
++
++
++/*typedef struct work_struct work_struct_t;*/
++
++/*DECLARE_VLIST(work_struct_t);*/
++/*DECLARE_VLIST(struct ccu_user_s);*/
++struct ccu_user_s_list {
++	struct ccu_user_s node;
++	struct list_head link;
++};
++
++/*DECLARE_VLIST(struct ccu_cmd_s);*/
++struct ccu_cmd_s_list {
++	struct ccu_cmd_s node;
++	struct list_head link;
++};
++
++/* ===== define in ccu_hw.c  ===== */
++
++/**
++ * ccu_init_hw - init the procedure related to hw,
++ * include irq register and enque thread
++ * @device:     the pointer of ccu_device.
++ */
++int ccu_init_hw(struct ccu_device_s *device);
++
++/**
++ * ccu_uninit_hw - close resources related to hw module
++ */
++int ccu_uninit_hw(struct ccu_device_s *device);
++
++/**
++ * ccu_mmap_hw - mmap kernel memory to user
++ */
++int ccu_mmap_hw(struct file *filp, struct vm_area_struct *vma);
++
++/**
++ * ccu_send_command - send command, and it will block until done.
++ * @cmd:        the pointer to command
++ */
++int ccu_send_command(struct ccu_cmd_s *pCmd);
++
++/**
++ * ccu_power - config ccu power.
++ * @s:          the pointer to power relative settings.
++ */
++int ccu_power(struct ccu_power_s *power);
++
++/**
++ * ccu_force_powerdown - force CCU to stop & shutdown
++ */
++int ccu_force_powerdown(void);
++
++/**
++ * ccu_run - start running ccu .
++ */
++int ccu_run(void);
++
++/**
++ * ccu_irq - interrupt wait.
++ * @s:          wait mode.
++ */
++int ccu_waitirq(struct CCU_WAIT_IRQ_STRUCT *WaitIrq);
++int ccu_AFwaitirq(struct CCU_WAIT_IRQ_STRUCT *WaitIrq, int tg_num);
++
++/**
++ * ccu_irq - interrupt wait.
++ * @s:          wait mode.
++ */
++int ccu_flushLog(int argc, int *argv);
++
++
++
++int ccu_memcpy(void *dest, void *src, int length);
++
++int ccu_memclr(void *dest, int length);
++
++int ccu_read_info_reg(int regNo);
++
++int ccu_query_power_status(void);
++
++
++/* ===== define in ccu_drv.c  ===== */
++
++/**
++ * ccu_create_user - create ccu user, and add to user list
++ * @ruser:      return the created user.
++ */
++int ccu_create_user(struct ccu_user_s **ruser);
++
++/**
++ * ccu_delete_user - delete ccu user, and remove it from user list
++ * @user:       the pointer to user.
++ */
++int ccu_delete_user(struct ccu_user_s *user);
++
++int ccu_lock_user_mutex(void);
++
++int ccu_unlock_user_mutex(void);
++
++int ccu_lock_ion_client_mutex(void);
++
++int ccu_unlock_ion_client_mutex(void);
++
++/**
++ * ccu_push_command_to_queue - add a command to user's queue
++ * @user:       the pointer to user.
++ * @cmd:        the command to be added to user's queue.
++ */
++int ccu_push_command_to_queue(struct ccu_user_s *user, struct ccu_cmd_s *cmd);
++
++
++/**
++ * ccu_pop_command_from_queue - remove a command from user's queue
++ * @user:       the pointer to user.
++ * @rcmd:      return the command to be removed.
++ */
++int ccu_pop_command_from_queue(struct ccu_user_s *user,
++	struct ccu_cmd_s **rcmd);
++
++
++/**
++ * ccu_flush_commands_from_queue - flush all commands of user's queue
++ * @user:       the pointer to user.
++ *
++ * It's a blocking call, and waits for the processing command done.
++ * And push all remaining enque to the deque.
++ */
++int ccu_flush_commands_from_queue(struct ccu_user_s *user);
++
++/**
++ * ccu_clock_enable - Set CCU clock on
++ */
++int ccu_clock_enable(void);
++
++/**
++ * ccu_clock_disable - Set CCU clock off
++ */
++void ccu_clock_disable(void);
++
++/* LOG & AEE */
++#define CCU_TAG "[ccu]"
++
++#define LOG_DBG_MUST(format, args...) \
++	pr_debug(CCU_TAG "[%s] " format, __func__, ##args)
++#define LOG_INF_MUST(format, args...) \
++	pr_info(CCU_TAG "[%s] " format, __func__, ##args)
++#define LOG_DBG(format, args...)
++#define LOG_INF(format, args...)
++#define LOG_WARN(format, args...) \
++	pr##_##warn(CCU_TAG "[%s] " format, __func__, ##args)
++#define LOG_ERR(format, args...) \
++	pr##_##err(CCU_TAG "[%s] " format, __func__, ##args)
++#define LOG_DERR(device, format, args...) \
++	dev##_##err(device, CCU_TAG "[%s] " format, __func__, ##args)
++
++#define ccu_print_seq(seq_file, fmt, args...) \
++		do {\
++			if (seq_file)\
++				seq_printf(seq_file, fmt, ##args);\
++			else\
++				pr_debug(fmt, ##args);\
++		} while (0)
++
++#define ccu_error(format, args...) \
++		do {\
++			LOG_ERR(CCU_TAG " error:"format, ##args);  \
++			aee_kernel_exception("CCU", \
++				"[CCU] error:"format, ##args);  \
++		} while (0)
++
++#define ccu_aee(format, args...) \
++		do {\
++			char ccu_name[100];\
++			snprintf(ccu_name, 100, CCU_TAG format, ##args); \
++			aee_kernel_warning_api(__FILE__, __LINE__, \
++			DB_OPT_MMPROFILE_BUFFER | DB_OPT_DUMP_DISPLAY, \
++			ccu_name, CCU_TAG "error" format, ##args); \
++			LOG_ERR(CCU_TAG " error:" format, ##args); \
++		} while (0)
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/ccu_drv.c
+@@ -0,0 +1,1459 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include <linux/types.h>
++#include <linux/device.h>
++#include <linux/cdev.h>
++#include <linux/platform_device.h>
++#include <linux/interrupt.h>
++#include <linux/proc_fs.h>
++
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++
++#include <linux/delay.h>
++#include <linux/uaccess.h>
++#include <linux/atomic.h>
++#include <linux/sched.h>
++#include <linux/mm.h>
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/printk.h>
++
++#include <mt-plat/sync_write.h>
++
++#include <linux/of_platform.h>
++#include <linux/of_irq.h>
++#include <linux/of_address.h>
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/i2c.h>
++#include "i2c-mtk.h"
++
++#include "mtk_ion.h"
++#include "ion_drv.h"
++#include <linux/iommu.h>
++
++
++#ifdef CONFIG_MTK_IOMMU
++#include "mtk_iommu.h"
++#include <dt-bindings/memory/mt6763-larb-port.h>
++#else
++#include "m4u.h"
++#endif
++
++
++#include <linux/clk.h>
++
++#include "ccu_drv.h"
++#include "ccu_cmn.h"
++#include "ccu_reg.h"
++#include "ccu_platform_def.h"
++#include "ccu_n3d_a.h"
++#include "ccu_i2c.h"
++#include "ccu_i2c_hw.h"
++#include "ccu_imgsensor.h"
++#include "kd_camera_feature.h"/*for IMGSENSOR_SENSOR_IDX*/
++#include "ccu_mva.h"
++#include "ccu_qos.h"
++/****************************************************************************
++ *
++ ***************************************************************************/
++
++#define CCU_DEV_NAME            "ccu"
++
++#define CCU_CLK_NUM 3 /* [0]: Camsys, [1]: Mmsys */
++
++static int32_t _user_count;
++
++struct clk *ccu_clk_ctrl[CCU_CLK_NUM];
++
++struct ccu_device_s *g_ccu_device;
++static struct ccu_power_s power;
++static uint32_t ccu_hw_base;
++
++static wait_queue_head_t wait_queue_deque;
++static wait_queue_head_t wait_queue_enque;
++
++static struct ion_handle *import_buffer_handle[CCU_IMPORT_BUF_NUM];
++
++#ifdef CONFIG_PM_SLEEP
++struct wakeup_source *ccu_wake_lock;
++#endif
++/*static int g_bWaitLock;*/
++
++static irqreturn_t ccu_isr_callback_xxx(int rrq, void *device_id);
++
++typedef irqreturn_t(*ccu_isr_fp_t) (int, void *);
++
++struct ccu_isr_callback_t {
++	ccu_isr_fp_t irq_fp;
++	unsigned int int_number;
++	char device_name[16];
++};
++
++/* int number is got from kernel api */
++const struct ccu_isr_callback_t ccu_isr_callbacks[CCU_IRQ_NUM_TYPES] = {
++// The last used be mapping to device node.
++// Must be the same name with that in device node.
++	{ccu_isr_callback_xxx, 0, "ccu2"}
++};
++
++static irqreturn_t ccu_isr_callback_xxx(int irq, void *device_id)
++{
++	LOG_DBG("%s:0x%x\n", __func__, irq);
++	return IRQ_HANDLED;
++}
++
++
++static int ccu_probe(struct platform_device *dev);
++
++static int ccu_remove(struct platform_device *dev);
++
++static int ccu_suspend(struct platform_device *dev, pm_message_t mesg);
++
++static int ccu_resume(struct platform_device *dev);
++
++static int32_t _clk_count;
++/*-------------------------------------------------------------------------*/
++/* CCU Driver: pm operations                                               */
++/*-------------------------------------------------------------------------*/
++#ifdef CONFIG_PM
++int ccu_pm_suspend(struct device *device)
++{
++	struct platform_device *pdev = to_platform_device(device);
++
++	WARN_ON(pdev == NULL);
++
++	return ccu_suspend(pdev, PMSG_SUSPEND);
++}
++
++int ccu_pm_resume(struct device *device)
++{
++	struct platform_device *pdev = to_platform_device(device);
++
++	WARN_ON(pdev == NULL);
++
++	return ccu_resume(pdev);
++}
++
++/* extern void mt_irq_set_sens(unsigned int irq, unsigned int sens); */
++/* extern void mt_irq_set_polarity(unsigned int irq, unsigned int polarity);*/
++int ccu_pm_restore_noirq(struct device *device)
++{
++#ifndef CONFIG_OF
++	mt_irq_set_sens(CAM0_IRQ_BIT_ID, MT_LEVEL_SENSITIVE);
++	mt_irq_set_polarity(CAM0_IRQ_BIT_ID, MT_POLARITY_LOW);
++#endif
++	return 0;
++}
++#else
++#define ccu_pm_suspend NULL
++#define ccu_pm_resume  NULL
++#define ccu_pm_restore_noirq NULL
++#endif
++
++const struct dev_pm_ops ccu_pm_ops = {
++	.suspend = ccu_pm_suspend,
++	.resume = ccu_pm_resume,
++	.freeze = ccu_pm_suspend,
++	.thaw = ccu_pm_resume,
++	.poweroff = ccu_pm_suspend,
++	.restore = ccu_pm_resume,
++	.restore_noirq = ccu_pm_restore_noirq,
++};
++
++
++/*--------------------------------------------------------------------------*/
++/* CCU Driver: Prototype                                                    */
++/*--------------------------------------------------------------------------*/
++
++static const struct of_device_id ccu_of_ids[] = {
++	{.compatible = "mediatek,ccu",},
++	{.compatible = "mediatek,ccu_camsys",},
++	{.compatible = "mediatek,n3d_ctl_a",},
++	{}
++};
++
++static struct platform_driver ccu_driver = {
++	.probe = ccu_probe,
++	.remove = ccu_remove,
++	.suspend = ccu_suspend,
++	.resume = ccu_resume,
++	.driver = {
++		   .name = CCU_DEV_NAME,
++		   .owner = THIS_MODULE,
++#ifdef CONFIG_OF
++		   .of_match_table = ccu_of_ids,
++#endif
++#ifdef CONFIG_PM
++		   .pm = &ccu_pm_ops,
++#endif
++		}
++};
++
++
++/*---------------------------------------------------------------------------*/
++/* CCU Driver: file operations                                               */
++/*---------------------------------------------------------------------------*/
++static int ccu_open(struct inode *inode, struct file *flip);
++
++static int ccu_release(struct inode *inode, struct file *flip);
++
++static int ccu_mmap(struct file *flip, struct vm_area_struct *vma);
++
++static long ccu_ioctl(struct file *flip, unsigned int cmd, unsigned long arg);
++
++#ifdef CONFIG_COMPAT
++static long ccu_compat_ioctl(struct file *flip,
++	unsigned int cmd, unsigned long arg);
++#endif
++
++static const struct file_operations ccu_fops = {
++	.owner = THIS_MODULE,
++	.open = ccu_open,
++	.release = ccu_release,
++	.mmap = ccu_mmap,
++	.unlocked_ioctl = ccu_ioctl,
++#ifdef CONFIG_COMPAT
++	/*for 32bit usersapce program doing ioctl, compat_ioctl will be called*/
++	.compat_ioctl = ccu_compat_ioctl
++#endif
++};
++
++/*---------------------------------------------------------------------------*/
++/* M4U: fault callback                                                       */
++/*---------------------------------------------------------------------------*/
++enum m4u_callback_ret_t ccu_m4u_fault_callback(int port,
++	unsigned int mva, void *data)
++{
++	LOG_DBG("[m4u] fault callback: port=%d, mva=0x%x", port, mva);
++	return 0/*M4U_CALLBACK_HANDLED*/;
++}
++
++/*---------------------------------------------------------------------------*/
++/*                                                                           */
++/*---------------------------------------------------------------------------*/
++static int ccu_num_users;
++
++int ccu_create_user(struct ccu_user_s **user)
++{
++	struct ccu_user_s *u;
++
++	u = kmalloc(sizeof(vlist_type(struct ccu_user_s)), GFP_ATOMIC);
++	if (!u)
++		return -1;
++
++	mutex_init(&u->data_mutex);
++	/*mutex_lock(&u->data_mutex);*/
++	u->id = ++ccu_num_users;
++	u->open_pid = current->pid;
++	u->open_tgid = current->tgid;
++	u->running = false;
++	u->flush = false;
++	INIT_LIST_HEAD(&u->enque_ccu_cmd_list);
++	INIT_LIST_HEAD(&u->deque_ccu_cmd_list);
++	init_waitqueue_head(&u->deque_wait);
++	/*mutex_unlock(&u->data_mutex);*/
++
++	mutex_lock(&g_ccu_device->user_mutex);
++	list_add_tail(vlist_link(u, struct ccu_user_s),
++		&g_ccu_device->user_list);
++	mutex_unlock(&g_ccu_device->user_mutex);
++
++	*user = u;
++	return 0;
++}
++
++
++int ccu_push_command_to_queue(struct ccu_user_s *user, struct ccu_cmd_s *cmd)
++{
++	if (!user) {
++		LOG_ERR("empty user");
++		return -1;
++	}
++
++	LOG_DBG("+:%s\n", __func__);
++
++	mutex_lock(&user->data_mutex);
++	list_add_tail(vlist_link(cmd, struct ccu_cmd_s),
++		&user->enque_ccu_cmd_list);
++	mutex_unlock(&user->data_mutex);
++
++	spin_lock(&g_ccu_device->cmd_wait.lock);
++	wake_up_locked(&g_ccu_device->cmd_wait);
++	spin_unlock(&g_ccu_device->cmd_wait.lock);
++
++	return 0;
++}
++
++int ccu_flush_commands_from_queue(struct ccu_user_s *user)
++{
++
++	struct list_head *head, *temp;
++	struct ccu_cmd_s *cmd;
++
++	mutex_lock(&user->data_mutex);
++
++	if (!user->running && list_empty(&user->enque_ccu_cmd_list)
++	    && list_empty(&user->deque_ccu_cmd_list)) {
++		mutex_unlock(&user->data_mutex);
++		return 0;
++	}
++
++	user->flush = true;
++	mutex_unlock(&user->data_mutex);
++
++	/* the running command will add to the deque before interrupt */
++	wait_event_interruptible(user->deque_wait, !user->running);
++
++	mutex_lock(&user->data_mutex);
++	/* push the remaining enque to the deque */
++	list_for_each_safe(head, temp, &user->enque_ccu_cmd_list) {
++		cmd = vlist_node_of(head, struct ccu_cmd_s);
++		cmd->status = CCU_ENG_STATUS_FLUSH;
++		list_del_init(vlist_link(cmd, struct ccu_cmd_s));
++		list_add_tail(vlist_link(cmd, struct ccu_cmd_s),
++			&user->deque_ccu_cmd_list);
++	}
++
++	user->flush = false;
++	mutex_unlock(&user->data_mutex);
++	return 0;
++}
++
++int ccu_pop_command_from_queue(struct ccu_user_s *user, struct ccu_cmd_s **rcmd)
++{
++	int ret;
++	struct ccu_cmd_s *cmd;
++
++	/* wait until condition is true */
++	ret = wait_event_interruptible_timeout(user->deque_wait,
++		!list_empty(&user->deque_ccu_cmd_list),
++		msecs_to_jiffies(3 * 1000));
++
++	/* ret == 0, if timeout; ret == -ERESTARTSYS, if signal interrupt */
++	if (ret == 0) {
++		LOG_ERR("timeout: pop a command! ret=%d\n", ret);
++		*rcmd = NULL;
++		return -1;
++	} else if (ret < 0) {
++		LOG_ERR("interrupted by system signal: %d\n", ret);
++
++		if (ret == -ERESTARTSYS)
++			LOG_ERR("interrupted as -ERESTARTSYS\n");
++
++		return ret;
++	}
++	mutex_lock(&user->data_mutex);
++	/* This part should not be happened */
++	if (list_empty(&user->deque_ccu_cmd_list)) {
++		mutex_unlock(&user->data_mutex);
++		LOG_ERR("pop a command from empty queue! ret=%d\n", ret);
++		*rcmd = NULL;
++		return -1;
++	};
++
++	/* get first node from deque list */
++	cmd = vlist_node_of(user->deque_ccu_cmd_list.next, struct ccu_cmd_s);
++	list_del_init(vlist_link(cmd, struct ccu_cmd_s));
++
++	mutex_unlock(&user->data_mutex);
++
++	*rcmd = cmd;
++	return 0;
++}
++
++
++int ccu_delete_user(struct ccu_user_s *user)
++{
++
++	if (!user) {
++		LOG_ERR("delete empty user!\n");
++		return -1;
++	}
++	/* TODO: notify dropeed command to user?*/
++	/* ccu_dropped_command_notify(user, command);*/
++	ccu_flush_commands_from_queue(user);
++
++	mutex_lock(&g_ccu_device->user_mutex);
++	list_del(vlist_link(user, struct ccu_user_s));
++	mutex_unlock(&g_ccu_device->user_mutex);
++
++	kfree(user);
++
++	return 0;
++}
++
++int ccu_lock_user_mutex(void)
++{
++	mutex_lock(&g_ccu_device->user_mutex);
++	return 0;
++}
++
++int ccu_unlock_user_mutex(void)
++{
++	mutex_unlock(&g_ccu_device->user_mutex);
++	return 0;
++}
++
++int ccu_lock_ion_client_mutex(void)
++{
++	mutex_lock(&g_ccu_device->ion_client_mutex);
++	return 0;
++}
++
++int ccu_unlock_ion_client_mutex(void)
++{
++	mutex_unlock(&g_ccu_device->ion_client_mutex);
++	return 0;
++}
++
++/*---------------------------------------------------------------------------*/
++/* IOCTL: implementation                                                     */
++/*---------------------------------------------------------------------------*/
++int ccu_set_power(struct ccu_power_s *power)
++{
++	return ccu_power(power);
++}
++
++static int ccu_open(struct inode *inode, struct file *flip)
++{
++	int ret = 0, i;
++
++	struct ccu_user_s *user = NULL;
++
++	mutex_lock(&g_ccu_device->dev_mutex);
++
++	LOG_INF_MUST("%s pid:%d tid:%d cnt:%d+\n",
++		__func__, current->pid, current->tgid, _user_count);
++
++	ret = ccu_create_user(&user);
++	if (IS_ERR_OR_NULL(user)) {
++		LOG_ERR("fail to create user\n");
++		mutex_unlock(&g_ccu_device->dev_mutex);
++		return -ENOMEM;
++	}
++
++	flip->private_data = user;
++	_user_count++;
++
++	if (_user_count > 1) {
++		LOG_INF_MUST("%s clean legacy data flow-\n", __func__);
++		ccu_force_powerdown();
++
++		for (i = 0; i < CCU_IMPORT_BUF_NUM; i++) {
++			if (import_buffer_handle[i] == (struct ion_handle *)
++			    CCU_IMPORT_BUF_UNDEF) {
++				LOG_INF_MUST("freed buffer count: %d\n", i);
++				break;
++			}
++
++			ccu_ion_free_import_handle(
++				import_buffer_handle[i]);/*can't in spin_lock*/
++		}
++
++		ccu_ion_uninit();
++	}
++
++	ccu_ion_init();
++
++	for (i = 0; i < CCU_IMPORT_BUF_NUM; i++)
++		import_buffer_handle[i] = (struct ion_handle *)
++					  CCU_IMPORT_BUF_UNDEF;
++
++	LOG_INF_MUST("%s-\n",
++		__func__);
++
++	mutex_unlock(&g_ccu_device->dev_mutex);
++
++	return ret;
++}
++
++#ifdef CONFIG_COMPAT
++static long ccu_compat_ioctl(struct file *flip,
++	unsigned int cmd, unsigned long arg)
++{
++	/*<<<<<<<<<< debug 32/64 compat check*/
++	struct compat_ccu_power_s __user *ptr_power32;
++	struct ccu_power_s __user *ptr_power64;
++
++	compat_uptr_t uptr_Addr32;
++	compat_uint_t uint_Data32;
++
++	int err;
++	int i;
++	/*>>>>>>>>>> debug 32/64 compat check*/
++
++	int ret = 0;
++	struct ccu_user_s *user = flip->private_data;
++
++	LOG_DBG("+, cmd: %d\n", cmd);
++
++	switch (cmd) {
++	case CCU_IOCTL_SET_POWER:
++	{
++		LOG_DBG("CCU_IOCTL_SET_POWER+\n");
++
++		/*<<<<<<<<<< debug 32/64 compat check*/
++		LOG_DBG("[IOCTL_DBG] struct ccu_power_s size: %zu\n",
++			sizeof(struct ccu_power_s));
++		LOG_DBG("[IOCTL_DBG] struct ccu_working_buffer_s size: %zu\n",
++			sizeof(struct ccu_working_buffer_s));
++		LOG_DBG("[IOCTL_DBG] arg: %p\n", (void *)arg);
++		LOG_DBG("[IOCTL_DBG] long size: %zu\n", sizeof(long));
++		LOG_DBG("[IOCTL_DBG] long long: %zu\n", sizeof(long long));
++		LOG_DBG("[IOCTL_DBG] char *size: %zu\n", sizeof(char *));
++		LOG_DBG("[IOCTL_DBG] power.workBuf.va_log[0]: %p\n",
++			power.workBuf.va_log[0]);
++
++		ptr_power32 = compat_ptr(arg);
++		ptr_power64 = compat_alloc_user_space(sizeof(*ptr_power64));
++		if (ptr_power64 == NULL)
++			return -EFAULT;
++
++		LOG_DBG("[IOCTL_DBG] (void *)arg: %p\n", (void *)arg);
++		LOG_DBG("[IOCTL_DBG] ptr_power32: %p\n", ptr_power32);
++		LOG_DBG("[IOCTL_DBG] ptr_power64: %p\n", ptr_power64);
++		LOG_DBG("[IOCTL_DBG] *ptr_power32 size: %zu\n",
++			sizeof(*ptr_power32));
++		LOG_DBG("[IOCTL_DBG] *ptr_power64 size: %zu\n",
++			sizeof(*ptr_power64));
++
++		err = 0;
++		err |= get_user(uint_Data32, &(ptr_power32->bON));
++		err |= put_user(uint_Data32, &(ptr_power64->bON));
++
++		for (i = 0; i < MAX_LOG_BUF_NUM; i++) {
++			err |= get_user(uptr_Addr32,
++				(&ptr_power32->workBuf.va_log[i]));
++			err |= put_user(compat_ptr(uptr_Addr32),
++				(&ptr_power64->workBuf.va_log[i]));
++			err |= get_user(uint_Data32,
++				(&ptr_power32->workBuf.mva_log[i]));
++
++			err |= copy_to_user(&(ptr_power64->workBuf.mva_log[i]),
++				&uint_Data32, sizeof(uint_Data32));
++		}
++
++		LOG_DBG("[IOCTL_DBG] err: %d\n", err);
++		LOG_DBG("[IOCTL_DBG] ptr_power32->workBuf.va_pool: %x\n",
++			ptr_power32->workBuf.va_pool);
++		LOG_DBG("[IOCTL_DBG] ptr_power64->workBuf.va_pool: %p\n",
++			ptr_power64->workBuf.va_pool);
++		LOG_DBG("[IOCTL_DBG] ptr_power32->workBuf.va_log: %x\n",
++			ptr_power32->workBuf.va_log[0]);
++		LOG_DBG("[IOCTL_DBG] ptr_power64->workBuf.va_log: %p\n",
++			ptr_power64->workBuf.va_log[0]);
++		LOG_DBG("[IOCTL_DBG] ptr_power32->workBuf.mva_log: %x\n",
++			ptr_power32->workBuf.mva_log[0]);
++		LOG_DBG("[IOCTL_DBG] ptr_power64->workBuf.mva_log: %x\n",
++			ptr_power64->workBuf.mva_log[0]);
++
++		ret = flip->f_op->unlocked_ioctl(flip, cmd,
++			(unsigned long)ptr_power64);
++		/*>>>>>>>>>> debug 32/64 compat check*/
++
++		LOG_DBG("CCU_IOCTL_SET_POWER-");
++		break;
++	}
++	default:
++		ret = flip->f_op->unlocked_ioctl(flip, cmd, arg);
++		break;
++	}
++
++	if (ret != 0) {
++		LOG_ERR(
++		"fail, cmd(%d), pid(%d), (process, pid, tgid)=(%s, %d, %d)\n",
++		cmd, user->open_pid, current->comm,
++		current->pid, current->tgid);
++	}
++	return ret;
++}
++#endif
++
++static int ccu_alloc_command(struct ccu_cmd_s **rcmd)
++{
++	struct ccu_cmd_s *cmd;
++
++	cmd = kzalloc(sizeof(vlist_type(struct ccu_cmd_s)), GFP_KERNEL);
++	if (cmd == NULL) {
++		LOG_ERR("%s(), node=0x%p\n", __func__, cmd);
++		return -ENOMEM;
++	}
++
++	*rcmd = cmd;
++
++	return 0;
++}
++
++
++static int ccu_free_command(struct ccu_cmd_s *cmd)
++{
++	kfree(cmd);
++	return 0;
++}
++
++int ccu_clock_enable(void)
++{
++	int ret;
++
++	LOG_DBG_MUST("%s %d.\n", __func__, _clk_count);
++
++	mutex_lock(&g_ccu_device->clk_mutex);
++	_clk_count++;
++
++	ccu_qos_init();
++
++	ret = clk_prepare_enable(ccu_clk_ctrl[0]);
++	if (ret)
++		LOG_ERR("CCU_CLK_MMSYS_CCU enable fail.\n");
++	ret = clk_prepare_enable(ccu_clk_ctrl[1]);
++	if (ret)
++		LOG_ERR("CAM_PWR enable fail.\n");
++	ret = clk_prepare_enable(ccu_clk_ctrl[2]);
++	if (ret)
++		LOG_ERR("CCU_CLK_CAM_CCU enable fail.\n");
++
++	mutex_unlock(&g_ccu_device->clk_mutex);
++	return ret;
++}
++
++void ccu_clock_disable(void)
++{
++	LOG_DBG_MUST("%s %d.\n", __func__, _clk_count);
++
++	mutex_lock(&g_ccu_device->clk_mutex);
++	if (_clk_count > 0) {
++		clk_disable_unprepare(ccu_clk_ctrl[2]);
++		clk_disable_unprepare(ccu_clk_ctrl[1]);
++		clk_disable_unprepare(ccu_clk_ctrl[0]);
++		_clk_count--;
++	}
++
++	ccu_qos_uninit();
++	mutex_unlock(&g_ccu_device->clk_mutex);
++}
++
++static long ccu_ioctl(struct file *flip, unsigned int cmd, unsigned long arg)
++{
++	int ret = 0;
++	int i = 0;
++	int powert_stat;
++	struct CCU_WAIT_IRQ_STRUCT IrqInfo;
++	struct ccu_user_s *user = flip->private_data;
++
++	if ((cmd != CCU_IOCTL_WAIT_IRQ) && (cmd != CCU_IOCTL_WAIT_AF_IRQ))
++		mutex_lock(&g_ccu_device->dev_mutex);
++
++	LOG_DBG("%s+, cmd:%d\n", __func__, cmd);
++
++	if ((cmd != CCU_IOCTL_SET_POWER) && (cmd != CCU_IOCTL_FLUSH_LOG) &&
++		(cmd != CCU_IOCTL_WAIT_IRQ)) {
++		powert_stat = ccu_query_power_status();
++		if (powert_stat == 0) {
++			LOG_WARN("ccuk: ioctl without powered on\n");
++			if (cmd != CCU_IOCTL_WAIT_AF_IRQ)
++				mutex_unlock(&g_ccu_device->dev_mutex);
++			return -EFAULT;
++		}
++	}
++
++	switch (cmd) {
++	case CCU_IOCTL_SET_POWER:
++	{
++		LOG_DBG("ccuk: ioctl set powerk+\n");
++		ret = copy_from_user(&power, (void *)arg,
++			sizeof(struct ccu_power_s));
++		if (ret != 0) {
++			LOG_ERR(
++			"[SET_POWER] copy_from_user failed, ret=%d\n", ret);
++			mutex_unlock(&g_ccu_device->dev_mutex);
++			return -EFAULT;
++		}			ret = ccu_set_power(&power);
++		LOG_DBG("ccuk: ioctl set powerk-\n");
++		break;
++	}
++	case CCU_IOCTL_SET_RUN:
++	{
++		ret = ccu_run();
++		break;
++	}
++	case CCU_IOCTL_ENQUE_COMMAND:
++	{
++		struct ccu_cmd_s *cmd = 0;
++		/*allocate ccu_cmd_st_list instead of ccu_cmd_st*/
++		ccu_alloc_command(&cmd);
++		ret = copy_from_user(cmd, (void *)arg,
++			sizeof(struct ccu_cmd_s));
++		if (ret != 0) {
++			LOG_ERR(
++			"[ENQUE_COMMAND] copy_from_user failed, ret=%d\n",
++			ret);
++			mutex_unlock(&g_ccu_device->dev_mutex);
++			return -EFAULT;
++		}
++		ret = ccu_push_command_to_queue(user, cmd);
++		break;
++	}
++	case CCU_IOCTL_DEQUE_COMMAND:
++	{
++		struct ccu_cmd_s *cmd = 0;
++
++		ret = ccu_pop_command_from_queue(user, &cmd);
++		if (ret != 0) {
++			LOG_ERR(
++			"[DEQUE_COMMAND] pop command failed, ret=%d\n", ret);
++			mutex_unlock(&g_ccu_device->dev_mutex);
++			return -EFAULT;
++		}
++		ret = copy_to_user((void *)arg, cmd,
++			sizeof(struct ccu_cmd_s));
++		if (ret != 0) {
++			LOG_ERR(
++			"[DEQUE_COMMAND] copy_to_user failed, ret=%d\n", ret);
++			mutex_unlock(&g_ccu_device->dev_mutex);
++			return -EFAULT;
++		}
++		ret = ccu_free_command(cmd);
++		if (ret != 0) {
++			LOG_ERR(
++			"[DEQUE_COMMAND] free command, ret=%d\n", ret);
++			mutex_unlock(&g_ccu_device->dev_mutex);
++			return -EFAULT;
++		}
++		break;
++	}
++	case CCU_IOCTL_FLUSH_COMMAND:
++	{
++		ret = ccu_flush_commands_from_queue(user);
++		if (ret != 0) {
++			LOG_ERR(
++			"[FLUSH_COMMAND] flush command failed, ret=%d\n", ret);
++			mutex_unlock(&g_ccu_device->dev_mutex);
++			return -EFAULT;
++		}
++
++		break;
++	}
++	case CCU_IOCTL_WAIT_IRQ:
++	{
++		if (copy_from_user(&IrqInfo, (void *)arg,
++			sizeof(struct CCU_WAIT_IRQ_STRUCT)) == 0) {
++			if ((IrqInfo.Type >= CCU_IRQ_TYPE_AMOUNT) ||
++				(IrqInfo.Type < 0)) {
++				ret = -EFAULT;
++				LOG_ERR("invalid type(%d)\n", IrqInfo.Type);
++				goto EXIT;
++			}
++			LOG_DBG(
++			"IRQ type(%d), userKey(%d), timeout(%d), sttype(%d), st(%d)\n",
++			IrqInfo.Type,
++			IrqInfo.EventInfo.UserKey,
++			IrqInfo.EventInfo.Timeout,
++			IrqInfo.EventInfo.St_type,
++			IrqInfo.EventInfo.Status);
++
++			ret = ccu_waitirq(&IrqInfo);
++			if (copy_to_user((void *)arg,
++				&IrqInfo, sizeof(struct CCU_WAIT_IRQ_STRUCT))
++				!= 0) {
++				LOG_ERR("copy_to_user failed\n");
++				ret = -EFAULT;
++			}
++		} else {
++			LOG_ERR("copy_from_user failed\n");
++			ret = -EFAULT;
++		}
++		break;
++	}
++	case CCU_IOCTL_WAIT_AF_IRQ:
++	{
++		if (copy_from_user(&IrqInfo,
++			(void *)arg, sizeof(struct CCU_WAIT_IRQ_STRUCT)) == 0) {
++			if ((IrqInfo.Type >= CCU_IRQ_TYPE_AMOUNT) ||
++				(IrqInfo.Type < 0)) {
++				ret = -EFAULT;
++				LOG_ERR("invalid type(%d)\n", IrqInfo.Type);
++				goto EXIT;
++			}
++			LOG_DBG(
++			"AFIRQ type(%d), userKey(%d), timeout(%d), sttype(%d), st(%d)\n",
++			IrqInfo.Type,
++			IrqInfo.EventInfo.UserKey,
++			IrqInfo.EventInfo.Timeout,
++			IrqInfo.EventInfo.St_type,
++			IrqInfo.EventInfo.Status);
++
++			if (IrqInfo.bDumpReg == CCU_CAM_TG_1)
++				ret = ccu_AFwaitirq(&IrqInfo, CCU_CAM_TG_1);
++			else if (IrqInfo.bDumpReg == CCU_CAM_TG_2)
++				ret = ccu_AFwaitirq(&IrqInfo, CCU_CAM_TG_2);
++			else {
++				LOG_ERR("invalid CCU_CAM_TG:%d\n",
++					IrqInfo.bDumpReg);
++				goto EXIT;
++			}
++			if (copy_to_user((void *)arg,
++				&IrqInfo, sizeof(struct CCU_WAIT_IRQ_STRUCT))
++				!= 0) {
++				LOG_ERR("copy_to_user failed\n");
++				ret = -EFAULT;
++			}
++		} else {
++			LOG_ERR("copy_from_user failed\n");
++			ret = -EFAULT;
++		}
++		break;
++	}
++	case CCU_IOCTL_FLUSH_LOG:
++	{
++		ccu_flushLog(0, NULL);
++		break;
++	}
++	case CCU_IOCTL_GET_I2C_DMA_BUF_ADDR:
++	{
++		struct ccu_i2c_buf_mva_ioarg ioarg;
++
++		ret = copy_from_user(&ioarg, (void *)arg,
++			sizeof(struct ccu_i2c_buf_mva_ioarg));
++		if (ret != 0) {
++			LOG_ERR(
++			"CCU_IOCTL_GET_I2C_DMA_BUF_ADDR copy_from_user fail: %d\n",
++			ret);
++			ret = -EFAULT;
++			break;
++		}
++		ret = ccu_get_i2c_dma_buf_addr(&ioarg);
++		if (ret != 0) {
++			LOG_ERR("ccu_get_i2c_dma_buf_addr fail: %d\n", ret);
++			break;
++		}
++
++		ret = copy_to_user((void *)arg, &ioarg,
++			sizeof(struct ccu_i2c_buf_mva_ioarg));
++		break;
++	}
++	case CCU_IOCTL_SET_I2C_MODE:
++	{
++		LOG_DBG_MUST("CCU_IOCTL_SET_I2C_MODE\n");
++
++		ret = ccu_i2c_controller_init((uint32_t)arg);
++		if (ret == -1) {
++			LOG_DBG("ccu_i2c_controller_init fail\n");
++			ret = -EINVAL;
++		}
++		break;
++	}
++	case CCU_IOCTL_GET_CURRENT_FPS:
++	{
++		int32_t current_fps_list[IMGSENSOR_SENSOR_IDX_MAX_NUM];
++
++		ccu_get_current_fps(current_fps_list);
++		ret = copy_to_user((void *)arg, &current_fps_list,
++			sizeof(int32_t) * IMGSENSOR_SENSOR_IDX_MAX_NUM);
++		break;
++	}
++	case CCU_IOCTL_GET_SENSOR_I2C_SLAVE_ADDR:
++	{
++		struct ccu_i2c_info sensor_info[IMGSENSOR_SENSOR_IDX_MAX_NUM];
++
++		LOG_DBG_MUST("CCU_IOCTL_GET_SENSOR_I2C_SLAVE_ADDR\n");
++		ccu_get_sensor_i2c_info(&sensor_info[0]);
++		ret = copy_to_user((void *)arg, &sensor_info,
++			sizeof(struct ccu_i2c_info) *
++			IMGSENSOR_SENSOR_IDX_MAX_NUM);
++		break;
++	}
++	case CCU_IOCTL_GET_SENSOR_NAME:
++	{
++	#define SENSOR_NAME_MAX_LEN 32
++	char *sensor_names[IMGSENSOR_SENSOR_IDX_MAX_NUM];
++
++	LOG_DBG_MUST("CCU_IOCTL_GET_SENSOR_NAME\n");
++	ccu_get_sensor_name(sensor_names);
++	for (i = IMGSENSOR_SENSOR_IDX_MIN_NUM;
++		i < IMGSENSOR_SENSOR_IDX_MAX_NUM ; i++){
++		if (sensor_names[i] != NULL) {
++			ret = copy_to_user(((char *)arg+
++				SENSOR_NAME_MAX_LEN*i),
++			sensor_names[i], strlen(sensor_names[i])+1);
++			if (ret != 0) {
++				LOG_ERR(
++				"copy_to_user failed: %d\n", ret);
++				break;
++			}
++		}
++	}
++	#undef SENSOR_NAME_MAX_LEN
++	break;
++	}
++
++	case CCU_READ_REGISTER:
++	{
++		int regToRead = (int)arg;
++		int rc = ccu_read_info_reg(regToRead);
++
++		mutex_unlock(&g_ccu_device->dev_mutex);
++		return rc;
++	}
++	case CCU_IOCTL_IMPORT_MEM:
++	{
++		struct import_mem_s import_mem;
++
++		ret = copy_from_user(&import_mem, (void *)arg,
++			sizeof(struct import_mem_s));
++		if (ret != 0) {
++			LOG_ERR("%s copy_to_user failed: %d\n",
++				"CCU_IOCTL_IMPORT_MEM", ret);
++			break;
++		}
++		for (i = 0; i < CCU_IMPORT_BUF_NUM; i++) {
++			if (import_mem.memID[i] == CCU_IMPORT_BUF_UNDEF) {
++				LOG_INF_MUST("imported buffer count: %d\n", i);
++				break;
++			}
++			import_buffer_handle[i] =
++			ccu_ion_import_handle(import_mem.memID[i]);
++			if (!import_buffer_handle[i]) {
++				ret = -EFAULT;
++				LOG_ERR("%s failed: %d\n",
++				"CCU ccu_ion_import_handle", ret);
++				break;
++			}
++		}
++		break;
++	}
++	default:
++		LOG_WARN("ioctl:No such command!\n");
++		ret = -EINVAL;
++		break;
++	}
++
++EXIT:
++	if (ret != 0) {
++		LOG_ERR(
++		"fail, cmd(%d), cmd_nr(%d), pid(%d), (process, pid, tgid)=(%s, %d, %d)\n",
++		cmd, _IOC_NR(cmd), user->open_pid,
++		current->comm, current->pid, current->tgid);
++	}
++
++	if ((cmd != CCU_IOCTL_WAIT_IRQ) && (cmd != CCU_IOCTL_WAIT_AF_IRQ))
++		mutex_unlock(&g_ccu_device->dev_mutex);
++
++	return ret;
++}
++
++static int ccu_release(struct inode *inode, struct file *flip)
++{
++	struct ccu_user_s *user = flip->private_data;
++	int i = 0;
++
++	mutex_lock(&g_ccu_device->dev_mutex);
++
++	LOG_INF_MUST("%s pid:%d tid:%d cnt:%d+\n",
++		__func__, user->open_pid, user->open_tgid, _user_count);
++	ccu_delete_user(user);
++	_user_count--;
++
++	if (_user_count > 0) {
++		LOG_INF_MUST("%s bypass release flow-", __func__);
++		mutex_unlock(&g_ccu_device->dev_mutex);
++		return 0;
++	}
++
++	ccu_force_powerdown();
++
++	for (i = 0; i < CCU_IMPORT_BUF_NUM; i++) {
++		if (import_buffer_handle[i] == (struct ion_handle *)
++		    CCU_IMPORT_BUF_UNDEF) {
++			LOG_INF_MUST("freed buffer count: %d\n", i);
++			break;
++		}
++
++		ccu_ion_free_import_handle(
++			import_buffer_handle[i]);/*can't in spin_lock*/
++	}
++
++	ccu_ion_uninit();
++
++	LOG_INF_MUST("%s -", __func__);
++
++	mutex_unlock(&g_ccu_device->dev_mutex);
++
++	return 0;
++}
++
++
++/****************************************************************************
++ *
++ ***************************************************************************/
++static int ccu_mmap(struct file *flip, struct vm_area_struct *vma)
++{
++	unsigned long length = 0;
++	unsigned long pfn = 0x0;
++
++	length = (vma->vm_end - vma->vm_start);
++	/*  */
++	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
++	pfn = vma->vm_pgoff << PAGE_SHIFT;
++
++	LOG_DBG
++	("CCU_mmap: vm_pgoff(0x%lx),pfn(0x%lx),phy(0x%lx)\n"
++	vma->vm_pgoff, pfn, vma->vm_pgoff << PAGE_SHIFT);
++	LOG_DBG
++	("vm_start(0x%lx),vm_end(0x%lx),length(0x%lx)\n",
++	vma->vm_start, vma->vm_end, length);
++
++	/*if (pfn >= CCU_REG_BASE_HW) {*/
++
++	if (pfn == (ccu_hw_base - CCU_HW_OFFSET)) {
++		if (length > PAGE_SIZE) {
++			LOG_ERR
++			("mmap error :module(0x%lx),len(0x%lx),CCU_HW(0x%x)!\n",
++			pfn, length, 0x4000);
++			return -EAGAIN;
++		}
++	} else if (pfn == CCU_CAMSYS_BASE) {
++		if (length > CCU_CAMSYS_SIZE) {
++			LOG_ERR
++		    ("mmap error :module(0x%lx),len(0x%lx),CCU_CAMSYS(0x%x)!\n",
++		     pfn, length, 0x4000);
++			return -EAGAIN;
++		}
++	} else if (pfn == CCU_PMEM_BASE) {
++		if (length > CCU_PMEM_SIZE) {
++			LOG_ERR
++		    ("mmap error :module(0x%lx),len(0x%lx),CCU_PMEM(0x%x)!\n",
++		     pfn, length, 0x4000);
++			return -EAGAIN;
++		}
++	} else if (pfn == CCU_DMEM_BASE) {
++		if (length > CCU_DMEM_SIZE) {
++			LOG_ERR
++		    ("mmap error :module(0x%lx),len(0x%lx),CCU_DMEM(0x%x)!\n",
++		     pfn, length, 0x4000);
++			return -EAGAIN;
++		}
++	} else {
++		LOG_ERR("Illegal starting HW addr for mmap!\n");
++		return -EAGAIN;
++	}
++
++	if (remap_pfn_range
++	    (vma, vma->vm_start, vma->vm_pgoff,
++	    vma->vm_end - vma->vm_start,
++	     vma->vm_page_prot)) {
++		LOG_ERR("remap_pfn_range\n");
++		return -EAGAIN;
++	}
++	LOG_DBG("map_check_1\n");
++
++	/*
++	 * } else {
++	 *	LOG_DBG("map_check_2\n");
++	 *	return ccu_mmap_hw(flip, vma);
++	 *}
++	 */
++
++	return 0;
++}
++
++/*****************************************************************************/
++static dev_t ccu_devt;
++static struct cdev *ccu_chardev;
++static struct class *ccu_class;
++static int ccu_num_devs;
++
++static inline void ccu_unreg_chardev(void)
++{
++	/* Release char driver */
++	if (ccu_chardev != NULL) {
++		cdev_del(ccu_chardev);
++		ccu_chardev = NULL;
++	}
++	unregister_chrdev_region(ccu_devt, 1);
++}
++
++static inline int ccu_reg_chardev(void)
++{
++	int ret = 0;
++
++	ret = alloc_chrdev_region(&ccu_devt, 0, 1, CCU_DEV_NAME);
++	if ((ret) < 0) {
++		LOG_ERR("alloc_chrdev_region failed, %d\n", ret);
++		return ret;
++	}
++	/* Allocate driver */
++	ccu_chardev = cdev_alloc();
++	if (ccu_chardev == NULL) {
++		LOG_ERR("cdev_alloc failed\n");
++		ret = -ENOMEM;
++		goto EXIT;
++	}
++
++	/* Attatch file operation. */
++	cdev_init(ccu_chardev, &ccu_fops);
++
++	ccu_chardev->owner = THIS_MODULE;
++
++	/* Add to system */
++	ret = cdev_add(ccu_chardev, ccu_devt, 1);
++	if ((ret) < 0) {
++		LOG_ERR("Attatch file operation failed, %d\n", ret);
++		goto EXIT;
++	}
++
++EXIT:
++	if (ret < 0)
++		ccu_unreg_chardev();
++
++	return ret;
++}
++
++/*****************************************************************************/
++/* platform_driver*/
++/*****************************************************************************/
++
++static int ccu_read_platform_info_from_dt(struct device_node *node)
++{
++	uint32_t reg[4] = {0, 0, 0, 0};
++	int ret = 0;
++
++	ret = of_property_read_u32_array(node, "reg", reg, 4);
++	if (ret < 0)
++		LOG_ERR("of_property_read_u32_array ERR : %d\n", ret);
++
++	ccu_hw_base = reg[1];
++
++	LOG_DBG("ccu read dt property ccu_hw_base = %x\n", ccu_hw_base);
++	LOG_DBG("CCU_HW_OFFSET = %x\n", CCU_HW_OFFSET);
++	LOG_DBG("CCU_PMEM_BASE = %x\n", CCU_PMEM_BASE);
++	LOG_DBG("CCU_PMEM_SIZE = %x\n", CCU_PMEM_SIZE);
++	LOG_DBG("CCU_DMEM_BASE = %x\n", CCU_DMEM_BASE);
++	LOG_DBG("CCU_DMEM_SIZE = %x\n", CCU_DMEM_SIZE);
++	LOG_DBG("CCU_DMEM_OFFSET = %x\n", CCU_DMEM_OFFSET);
++	LOG_DBG("CCU_LOG_BASE = %x\n", CCU_LOG_BASE);
++	LOG_DBG("CCU_LOG_SIZE = %x\n", CCU_LOG_SIZE);
++	LOG_DBG("CCU_HW_DUMP_SIZE = %x\n", CCU_HW_DUMP_SIZE);
++	LOG_DBG("CCU_CAMSYS_BASE = %x\n", CCU_CAMSYS_BASE);
++	LOG_DBG("CCU_CAMSYS_SIZE = %x\n", CCU_CAMSYS_SIZE);
++	LOG_DBG("CCU_N3D_A_BASE = %x\n", CCU_N3D_A_BASE);
++	LOG_DBG("CCU_N3D_A_SIZE = %x\n", CCU_N3D_A_SIZE);
++	LOG_DBG("CCU_SENSOR_PM_SIZE = %x\n", CCU_SENSOR_PM_SIZE);
++	LOG_DBG("CCU_SENSOR_DM_SIZE = %x\n", CCU_SENSOR_DM_SIZE);
++
++	return ret;
++}
++
++static int ccu_probe(struct platform_device *pdev)
++{
++#ifdef CONFIG_OF
++	struct device *dev;
++	struct device_node *node;
++	int ret = 0;
++	uint32_t phy_addr;
++	uint32_t phy_size;
++
++
++	node = pdev->dev.of_node;
++	g_ccu_device->dev = &pdev->dev;
++	LOG_DBG("probe 0, pdev id = %d name = %s\n", pdev->id, pdev->name);
++
++	ccu_read_platform_info_from_dt(node);
++
++#ifdef MTK_CCU_EMULATOR
++	/* emulator will fill ccu_base and bin_base */
++	/*ccu_init_emulator(g_ccu_device);*/
++#else
++	/* get register address */
++	if ((strcmp("ccu", g_ccu_device->dev->of_node->name) == 0)) {
++
++/* get physical address of pmem  */
++/* ioremap_wc() has no access 4 bytes alignment limitation as of_iomap() does?
++ * https://forums.xilinx.com/xlnx/attachments/
++ * xlnx/ELINUX/11158/1/Linux%20CPU%20to%20PL%20Access.pdf
++ */
++	{
++		/*remap ccu_base*/
++		phy_addr = ccu_hw_base;
++		phy_size = 0x1000;
++		g_ccu_device->ccu_base =
++		(unsigned long)ioremap(phy_addr, phy_size);
++		LOG_INF("ccu_base pa: 0x%x, size: 0x%x\n",
++			phy_addr, phy_size);
++		LOG_INF("ccu_base va: 0x%lx\n", g_ccu_device->ccu_base);
++
++		/*remap dmem_base*/
++		phy_addr = CCU_DMEM_BASE;
++		phy_size = CCU_DMEM_SIZE;
++		g_ccu_device->dmem_base =
++		(unsigned long)ioremap(phy_addr, phy_size);
++		LOG_INF("dmem_base pa: 0x%x, size: 0x%x\n",
++			phy_addr, phy_size);
++		LOG_INF("dmem_base va: 0x%lx\n", g_ccu_device->dmem_base);
++
++		/*remap camsys_base*/
++		phy_addr = CCU_CAMSYS_BASE;
++		phy_size = CCU_CAMSYS_SIZE;
++		g_ccu_device->camsys_base =
++		(unsigned long)ioremap(phy_addr, phy_size);
++		LOG_INF("camsys_base pa: 0x%x, size: 0x%x\n",
++			phy_addr, phy_size);
++		LOG_INF("camsys_base va: 0x%lx\n", g_ccu_device->camsys_base);
++
++		/*remap n3d_a_base*/
++		phy_addr = CCU_N3D_A_BASE;
++		phy_size = CCU_N3D_A_SIZE;
++		g_ccu_device->n3d_a_base =
++		(unsigned long)ioremap(phy_addr, phy_size);
++		LOG_INF("n3d_a_base pa: 0x%x, size: 0x%x\n",
++			phy_addr, phy_size);
++		LOG_INF("n3d_a_base va: 0x%lx\n", g_ccu_device->n3d_a_base);
++	}
++/* get Clock control from device tree.  */
++	{
++		ccu_clk_ctrl[0] =
++		devm_clk_get(g_ccu_device->dev, "CCU_CLK_MMSYS_CCU");
++		if (ccu_clk_ctrl[0] == NULL)
++			LOG_ERR("Get CCU_CLK_MMSYS_CCU fail.\n");
++
++		ccu_clk_ctrl[1] =
++		devm_clk_get(g_ccu_device->dev, "CAM_PWR");
++		if (ccu_clk_ctrl[1] == NULL)
++			LOG_ERR("Get CAM_PWR fail.\n");
++
++		ccu_clk_ctrl[2] =
++		devm_clk_get(g_ccu_device->dev, "CCU_CLK_CAM_CCU");
++		if (ccu_clk_ctrl[2] == NULL)
++			LOG_ERR("Get CCU_CLK_CAM_CCU fail.\n");
++	}
++	/**/
++	g_ccu_device->irq_num = irq_of_parse_and_map(node, 0);
++	LOG_DBG(
++	"probe 1, ccu_base: 0x%lx, bin_base: 0x%lx, irq_num: %d, pdev: %p\n",
++		g_ccu_device->ccu_base, g_ccu_device->bin_base,
++		g_ccu_device->irq_num, g_ccu_device->dev);
++
++	if (g_ccu_device->irq_num > 0) {
++		/* get IRQ flag from device node */
++		unsigned int irq_info[3];
++
++		if (of_property_read_u32_array
++		    (node, "interrupts", irq_info, ARRAY_SIZE(irq_info))) {
++			LOG_DERR(g_ccu_device->dev,
++				"get irq flags from DTS fail!\n");
++			return -ENODEV;
++		}
++	} else {
++		LOG_DBG("No IRQ!!: ccu_num_devs=%d, devnode(%s), irq=%d\n",
++			ccu_num_devs,
++			g_ccu_device->dev->of_node->name,
++			g_ccu_device->irq_num);
++	}
++
++	/* Only register char driver in the 1st time */
++	if (++ccu_num_devs == 1) {
++
++		/* Register char driver */
++		ret = ccu_reg_chardev();
++		if (ret) {
++			LOG_DERR(g_ccu_device->dev,
++				"register char failed");
++			return ret;
++		}
++
++		/* Create class register */
++		ccu_class = class_create(THIS_MODULE, "ccudrv");
++		if (IS_ERR(ccu_class)) {
++			ret = PTR_ERR(ccu_class);
++			LOG_ERR("Unable to create class, err = %d\n", ret);
++			goto EXIT;
++		}
++
++		dev =
++		device_create(ccu_class, NULL, ccu_devt, NULL, CCU_DEV_NAME);
++		if (IS_ERR(dev)) {
++			ret = PTR_ERR(dev);
++			LOG_DERR(g_ccu_device->dev,
++				"Failed to create device: /dev/%s, err = %d",
++				CCU_DEV_NAME, ret);
++			goto EXIT;
++		}
++#ifdef CONFIG_PM_SLEEP
++		ccu_wake_lock = wakeup_source_register(NULL, "ccu_lock_wakelock");
++#endif
++
++		/* enqueue/dequeue control in ihalpipe wrapper */
++		init_waitqueue_head(&wait_queue_deque);
++		init_waitqueue_head(&wait_queue_enque);
++
++/*for (i = 0; i < CCU_IRQ_NUM_TYPES; i++) {*/
++/*      tasklet_init(ccu_tasklet[i].pCCU_tkt, ccu_tasklet[i].tkt_cb, 0);*/
++/*}*/
++
++		/*register i2c driver callback*/
++		ret = ccu_i2c_register_driver();
++		if (ret < 0)
++			goto EXIT;
++		ret = ccu_i2c_set_n3d_base(g_ccu_device->n3d_a_base);
++		if (ret < 0)
++			goto EXIT;
++
++EXIT:
++		if (ret < 0)
++			ccu_unreg_chardev();
++	}
++
++	ccu_init_hw(g_ccu_device);
++
++	LOG_INF_MUST("ccu probe cuccess...\n");
++
++	}
++#endif
++#endif
++
++	LOG_DBG("- X. CCU driver probe.\n");
++
++	return ret;
++}
++
++
++static int ccu_remove(struct platform_device *pDev)
++{
++	/*    struct resource *pRes; */
++	int irq_num;
++
++	/*  */
++	LOG_DBG("- E.");
++
++	/*uninit hw*/
++	ccu_uninit_hw(g_ccu_device);
++
++	/* unregister char driver. */
++	ccu_unreg_chardev();
++
++	/*ccu_i2c_del_drivers();*/
++	ccu_i2c_delete_driver();
++
++	/* Release IRQ */
++	disable_irq(g_ccu_device->irq_num);
++	irq_num = platform_get_irq(pDev, 0);
++	free_irq(irq_num, (void *)ccu_chardev);
++
++	/* kill tasklet */
++	/*for (i = 0; i < CCU_IRQ_NUM_TYPES; i++) {*/
++	/*      tasklet_kill(ccu_tasklet[i].p_ccu_tkt);*/
++	/*}*/
++
++	/*  */
++	device_destroy(ccu_class, ccu_devt);
++	/*  */
++	class_destroy(ccu_class);
++	ccu_class = NULL;
++	/*  */
++	return 0;
++}
++
++static int ccu_suspend(struct platform_device *pdev, pm_message_t mesg)
++{
++	return 0;
++}
++
++static int ccu_resume(struct platform_device *pdev)
++{
++	return 0;
++}
++
++/*****************************************************************************/
++static int __init CCU_INIT(void)
++{
++	int ret = 0;
++	/*struct device_node *node = NULL;*/
++
++	g_ccu_device = kzalloc(sizeof(struct ccu_device_s), GFP_KERNEL);
++	/*g_ccu_device = dma_cache_coherent();*/
++
++	INIT_LIST_HEAD(&g_ccu_device->user_list);
++	mutex_init(&g_ccu_device->user_mutex);
++	mutex_init(&g_ccu_device->dev_mutex);
++	mutex_init(&g_ccu_device->clk_mutex);
++	mutex_init(&g_ccu_device->ion_client_mutex);
++	init_waitqueue_head(&g_ccu_device->cmd_wait);
++
++	/* Register M4U callback */
++	LOG_DBG("register m4u callback");
++
++#ifdef CONFIG_MTK_IOMMU
++	mtk_iommu_register_fault_callback(CCUI_OF_M4U_PORT,
++		(mtk_iommu_fault_callback_t *)ccu_m4u_fault_callback, 0);
++	mtk_iommu_register_fault_callback(CCUO_OF_M4U_PORT,
++		(mtk_iommu_fault_callback_t *)ccu_m4u_fault_callback, 0);
++	mtk_iommu_register_fault_callback(CCUG_OF_M4U_PORT,
++		(mtk_iommu_fault_callback_t *)ccu_m4u_fault_callback, 0);
++
++#elif defined(CONFIG_MTK_M4U)
++	m4u_register_fault_callback(CCUI_OF_M4U_PORT,
++		ccu_m4u_fault_callback, NULL);
++	m4u_register_fault_callback(CCUO_OF_M4U_PORT,
++		ccu_m4u_fault_callback, NULL);
++	m4u_register_fault_callback(CCUG_OF_M4U_PORT,
++		ccu_m4u_fault_callback, NULL);
++#endif
++
++	LOG_DBG("platform_driver_register start\n");
++	if (platform_driver_register(&ccu_driver)) {
++		LOG_ERR("failed to register CCU driver");
++		return -ENODEV;
++	}
++
++	LOG_DBG("platform_driver_register finsish\n");
++
++	return ret;
++}
++
++
++static void __exit CCU_EXIT(void)
++{
++	platform_driver_unregister(&ccu_driver);
++
++	kfree(g_ccu_device);
++
++	/* Un-Register M4U callback */
++	LOG_DBG("un-register m4u callback");
++
++#ifdef CONFIG_MTK_IOMMU
++	mtk_iommu_unregister_fault_callback(CCUI_OF_M4U_PORT);
++	mtk_iommu_unregister_fault_callback(CCUO_OF_M4U_PORT);
++	mtk_iommu_unregister_fault_callback(CCUG_OF_M4U_PORT);
++
++#elif defined(CONFIG_MTK_M4U)
++	m4u_unregister_fault_callback(CCUI_OF_M4U_PORT);
++	m4u_unregister_fault_callback(CCUO_OF_M4U_PORT);
++	m4u_unregister_fault_callback(CCUG_OF_M4U_PORT);
++#endif
++
++}
++
++
++/*****************************************************************************/
++module_init(CCU_INIT);
++module_exit(CCU_EXIT);
++MODULE_DESCRIPTION("MTK CCU Driver");
++MODULE_AUTHOR("SW1");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/ccu_drv.h
+@@ -0,0 +1,332 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CCU_DRV_H__
++#define __CCU_DRV_H__
++
++#include <linux/types.h>
++#include <linux/ioctl.h>
++#include "ccu_mailbox_extif.h"
++#include <linux/fs.h>
++
++#ifdef CONFIG_COMPAT
++/*64 bit*/
++
++#include <linux/compat.h>
++#endif
++
++/*---------------------------------------------------------------------------*/
++/*  CCU IRQ                                                                */
++/*---------------------------------------------------------------------------*/
++#define IRQ_USER_NUM_MAX        32
++#define SUPPORT_MAX_IRQ         32
++
++
++enum CCU_IRQ_CLEAR_ENUM {
++	CCU_IRQ_CLEAR_NONE,	/* non-clear wait, clear after wait */
++	CCU_IRQ_CLEAR_WAIT,	/* clear wait, clear before and after wait */
++	CCU_IRQ_CLEAR_STATUS,	/* clear specific status only */
++	CCU_IRQ_CLEAR_ALL	/* clear all status */
++};
++
++enum CCU_IRQ_TYPE_ENUM {
++	CCU_IRQ_TYPE_INT_CCU_ST,
++	CCU_IRQ_TYPE_INT_CCU_A_ST,
++	CCU_IRQ_TYPE_INT_CCU_B_ST,
++	CCU_IRQ_TYPE_AMOUNT
++};
++
++enum CCU_ST_ENUM {
++	CCU_SIGNAL_INT = 0, CCU_DMA_INT, CCU_IRQ_ST_AMOUNT
++};
++
++struct CCU_IRQ_TIME_STRUCT {
++	unsigned int tLastSig_sec;
++/* time stamp of the latest occurring signal */
++	unsigned int tLastSig_usec;
++/* time stamp of the latest occurring signal */
++	unsigned int tMark2WaitSig_sec;
++/* time period from marking a signal to user try to wait and get the signal */
++	unsigned int tMark2WaitSig_usec;
++/* time period from marking a signal to user try to wait and get the signal */
++	unsigned int tLastSig2GetSig_sec;
++/* time period from latest signal to user try to wait and get the signal */
++	unsigned int tLastSig2GetSig_usec;
++/* time period from latest signal to user try to wait and get the signal */
++	int passedbySigcnt;	/* the count for the signal passed by  */
++};
++
++struct CCU_WAIT_IRQ_ST {
++	enum CCU_IRQ_CLEAR_ENUM Clear;
++	enum CCU_ST_ENUM St_type;
++	unsigned int Status;
++	int UserKey;		/* user key for doing interrupt operation */
++	unsigned int Timeout;
++	struct CCU_IRQ_TIME_STRUCT TimeInfo;
++};
++
++struct CCU_REGISTER_USERKEY_STRUCT {
++	int userKey;
++	char userName[32];
++};
++
++struct CCU_WAIT_IRQ_STRUCT {
++	enum CCU_IRQ_TYPE_ENUM Type;
++	unsigned int bDumpReg;
++	struct CCU_WAIT_IRQ_ST EventInfo;
++};
++
++struct CCU_CLEAR_IRQ_ST {
++	int UserKey;		/* user key for doing interrupt operation */
++	enum CCU_ST_ENUM St_type;
++	unsigned int Status;
++};
++
++struct CCU_CLEAR_IRQ_STRUCT {
++	enum CCU_IRQ_TYPE_ENUM Type;
++	struct CCU_CLEAR_IRQ_ST EventInfo;
++};
++
++struct CCU_REG_STRUCT {
++	unsigned int module;
++	unsigned int Addr;	/* register's addr */
++	unsigned int Val;	/* register's value */
++};
++
++struct CCU_REG_IO_STRUCT {
++	struct CCU_REG_STRUCT *pData;	/* pointer to struct CCU_REG_STRUCT */
++	unsigned int Count;	/* count */
++};
++
++struct CCU_IRQ_INFO_STRUCT {
++	/* Add an extra index for status type in ever -> signal or dma */
++	unsigned int Status[CCU_IRQ_TYPE_AMOUNT][CCU_IRQ_ST_AMOUNT]
++		[IRQ_USER_NUM_MAX];
++	unsigned int Mask[CCU_IRQ_TYPE_AMOUNT][CCU_IRQ_ST_AMOUNT];
++	unsigned int ErrMask[CCU_IRQ_TYPE_AMOUNT][CCU_IRQ_ST_AMOUNT];
++	signed int WarnMask[CCU_IRQ_TYPE_AMOUNT][CCU_IRQ_ST_AMOUNT];
++	/* flag for indicating that user do mark for a interrupt or not */
++	unsigned int MarkedFlag[CCU_IRQ_TYPE_AMOUNT][CCU_IRQ_ST_AMOUNT]
++		[IRQ_USER_NUM_MAX];
++	/* time for marking a specific interrupt */
++	unsigned int MarkedTime_sec[CCU_IRQ_TYPE_AMOUNT][32][IRQ_USER_NUM_MAX];
++	/* time for marking a specific interrupt */
++	unsigned int MarkedTime_usec[CCU_IRQ_TYPE_AMOUNT][32][IRQ_USER_NUM_MAX];
++	/* number of a specific signal that passed by */
++	signed int PassedBySigCnt[CCU_IRQ_TYPE_AMOUNT][32][IRQ_USER_NUM_MAX];
++	/* */
++	unsigned int LastestSigTime_sec[CCU_IRQ_TYPE_AMOUNT][32];
++	/* latest time for each interrupt */
++	unsigned int LastestSigTime_usec[CCU_IRQ_TYPE_AMOUNT][32];
++	/* latest time for each interrupt */
++};
++
++#define CCU_ISR_MAX_NUM 32
++#define INT_ERR_WARN_TIMER_THREAS 1000
++#define INT_ERR_WARN_MAX_TIME 3
++struct CCU_IRQ_ERR_WAN_CNT_STRUCT {
++	/* cnt for each err int # */
++	unsigned int m_err_int_cnt[CCU_IRQ_TYPE_AMOUNT][CCU_ISR_MAX_NUM];
++	/* cnt for each warning int # */
++	unsigned int m_warn_int_cnt[CCU_IRQ_TYPE_AMOUNT][CCU_ISR_MAX_NUM];
++	/* mark for err int, where its cnt > threshold */
++	unsigned int m_err_int_mark[CCU_IRQ_TYPE_AMOUNT];
++	/* mark for warn int, where its cnt > threshold */
++	unsigned int m_warn_int_mark[CCU_IRQ_TYPE_AMOUNT];
++	unsigned long m_int_usec[CCU_IRQ_TYPE_AMOUNT];
++};
++
++#define CCU_BUF_SIZE            (4096)
++#define CCU_BUF_SIZE_WRITE      1024
++#define CCU_BUF_WRITE_AMOUNT    6
++enum CCU_BUF_STATUS_ENUM {
++	CCU_BUF_STATUS_EMPTY,
++	CCU_BUF_STATUS_HOLD,
++	CCU_BUF_STATUS_READY
++};
++
++struct CCU_BUF_STRUCT {
++	enum CCU_BUF_STATUS_ENUM Status;
++	unsigned int Size;
++	unsigned char *pData;
++};
++
++struct CCU_BUF_INFO_STRUCT {
++	struct CCU_BUF_STRUCT Read;
++	struct CCU_BUF_STRUCT Write[CCU_BUF_WRITE_AMOUNT];
++};
++
++struct CCU_TIME_LOG_STRUCT {
++	unsigned int Vd;
++	unsigned int Expdone;
++	unsigned int WorkQueueVd;
++	unsigned int WorkQueueExpdone;
++	unsigned int TaskletVd;
++	unsigned int TaskletExpdone;
++};
++
++#ifdef MTK_VPU_KERNEL
++struct CCU_INFO_STRUCT {
++	spinlock_t SpinLockCcuRef;
++	spinlock_t SpinLockCcu;
++	spinlock_t SpinLockIrq[CCU_IRQ_TYPE_AMOUNT];
++	spinlock_t SpinLockIrqCnt[CCU_IRQ_TYPE_AMOUNT];
++	spinlock_t SpinLockRTBC;
++	spinlock_t SpinLockClock;
++	spinlock_t SpinLockI2cPower;
++	unsigned int IsI2cPowerDisabling;
++	unsigned int IsI2cPoweredOn;
++	unsigned int IsCcuPoweredOn;
++
++	wait_queue_head_t WaitQueueHead;
++	wait_queue_head_t AFWaitQueueHead[2];
++	wait_queue_head_t WaitQHeadList[SUPPORT_MAX_IRQ];
++
++	unsigned int UserCount;
++	unsigned int DebugMask;
++	signed int IrqNum;
++	struct CCU_IRQ_INFO_STRUCT IrqInfo;
++	struct CCU_IRQ_ERR_WAN_CNT_STRUCT IrqCntInfo;
++	struct CCU_BUF_INFO_STRUCT BufInfo;
++	struct CCU_TIME_LOG_STRUCT TimeLog;
++};
++#endif
++
++/*---------------------------------------------------------------------------*/
++/*  CCU working buffer                                                       */
++/*---------------------------------------------------------------------------*/
++#define SIZE_32BYTE	(32)
++#define SIZE_1MB	(1024*1024)
++#define SIZE_1MB_PWR2PAGE   (8)
++#define MAX_I2CBUF_NUM  1
++#define MAX_MAILBOX_NUM 2
++#define MAX_LOG_BUF_NUM 2
++
++#define MAILBOX_SEND 0
++#define MAILBOX_GET 1
++
++struct ccu_working_buffer_s {
++	uint8_t *va_pool;
++	uint32_t mva_pool;
++	uint32_t sz_pool;
++
++	uint8_t *va_i2c;	/* i2c buffer mode */
++	uint32_t mva_i2c;
++	uint32_t sz_i2c;
++
++	uint8_t *va_mb[MAX_MAILBOX_NUM];	/* mailbox              */
++	uint32_t mva_mb[MAX_MAILBOX_NUM];
++	uint32_t sz_mb[MAX_MAILBOX_NUM];
++
++	char *va_log[MAX_LOG_BUF_NUM];	/* log buffer           */
++	uint32_t mva_log[MAX_LOG_BUF_NUM];
++	uint32_t sz_log[MAX_LOG_BUF_NUM];
++	int32_t fd_log[MAX_LOG_BUF_NUM];
++};
++
++#ifdef CONFIG_COMPAT
++struct compat_ccu_working_buffer_s {
++	compat_uptr_t va_pool;
++	uint32_t mva_pool;
++	uint32_t sz_pool;
++
++	compat_uptr_t va_i2c;	/* i2c buffer mode */
++	uint32_t mva_i2c;
++	uint32_t sz_i2c;
++
++	compat_uptr_t va_mb[MAX_MAILBOX_NUM];	/* mailbox              */
++	uint32_t mva_mb[MAX_MAILBOX_NUM];
++	uint32_t sz_mb[MAX_MAILBOX_NUM];
++
++	compat_uptr_t va_log[MAX_LOG_BUF_NUM];	/* log buffer           */
++	uint32_t mva_log[MAX_LOG_BUF_NUM];
++	uint32_t sz_log[MAX_LOG_BUF_NUM];
++	int32_t fd_log[MAX_LOG_BUF_NUM];
++};
++#endif
++/*---------------------------------------------------------------------------*/
++/*  CCU Power                                                                */
++/*---------------------------------------------------------------------------*/
++struct ccu_power_s {
++	uint32_t bON;
++	uint32_t freq;
++	uint32_t power;
++	struct ccu_working_buffer_s workBuf;
++};
++
++#ifdef CONFIG_COMPAT
++struct compat_ccu_power_s {
++	uint32_t bON;
++	uint32_t freq;
++	uint32_t power;
++	struct compat_ccu_working_buffer_s workBuf;
++};
++#endif
++/*---------------------------------------------------------------------------*/
++/*  CCU command                                                              */
++/*---------------------------------------------------------------------------*/
++
++enum ccu_eng_status_e {
++	CCU_ENG_STATUS_SUCCESS,
++	CCU_ENG_STATUS_BUSY,
++	CCU_ENG_STATUS_TIMEOUT,
++	CCU_ENG_STATUS_INVALID,
++	CCU_ENG_STATUS_FLUSH,
++	CCU_ENG_STATUS_FAILURE,
++	CCU_ENG_STATUS_ERESTARTSYS,
++};
++
++/*---------------------------------------------------------------------------*/
++/*  CCU Command                                                              */
++/*---------------------------------------------------------------------------*/
++struct ccu_cmd_s {
++	struct ccu_msg task;
++	enum ccu_eng_status_e status;
++};
++
++#define CCU_IMPORT_BUF_NUM 200
++#define CCU_IMPORT_BUF_UNDEF 0xFFFFFFFF
++struct import_mem_s {
++	uint32_t memID[CCU_IMPORT_BUF_NUM];
++};
++/*---------------------------------------------------------------------------*/
++/*  IOCTL Command                                                            */
++/*---------------------------------------------------------------------------*/
++#define CCU_MAGICNO             'c'
++#define CCU_IOCTL_SET_POWER                 _IOW(CCU_MAGICNO,   0, int)
++#define CCU_IOCTL_ENQUE_COMMAND             _IOW(CCU_MAGICNO,   1, int)
++#define CCU_IOCTL_DEQUE_COMMAND             _IOWR(CCU_MAGICNO,  2, int)
++#define CCU_IOCTL_FLUSH_COMMAND             _IOW(CCU_MAGICNO,   3, int)
++
++#define CCU_IOCTL_WAIT_AF_IRQ               _IOW(CCU_MAGICNO,   8, int)
++#define CCU_IOCTL_WAIT_IRQ                  _IOW(CCU_MAGICNO,   9, int)
++#define CCU_IOCTL_SEND_CMD                  _IOWR(CCU_MAGICNO, 10, int)
++#define CCU_IOCTL_SET_RUN                   _IO(CCU_MAGICNO,   11)
++
++#define CCU_CLEAR_IRQ                       _IOW(CCU_MAGICNO,  12, int)
++#define CCU_REGISTER_IRQ_USER_KEY           _IOR(CCU_MAGICNO,  13, int)
++#define CCU_READ_REGISTER                   _IOWR(CCU_MAGICNO, 14, int)
++#define CCU_WRITE_REGISTER                  _IOWR(CCU_MAGICNO, 15, int)
++
++#define CCU_IOCTL_SET_WORK_BUF              _IOW(CCU_MAGICNO,  18, int)
++#define CCU_IOCTL_FLUSH_LOG                 _IOW(CCU_MAGICNO,  19, int)
++
++#define CCU_IOCTL_GET_I2C_DMA_BUF_ADDR      _IOR(CCU_MAGICNO,  20, int)
++#define CCU_IOCTL_SET_I2C_MODE              _IOW(CCU_MAGICNO,  21, int)
++#define CCU_IOCTL_GET_CURRENT_FPS           _IOR(CCU_MAGICNO,  23, int)
++#define CCU_IOCTL_GET_SENSOR_I2C_SLAVE_ADDR _IOR(CCU_MAGICNO,  24, int)
++#define CCU_IOCTL_GET_SENSOR_NAME           _IOR(CCU_MAGICNO,  25, int)
++#define CCU_IOCTL_GET_PLATFORM_INFO         _IOR(CCU_MAGICNO,  26, int)
++#define CCU_IOCTL_IMPORT_MEM		        _IOW(CCU_MAGICNO,  27, int)
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/ccu_i2c.c
+@@ -0,0 +1,422 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include <linux/types.h>
++#include <linux/device.h>
++#include <linux/cdev.h>
++#include <linux/platform_device.h>
++
++#include <linux/delay.h>
++#include <linux/uaccess.h>
++#include <linux/sched.h>
++
++#include <linux/printk.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/i2c.h>
++
++#include "i2c-mtk.h"
++#include <m4u.h>
++
++#include "ccu_cmn.h"
++#include "ccu_i2c.h"
++#include "ccu_i2c_hw.h"
++#include "ccu_mva.h"
++
++/*****************************************************************************/
++/*I2C Channel offset*/
++#define I2C_BASE_OFS_CH1 (0x200)
++#define MAX_I2C_CMD_LEN 255
++#define CCU_I2C_APDMA_TXLEN 128
++
++#define CCU_I2C_2_HW_DRVNAME  "ccu_i2c_2_hwtrg"
++#define CCU_I2C_4_HW_DRVNAME  "ccu_i2c_4_hwtrg"
++#define CCU_I2C_7_HW_DRVNAME  "ccu_i2c_7_hwtrg"
++
++static DEFINE_MUTEX(ccu_i2c_mutex);
++
++/*i2c driver hook*/
++static int ccu_i2c_probe_2(struct i2c_client *client,
++	const struct i2c_device_id *id);
++static int ccu_i2c_probe_4(struct i2c_client *client,
++	const struct i2c_device_id *id);
++static int ccu_i2c_probe_7(struct i2c_client *client,
++	const struct i2c_device_id *id);
++static int ccu_i2c_remove(struct i2c_client *client);
++/*ccu i2c operation*/
++static struct i2c_client *get_ccu_i2c_client(
++	uint32_t i2c_id);
++static int ccu_i2c_controller_en(uint32_t i2c_id,
++	int enable);
++static int i2c_query_dma_buffer_addr(uint32_t sensor_idx,
++	void **va, uint32_t *va_h, uint32_t *va_l, uint32_t *i2c_id);
++static int ccu_i2c_controller_uninit(uint32_t i2c_id);
++
++/*i2c reg operation*/
++static inline void i2c_writew(u16 value, struct i2c_adapter *adap, u16 offset);
++
++
++//static enum CCU_I2C_CHANNEL g_ccuI2cChannel;
++static struct i2c_client *g_ccuI2cClient2;
++static struct i2c_client *g_ccuI2cClient4;
++static struct i2c_client *g_ccuI2cClient7;
++
++static const struct i2c_device_id ccu_i2c_2_ids[] = {
++	{CCU_I2C_2_HW_DRVNAME, 0}, {} };
++static const struct i2c_device_id ccu_i2c_4_ids[] = {
++	{CCU_I2C_4_HW_DRVNAME, 0}, {} };
++static const struct i2c_device_id ccu_i2c_7_ids[] = {
++	{CCU_I2C_7_HW_DRVNAME, 0}, {} };
++uint32_t i2c_mva[IMGSENSOR_SENSOR_IDX_MAX_NUM];
++static bool ccu_i2c_initialized[I2C_MAX_CHANNEL] = {0};
++
++#ifdef CONFIG_OF
++static const struct of_device_id ccu_i2c_2_driver_of_ids[] = {
++	{.compatible = "mediatek,ccu_sensor_i2c_2_hw",},
++	{}
++};
++
++static const struct of_device_id ccu_i2c_4_driver_of_ids[] = {
++	{.compatible = "mediatek,ccu_sensor_i2c_4_hw",},
++	{}
++};
++
++static const struct of_device_id ccu_i2c_7_driver_of_ids[] = {
++	{.compatible = "mediatek,ccu_sensor_i2c_7_hw",},
++	{}
++};
++#endif
++
++struct i2c_driver ccu_i2c_2_driver = {
++	.probe = ccu_i2c_probe_2,
++	.remove = ccu_i2c_remove,
++	.driver = {
++		   .name = CCU_I2C_2_HW_DRVNAME,
++		   .owner = THIS_MODULE,
++#ifdef CONFIG_OF
++		   .of_match_table = ccu_i2c_2_driver_of_ids,
++#endif
++		   },
++	.id_table = ccu_i2c_2_ids,
++};
++
++struct i2c_driver ccu_i2c_4_driver = {
++	.probe = ccu_i2c_probe_4,
++	.remove = ccu_i2c_remove,
++	.driver = {
++		   .name = CCU_I2C_4_HW_DRVNAME,
++		   .owner = THIS_MODULE,
++#ifdef CONFIG_OF
++		   .of_match_table = ccu_i2c_4_driver_of_ids,
++#endif
++		   },
++	.id_table = ccu_i2c_4_ids,
++};
++
++struct i2c_driver ccu_i2c_7_driver = {
++	.probe = ccu_i2c_probe_7,
++	.remove = ccu_i2c_remove,
++	.driver = {
++		   .name = CCU_I2C_7_HW_DRVNAME,
++		   .owner = THIS_MODULE,
++#ifdef CONFIG_OF
++		   .of_match_table = ccu_i2c_7_driver_of_ids,
++#endif
++		   },
++	.id_table = ccu_i2c_7_ids,
++};
++
++/*---------------------------------------------------------------------------*/
++/* CCU Driver: i2c driver funcs                                              */
++/*---------------------------------------------------------------------------*/
++static int ccu_i2c_probe_2(struct i2c_client *client,
++	const struct i2c_device_id *id)
++{
++	LOG_DBG_MUST(
++	"[ccu_i2c_probe] Attach I2C for HW trriger g_ccuI2cClient2 %p\n",
++	client);
++
++	/* get sensor i2c client */
++	g_ccuI2cClient2 = client;
++
++	LOG_DBG_MUST("[ccu_i2c_probe] Attached!!\n");
++
++	return 0;
++}
++
++static int ccu_i2c_probe_4(struct i2c_client *client,
++	const struct i2c_device_id *id)
++{
++	LOG_DBG_MUST(
++	"[ccu_i2c_probe] Attach I2C for HW trriger g_ccuI2cClient4 %p\n",
++	client);
++
++	/* get sensor i2c client */
++	g_ccuI2cClient4 = client;
++
++	LOG_DBG_MUST("[ccu_i2c_probe] Attached!!\n");
++
++	return 0;
++}
++
++static int ccu_i2c_probe_7(struct i2c_client *client,
++	const struct i2c_device_id *id)
++{
++	LOG_DBG_MUST(
++	"[ccu_i2c_probe] Attach I2C for HW trriger g_ccuI2cClient7 %p\n",
++	client);
++
++	/* get sensor i2c client */
++	g_ccuI2cClient7 = client;
++
++	LOG_DBG_MUST("[ccu_i2c_probe] Attached!!\n");
++
++	return 0;
++}
++
++static int ccu_i2c_remove(struct i2c_client *client)
++{
++	return 0;
++}
++
++/*---------------------------------------------------------------------------*/
++/* CCU i2c public funcs                                                      */
++/*---------------------------------------------------------------------------*/
++int ccu_i2c_register_driver(void)
++{
++	int i2c_ret = 0;
++
++	mutex_lock(&ccu_i2c_mutex);
++	LOG_DBG_MUST("i2c_add_driver(&ccu_i2c_2_driver)++\n");
++	i2c_ret = i2c_add_driver(&ccu_i2c_2_driver);
++	LOG_DBG_MUST("i2c_add_driver(&ccu_i2c_2_driver), ret: %d--\n",
++		i2c_ret);
++	LOG_DBG_MUST("i2c_add_driver(&ccu_i2c_4_driver)++\n");
++	i2c_ret = i2c_add_driver(&ccu_i2c_4_driver);
++	LOG_DBG_MUST("i2c_add_driver(&ccu_i2c_4_driver), ret: %d--\n",
++		i2c_ret);
++	LOG_DBG_MUST("i2c_add_driver(&ccu_i2c_7_driver)++\n");
++	i2c_ret = i2c_add_driver(&ccu_i2c_7_driver);
++	LOG_DBG_MUST("i2c_add_driver(&ccu_i2c_7_driver), ret: %d--\n",
++		i2c_ret);
++	mutex_unlock(&ccu_i2c_mutex);
++	return 0;
++}
++
++int ccu_i2c_delete_driver(void)
++{
++	mutex_lock(&ccu_i2c_mutex);
++	i2c_del_driver(&ccu_i2c_2_driver);
++	i2c_del_driver(&ccu_i2c_4_driver);
++	i2c_del_driver(&ccu_i2c_7_driver);
++	mutex_unlock(&ccu_i2c_mutex);
++	return 0;
++}
++
++int ccu_i2c_controller_init(uint32_t i2c_id)
++{
++	mutex_lock(&ccu_i2c_mutex);
++	if (i2c_id >= I2C_MAX_CHANNEL) {
++		LOG_ERR("i2c_id %d is invalid\n", i2c_id);
++		mutex_unlock(&ccu_i2c_mutex);
++		return -EINVAL;
++	}
++
++	if (ccu_i2c_initialized[i2c_id] == MTRUE) {
++/*if not first time init, release mutex first to avoid deadlock*/
++		LOG_DBG_MUST("reinit, temporily release mutex.\n");
++	}
++	if (ccu_i2c_controller_en(i2c_id, 1) == -1) {
++		LOG_DBG("ccu_i2c_controller_en 1 fail\n");
++		mutex_unlock(&ccu_i2c_mutex);
++		return -1;
++	}
++
++	LOG_DBG_MUST("%s done.\n", __func__);
++	mutex_unlock(&ccu_i2c_mutex);
++	return 0;
++}
++
++int ccu_i2c_controller_uninit_all(void)
++{
++	int i;
++
++	mutex_lock(&ccu_i2c_mutex);
++	for (i = 0 ; i < I2C_MAX_CHANNEL ; i++) {
++		if (ccu_i2c_initialized[i])
++			ccu_i2c_controller_uninit(i);
++	}
++
++	LOG_INF_MUST("%s done.\n", __func__);
++
++	mutex_unlock(&ccu_i2c_mutex);
++	return 0;
++}
++
++int ccu_get_i2c_dma_buf_addr(struct ccu_i2c_buf_mva_ioarg *ioarg)
++{
++	int ret = 0;
++	void *va;
++
++	mutex_lock(&ccu_i2c_mutex);
++	ret = i2c_query_dma_buffer_addr(ioarg->sensor_idx,
++		&va, &ioarg->va_h, &ioarg->va_l, &ioarg->i2c_id);
++
++	if (ret != 0) {
++		mutex_unlock(&ccu_i2c_mutex);
++		return ret;
++	}
++
++	/*If there is existing i2c buffer mva allocated, deallocate it first*/
++	ccu_deallocate_mva(i2c_mva[ioarg->sensor_idx]);
++	i2c_mva[ioarg->sensor_idx] = 0;
++	ret = ccu_allocate_mva(&i2c_mva[ioarg->sensor_idx], va, 4096);
++	ioarg->mva = i2c_mva[ioarg->sensor_idx];
++	mutex_unlock(&ccu_i2c_mutex);
++	return ret;
++}
++
++
++int ccu_i2c_free_dma_buf_mva_all(void)
++{
++	uint32_t i;
++
++	mutex_lock(&ccu_i2c_mutex);
++	for (i = IMGSENSOR_SENSOR_IDX_MIN_NUM;
++		i < IMGSENSOR_SENSOR_IDX_MAX_NUM; i++) {
++		ccu_deallocate_mva(i2c_mva[i]);
++		i2c_mva[i] = 0;
++	}
++
++	LOG_INF_MUST("%s done.\n", __func__);
++	mutex_unlock(&ccu_i2c_mutex);
++
++	return 0;
++}
++
++/*---------------------------------------------------------------------------*/
++/* CCU i2c static funcs                                              */
++/*---------------------------------------------------------------------------*/
++static int i2c_query_dma_buffer_addr(uint32_t sensor_idx,
++	void **va, uint32_t *va_h, uint32_t *va_l, uint32_t *i2c_id)
++{
++	struct i2c_client *pClient = NULL;
++	dma_addr_t pa;
++	int ret;
++
++	pClient = get_ccu_i2c_client(*i2c_id);
++
++	if (pClient == MNULL) {
++		LOG_ERR("ccu client is NULL");
++		return -EFAULT;
++	}
++
++	/*
++	 * T hands out the second page of its struct mt_i2c dma_buf; i2c-mt65xx
++	 * keeps a page of its own for the CCU, with the same DT controller id.
++	 */
++	ret = mtk_i2c_ccu_dma_buf(pClient->adapter, va, &pa);
++	if (ret) {
++		LOG_ERR("no CCU i2c buffer on i2c %d: %d\n", *i2c_id, ret);
++		return -EFAULT;
++	}
++	*va_l = pa;
++	*va_h = 0;
++#ifdef CONFIG_COMPAT
++	*va_h = (pa >> 32);
++#endif
++	*i2c_id = mtk_i2c_hw_id(pClient->adapter);
++	LOG_DBG_MUST("$$pa(%pad), va(%p), i2c-id(%d)\n", &pa, *va, *i2c_id);
++	return 0;
++}
++
++static int ccu_i2c_controller_en(uint32_t i2c_id,
++	int enable)
++{
++	int ret = 0;
++	struct i2c_client *pClient = NULL;
++
++	LOG_INF_MUST("%s, id(%d):(%d)->(%d)\n", __func__,
++	i2c_id, ccu_i2c_initialized[i2c_id], enable);
++
++	pClient = get_ccu_i2c_client(i2c_id);
++	LOG_DBG("%s, pClient: %p\n", __func__, pClient);
++
++	if (pClient == NULL) {
++		LOG_ERR("i2c_client is null\n");
++		return -1;
++	}
++
++	if (enable) {
++		if (ccu_i2c_initialized[i2c_id] == MFALSE) {
++			ret = i2c_ccu_enable(pClient->adapter,
++				I2C_BASE_OFS_CH1);
++			ccu_i2c_initialized[i2c_id] = MTRUE;
++			LOG_INF_MUST("i2c_ccu_enable done.\n");
++
++			/*MCU_INTR re-direct to CCU only*/
++			i2c_writew(2, pClient->adapter, 0x240);
++		}
++	} else {
++		if (ccu_i2c_initialized[i2c_id] == MTRUE) {
++			ret = i2c_ccu_disable(pClient->adapter);
++			ccu_i2c_initialized[i2c_id] = MFALSE;
++			LOG_INF_MUST("i2c_ccu_disable done.\n");
++		}
++	}
++	return ret;
++}
++
++static int ccu_i2c_controller_uninit(uint32_t i2c_id)
++{
++	if (ccu_i2c_controller_en(i2c_id, 0) == -1) {
++		LOG_DBG("ccu_i2c_controller_en 0 fail\n");
++		return -1;
++	}
++
++	LOG_DBG_MUST("%s done: id(%d)\n", __func__,
++		i2c_id);
++
++	return 0;
++}
++
++
++static struct i2c_client *get_ccu_i2c_client(
++	uint32_t i2c_id)
++{
++	switch (i2c_id) {
++	case 2:
++	{
++		return g_ccuI2cClient2;
++	}
++	case 4:
++	{
++		return g_ccuI2cClient4;
++	}
++	case 7:
++	{
++		return g_ccuI2cClient7;
++	}
++	default:
++	{
++		return MNULL;
++	}
++	}
++}
++
++static inline void i2c_writew(u16 value, struct i2c_adapter *adap, u16 offset)
++{
++	mtk_i2c_ccu_writew(adap, value, offset);
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/ccu_i2c.h
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CCU_I2C_H__
++#define __CCU_I2C_H__
++#include "kd_camera_feature.h"
++
++struct ccu_i2c_buf_mva_ioarg {
++	uint32_t sensor_idx;
++	uint32_t mva;
++	uint32_t va_h;
++	uint32_t va_l;
++	uint32_t i2c_id;
++};
++
++struct ccu_i2c_info {
++	uint32_t slave_addr;
++	uint32_t i2c_id;
++};
++
++/*i2c driver hook*/
++int ccu_i2c_register_driver(void);
++int ccu_i2c_delete_driver(void);
++
++/*ccu i2c operation*/
++//int ccu_i2c_set_channel(enum CCU_I2C_CHANNEL);
++int ccu_get_i2c_dma_buf_addr(struct ccu_i2c_buf_mva_ioarg *ioarg);
++int ccu_i2c_controller_init(uint32_t i2c_id);
++int ccu_i2c_controller_uninit_all(void);
++int ccu_i2c_free_dma_buf_mva_all(void);
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/ccu_n3d_a.c
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include <linux/io.h>
++
++#include "ccu_drv.h"
++#include "ccu_cmn.h"
++#include "ccu_n3d_a.h"
++
++inline u32 n3d_a_readw(unsigned long n3d_a_base, u32 offset)
++{
++	return readl((u32 *) (n3d_a_base + offset));
++}
++
++inline void n3d_a_writew(u32 value, unsigned long n3d_a_base, u32 offset)
++{
++	writel(value, (u32 *) (n3d_a_base + offset));
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/2.0/ccu_n3d_a.h
+@@ -0,0 +1,27 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CCU_N3D_A_H__
++#define __CCU_N3D_A_H__
++
++enum N3DA_REGS_OFFSET {
++	OFFSET_CTL = 0x100,
++	OFFSET_TRIG = 0x108,
++	OFFSET_INT = 0x10C,
++};
++
++extern u32 n3d_a_readw(unsigned long n3d_a_base, u32 offset);
++extern void n3d_a_writew(u32 value, unsigned long n3d_a_base, u32 offset);
++
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/Kconfig
+@@ -0,0 +1,9 @@
++config MTK_CCU
++	bool "MTK_CCU"
++	default n
++	help
++	  Support 3A using CCU hardware
++	  Offers speed up of 3A, including
++	  Faster control flow and
++	  Stabler frame rate.
++
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/Makefile
+@@ -0,0 +1,19 @@
++#
++# Copyright (C) 2015 MediaTek Inc.
++#
++# This program is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License version 2 as
++# published by the Free Software Foundation.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++# GNU General Public License for more details.
++#
++
++# CCU 2.0 with the MT6771 platform code, as T builds it for mt6771.
++subdir-ccflags-y += -DMTK_VPU_KERNEL
++subdir-ccflags-y += -DCCU_AF_ENABLE
++
++obj-y += mt6771/
++obj-y += 2.0/
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/CCU_A_c_header.h
+@@ -0,0 +1,1033 @@
++/*
++ * Copyright (C) 2017 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef __CCU_A_REGS_H__
++#define __CCU_A_REGS_H__
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ----------------- CCU_A Bit Field Definitions -------------------*/
++
++#define PACKING
++#define FIELD unsigned int
++
++PACKING union CCU_A_REG_RESET
++{
++	PACKING struct
++	{
++		FIELD RDMA_SOFT_RST_ST          : 1;
++		FIELD WDMA_SOFT_RST_ST          : 1;
++		FIELD rsv_2                     : 6;
++		FIELD RDMA_SOFT_RST             : 1;
++		FIELD WDMA_SOFT_RST             : 1;
++		FIELD rsv_10                    : 6;
++		FIELD CCU_HW_RST                : 1;
++		FIELD ARBITER_HW_RST            : 1;
++		FIELD H2T_A_HW_RST              : 1;
++		FIELD T2H_A_HW_RST              : 1;
++		FIELD rsv_20                    : 1;
++		FIELD RDMA_HW_RST               : 1;
++		FIELD WDMA_HW_RST               : 1;
++		FIELD AHB2GMC_HW_RST            : 1;
++		FIELD rsv_24                    : 8;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_START_TRIG
++{
++	PACKING struct
++	{
++		FIELD rsv_0                     : 1;
++		FIELD H2T_A_START               : 1;
++		FIELD T2H_A_START               : 1;
++		FIELD RDMA_START                : 1;
++		FIELD WDMA_START                : 1;
++		FIELD rsv_5                     : 27;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_BANK_INCR
++{
++	PACKING struct
++	{
++		FIELD H2T_A_FINISH              : 1;
++		FIELD T2H_A_FINISH              : 1;
++		FIELD rsv_2                     : 30;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CTRL
++{
++	PACKING struct
++	{
++		FIELD RDMA_ENABLE               : 1;
++		FIELD WDMA_ENABLE               : 1;
++		FIELD CCU_PRINNER               : 1;
++		FIELD DB_LOAD_DISABLE           : 1;
++		FIELD INT_CLR_MODE              : 1;
++		FIELD H2X_SECURE_EN             : 1;
++		FIELD H2X_MSB                   : 1;
++		FIELD H2X_DOMAIN_ID             : 5;
++		FIELD DMA_PMEM_EN               : 1;
++		FIELD CCUI_DCM_DIS              : 1;
++		FIELD CCUO_DCM_DIS              : 1;
++		FIELD SRAM_DCM_DIS              : 1;
++		FIELD CCU_PROT_RANGE            : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_T2H_A_DONE_ST
++{
++	PACKING struct
++	{
++		FIELD T2H_A_BANK_DONE           : 1;
++		FIELD T2H_A_FRAME_DONE          : 1;
++		FIELD rsv_2                     : 30;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_H2T_A_DONE_ST
++{
++	PACKING struct
++	{
++		FIELD H2T_A_BANK_DONE           : 1;
++		FIELD H2T_A_FRAME_DONE          : 1;
++		FIELD rsv_2                     : 30;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_WDMA_DONE_ST
++{
++	PACKING struct
++	{
++		FIELD WDMA_DONE_ST              : 1;
++		FIELD rsv_1                     : 31;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REGXI_REMAP
++{
++	PACKING struct
++	{
++		FIELD CCU_AXI_OFFSET            : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_CTL
++{
++	PACKING struct
++	{
++		FIELD CCU_HALT_REQ              : 1;
++		FIELD rsv_1                     : 3;
++		FIELD CCU_RUN_REQ               : 1;
++		FIELD rsv_5                     : 3;
++		FIELD CCU_WAKE_EVT              : 1;
++		FIELD rsv_9                     : 3;
++		FIELD CCU_ICCM_AHB_PRIO         : 1;
++		FIELD CCU_DCCM_AHB_PRIO         : 1;
++		FIELD rsv_14                    : 18;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_ST
++{
++	PACKING struct
++	{
++		FIELD CCU_HALT_ACK              : 1;
++		FIELD rsv_1                     : 3;
++		FIELD CCU_RUN_ACK               : 1;
++		FIELD rsv_5                     : 3;
++		FIELD CCU_SYS_HALT              : 1;
++		FIELD rsv_9                     : 3;
++		FIELD CCU_SYS_SLEEP             : 1;
++		FIELD CCU_SYS_SLEEP_MODE        : 3;
++		FIELD rsv_16                    : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_H2X_CFG
++{
++	PACKING struct
++	{
++		FIELD H2X_PREULTRA              : 1;
++		FIELD H2X_ULTRA                 : 1;
++		FIELD rsv_2                     : 2;
++		FIELD H2X_MERGE_EN              : 1;
++		FIELD H2X_BUFFER_EN             : 1;
++		FIELD rsv_6                     : 26;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INT_EN
++{
++	PACKING struct
++	{
++		FIELD CCU_ERR_INT_EN            : 1;
++		FIELD ISP_INT_EN                : 1;
++		FIELD APMCU_INT_EN              : 1;
++		FIELD PSO_INT_EN                : 1;
++		FIELD T2H_INT_EN                : 1;
++		FIELD H2T_INT_EN                : 1;
++		FIELD AFO_INT_EN                : 1;
++		FIELD AAO_INT_EN                : 1;
++		FIELD CAMSV_0_INT_EN            : 1;
++		FIELD CAMSV_1_INT_EN            : 1;
++		FIELD CAMSV_2_INT_EN            : 1;
++		FIELD CAMSV_3_INT_EN            : 1;
++		FIELD rsv_12                    : 20;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INT
++{
++	PACKING struct
++	{
++		FIELD INT_CCU                   : 1;
++		FIELD rsv_1                     : 31;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CTL_CCU_INT
++{
++	PACKING struct
++	{
++		FIELD INT_CTL_CCU               : 1;
++		FIELD rsv_1                     : 31;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_DCM_ST
++{
++	PACKING struct
++	{
++		FIELD CCUI_DCM_ST               : 1;
++		FIELD rsv_1                     : 3;
++		FIELD CCUO_DCM_ST               : 1;
++		FIELD rsv_5                     : 3;
++		FIELD SRAM_DCM_ST               : 1;
++		FIELD rsv_9                     : 23;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_DMA_ERR_ST
++{
++	PACKING struct
++	{
++		FIELD DMA_ERR_INT               : 1;
++		FIELD rsv_1                     : 7;
++		FIELD DMA_REQ_ST                : 4;
++		FIELD rsv_12                    : 4;
++		FIELD DMA_RDY_ST                : 1;
++		FIELD rsv_17                    : 15;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_DMA_DEBUG
++{
++	PACKING struct
++	{
++		FIELD DMA_DEBUG                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_EINTC_MASK
++{
++	PACKING struct
++	{
++		FIELD CCU_EINTC_MASK            : 8;
++		FIELD rsv_8                     : 8;
++		FIELD CCU_EINTC_MODE            : 1;
++		FIELD rsv_17                    : 15;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_EINTC_CLR
++{
++	PACKING struct
++	{
++		FIELD CCU_EINTC_CLR             : 8;
++		FIELD rsv_8                     : 24;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_EINTC_ST
++{
++	PACKING struct
++	{
++		FIELD CCU_EINTC_ST              : 8;
++		FIELD rsv_8                     : 24;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_EINTC_MISC
++{
++	PACKING struct
++	{
++		FIELD CCU_EINTC_RAW_ST          : 8;
++		FIELD rsv_8                     : 8;
++		FIELD CCU_EINTC_TRIG_ST         : 1;
++		FIELD rsv_17                    : 15;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REGHB_REMAP_A
++{
++	PACKING struct
++	{
++		FIELD CCU_AHB_REMAP_0           : 10;
++		FIELD rsv_10                    : 6;
++		FIELD CCU_AHB_REMAP_1           : 10;
++		FIELD rsv_26                    : 6;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REGHB_REMAP_B
++{
++	PACKING struct
++	{
++		FIELD CCU_AHB_REMAP_2           : 10;
++		FIELD rsv_10                    : 6;
++		FIELD CCU_AHB_REMAP_3           : 10;
++		FIELD rsv_26                    : 6;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REGHB_REMAP_C
++{
++	PACKING struct
++	{
++		FIELD CCU_AHB_REMAP_4           : 10;
++		FIELD rsv_10                    : 6;
++		FIELD CCU_AHB_REMAP_5           : 10;
++		FIELD rsv_26                    : 6;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REGHB_REMAP_D
++{
++	PACKING struct
++	{
++		FIELD CCU_AHB_REMAP_6           : 10;
++		FIELD rsv_10                    : 6;
++		FIELD CCU_AHB_REMAP_7           : 10;
++		FIELD rsv_26                    : 6;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_PC
++{
++	PACKING struct
++	{
++		FIELD CCU_CCU_PC                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_TOP_SPARE
++{
++	PACKING struct
++	{
++		FIELD CCU_SPARE                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO00
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO0                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO01
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO1                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO02
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO2                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO03
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO3                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO04
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO4                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO05
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO5                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO06
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO6                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO07
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO7                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO08
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO8                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO09
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO9                 : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO10
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO10                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO11
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO11                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO12
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO12                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO13
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO13                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO14
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO14                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO15
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO15                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO16
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO16                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO17
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO17                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO18
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO18                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO19
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO19                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO20
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO20                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO21
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO21                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO22
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO22                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO23
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO23                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO24
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO24                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO25
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO25                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO26
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO26                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO27
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO27                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO28
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO28                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO29
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO29                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO30
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO30                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_INFO31
++{
++	PACKING struct
++	{
++		FIELD CCU_INFO31                : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AAO_INT_PERIOD
++{
++	PACKING struct
++	{
++		FIELD AAO_A_INT_PRD             : 16;
++		FIELD AAO_B_INT_PRD             : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AAO_INT_CNT
++{
++	PACKING struct
++	{
++		FIELD AAO_A_INT_CNT             : 16;
++		FIELD AAO_B_INT_CNT             : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AFO_INT_PERIOD
++{
++	PACKING struct
++	{
++		FIELD AFO_A_INT_PRD             : 16;
++		FIELD AFO_B_INT_PRD             : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AFO_INT_CNT
++{
++	PACKING struct
++	{
++		FIELD AFO_A_INT_CNT             : 16;
++		FIELD AFO_B_INT_CNT             : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_PSO_INT_PERIOD
++{
++	PACKING struct
++	{
++		FIELD PSO_A_INT_PRD             : 16;
++		FIELD PSO_B_INT_PRD             : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_PSO_INT_CNT
++{
++	PACKING struct
++	{
++		FIELD PSO_A_INT_CNT             : 16;
++		FIELD PSO_B_INT_CNT             : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AAO_FRAME_BCNT
++{
++	PACKING struct
++	{
++		FIELD AAO_A_FRAME_BCNT          : 16;
++		FIELD AAO_B_FRAME_BCNT          : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AAO_INT_ST
++{
++	PACKING struct
++	{
++		FIELD AAO_A_FRAME_INT_ST        : 1;
++		FIELD AAO_A_BANK_INT_ST         : 1;
++		FIELD AAO_B_FRAME_INT_ST        : 1;
++		FIELD AAO_B_BANK_INT_ST         : 1;
++		FIELD rsv_4                     : 28;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AFO_FRAME_BCNT
++{
++	PACKING struct
++	{
++		FIELD AFO_A_FRAME_BCNT          : 16;
++		FIELD AFO_B_FRAME_BCNT          : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_AFO_INT_ST
++{
++	PACKING struct
++	{
++		FIELD AFO_A_FRAME_INT_ST        : 1;
++		FIELD AFO_A_BANK_INT_ST         : 1;
++		FIELD AFO_B_FRAME_INT_ST        : 1;
++		FIELD AFO_B_BANK_INT_ST         : 1;
++		FIELD rsv_4                     : 28;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_PSO_FRAME_BCNT
++{
++	PACKING struct
++	{
++		FIELD PSO_A_FRAME_BCNT          : 16;
++		FIELD PSO_B_FRAME_BCNT          : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_PSO_INT_ST
++{
++	PACKING struct
++	{
++		FIELD PSO_A_FRAME_INT_ST        : 1;
++		FIELD PSO_A_BANK_INT_ST         : 1;
++		FIELD PSO_B_FRAME_INT_ST        : 1;
++		FIELD PSO_B_BANK_INT_ST         : 1;
++		FIELD rsv_4                     : 28;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_INT_EN
++{
++	PACKING struct
++	{
++		FIELD CAMSV_0_LINE_INT_EN       : 1;
++		FIELD CAMSV_0_FRAME_INT_EN      : 1;
++		FIELD CAMSV_0_SOF_INT_EN        : 1;
++		FIELD CAMSV_0_IRQ_INT_EN        : 1;
++		FIELD CAMSV_0_TOG_EN            : 1;
++		FIELD rsv_5                     : 3;
++		FIELD CAMSV_1_LINE_INT_EN       : 1;
++		FIELD CAMSV_1_FRAME_INT_EN      : 1;
++		FIELD CAMSV_1_SOF_INT_EN        : 1;
++		FIELD CAMSV_1_IRQ_INT_EN        : 1;
++		FIELD CAMSV_1_TOG_EN            : 1;
++		FIELD rsv_13                    : 3;
++		FIELD CAMSV_2_LINE_INT_EN       : 1;
++		FIELD CAMSV_2_FRAME_INT_EN      : 1;
++		FIELD CAMSV_2_SOF_INT_EN        : 1;
++		FIELD CAMSV_2_IRQ_INT_EN        : 1;
++		FIELD CAMSV_2_TOG_EN            : 1;
++		FIELD rsv_21                    : 3;
++		FIELD CAMSV_3_LINE_INT_EN       : 1;
++		FIELD CAMSV_3_FRAME_INT_EN      : 1;
++		FIELD CAMSV_3_SOF_INT_EN        : 1;
++		FIELD CAMSV_3_IRQ_INT_EN        : 1;
++		FIELD CAMSV_3_TOG_EN            : 1;
++		FIELD rsv_29                    : 3;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_0_ICNT
++{
++	PACKING struct
++	{
++		FIELD CAMSV_0_INT_CNT           : 16;
++		FIELD rsv_16                    : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_0_INT_ST
++{
++	PACKING struct
++	{
++		FIELD CAMSV_0_LINE_INT_ST       : 1;
++		FIELD CAMSV_0_FRAME_INT_ST      : 1;
++		FIELD CAMSV_0_SOF_INT_ST        : 1;
++		FIELD CAMSV_0_IRQ_INT_ST        : 1;
++		FIELD rsv_4                     : 28;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_1_ICNT
++{
++	PACKING struct
++	{
++		FIELD CAMSV_1_INT_CNT           : 16;
++		FIELD rsv_16                    : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_1_INT_ST
++{
++	PACKING struct
++	{
++		FIELD CAMSV_1_LINE_INT_ST       : 1;
++		FIELD CAMSV_1_FRAME_INT_ST      : 1;
++		FIELD CAMSV_1_SOF_INT_ST        : 1;
++		FIELD CAMSV_1_IRQ_INT_ST        : 1;
++		FIELD rsv_4                     : 28;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_2_ICNT
++{
++	PACKING struct
++	{
++		FIELD CAMSV_2_INT_CNT           : 16;
++		FIELD rsv_16                    : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_2_INT_ST
++{
++	PACKING struct
++	{
++		FIELD CAMSV_2_LINE_INT_ST       : 1;
++		FIELD CAMSV_2_FRAME_INT_ST      : 1;
++		FIELD CAMSV_2_SOF_INT_ST        : 1;
++		FIELD CAMSV_2_IRQ_INT_ST        : 1;
++		FIELD rsv_4                     : 28;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_3_ICNT
++{
++	PACKING struct
++	{
++		FIELD CAMSV_3_INT_CNT           : 16;
++		FIELD rsv_16                    : 16;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CAMSV_3_INT_ST
++{
++	PACKING struct
++	{
++		FIELD CAMSV_3_LINE_INT_ST       : 1;
++		FIELD CAMSV_3_FRAME_INT_ST      : 1;
++		FIELD CAMSV_3_SOF_INT_ST        : 1;
++		FIELD CAMSV_3_IRQ_INT_ST        : 1;
++		FIELD rsv_4                     : 28;
++	} Bits;
++	UINT32 Raw;
++};
++
++PACKING union CCU_A_REG_CCU_SOF_CNT
++{
++	PACKING struct
++	{
++		FIELD CCU_SOF_CNT               : 32;
++	} Bits;
++	UINT32 Raw;
++};
++
++/* ----------------- CCU_A  Grouping Definitions -------------------*/
++/* ----------------- CCU_A Register Definition -------------------*/
++PACKING struct CCU_A_REGS
++{
++	PACKING union CCU_A_REG_RESET             RESET;            /* 1000*/
++	PACKING union CCU_A_REG_START_TRIG        START_TRIG;       /* 1004*/
++	PACKING union CCU_A_REG_BANK_INCR         BANK_INCR;        /* 1008*/
++	PACKING union CCU_A_REG_CTRL              CTRL;             /* 100C*/
++	PACKING union CCU_A_REG_T2H_A_DONE_ST     T2H_A_DONE_ST;    /* 1010*/
++	UINT32                          rsv_1014;     /* 1014*/
++
++	PACKING union CCU_A_REG_H2T_A_DONE_ST     H2T_A_DONE_ST;    /* 1018*/
++	PACKING union CCU_A_REG_WDMA_DONE_ST      WDMA_DONE_ST;     /* 101C*/
++	PACKING union CCU_A_REGXI_REMAP           CCU_AXI_REMAP;    /* 1020*/
++	PACKING union CCU_A_REG_CCU_CTL           CCU_CTL;          /* 1024*/
++	PACKING union CCU_A_REG_CCU_ST            CCU_ST;           /* 1028*/
++	PACKING union CCU_A_REG_CCU_H2X_CFG       CCU_H2X_CFG;      /* 102C*/
++	UINT32                          rsv_1030;     /* 1030*/
++
++	PACKING union CCU_A_REG_CCU_INT_EN        CCU_INT_EN;       /* 1034*/
++	PACKING union CCU_A_REG_CCU_INT           CCU_INT;          /* 1038*/
++	PACKING union CCU_A_REG_CTL_CCU_INT       CTL_CCU_INT;      /* 103C*/
++	PACKING union CCU_A_REG_DCM_ST            DCM_ST;           /* 1040*/
++	PACKING union CCU_A_REG_DMA_ERR_ST        DMA_ERR_ST;       /* 1044*/
++	PACKING union CCU_A_REG_DMA_DEBUG         DMA_DEBUG;        /* 1048*/
++	UINT32                          rsv_104C;     /* 104C*/
++
++	PACKING union CCU_A_REG_EINTC_MASK        EINTC_MASK;       /* 1050*/
++	PACKING union CCU_A_REG_EINTC_CLR         EINTC_CLR;        /* 1054*/
++	PACKING union CCU_A_REG_EINTC_ST          EINTC_ST;         /* 1058*/
++	PACKING union CCU_A_REG_EINTC_MISC        EINTC_MISC;       /* 105C*/
++	PACKING union CCU_A_REGHB_REMAP_A         CCU_AHB_REMAP_A;  /* 1060*/
++	PACKING union CCU_A_REGHB_REMAP_B         CCU_AHB_REMAP_B;  /* 1064*/
++	PACKING union CCU_A_REGHB_REMAP_C         CCU_AHB_REMAP_C;  /* 1068*/
++	PACKING union CCU_A_REGHB_REMAP_D         CCU_AHB_REMAP_D;  /* 106C*/
++	PACKING union CCU_A_REG_CCU_PC            CCU_PC;           /* 1070*/
++	PACKING union CCU_A_REG_TOP_SPARE         TOP_SPARE;        /* 1074*/
++	UINT32                          rsv_1078[2];      /* 1078..107C*/
++
++	PACKING union CCU_A_REG_CCU_INFO00        CCU_INFO00;       /* 1080*/
++	PACKING union CCU_A_REG_CCU_INFO01        CCU_INFO01;       /* 1084*/
++	PACKING union CCU_A_REG_CCU_INFO02        CCU_INFO02;       /* 1088*/
++	PACKING union CCU_A_REG_CCU_INFO03        CCU_INFO03;       /* 108C*/
++	PACKING union CCU_A_REG_CCU_INFO04        CCU_INFO04;       /* 1090*/
++	PACKING union CCU_A_REG_CCU_INFO05        CCU_INFO05;       /* 1094*/
++	PACKING union CCU_A_REG_CCU_INFO06        CCU_INFO06;       /* 1098*/
++	PACKING union CCU_A_REG_CCU_INFO07        CCU_INFO07;       /* 109C*/
++	PACKING union CCU_A_REG_CCU_INFO08        CCU_INFO08;       /* 10A0*/
++	PACKING union CCU_A_REG_CCU_INFO09        CCU_INFO09;       /* 10A4*/
++	PACKING union CCU_A_REG_CCU_INFO10        CCU_INFO10;       /* 10A8*/
++	PACKING union CCU_A_REG_CCU_INFO11        CCU_INFO11;       /* 10AC*/
++	PACKING union CCU_A_REG_CCU_INFO12        CCU_INFO12;       /* 10B0*/
++	PACKING union CCU_A_REG_CCU_INFO13        CCU_INFO13;       /* 10B4*/
++	PACKING union CCU_A_REG_CCU_INFO14        CCU_INFO14;       /* 10B8*/
++	PACKING union CCU_A_REG_CCU_INFO15        CCU_INFO15;       /* 10BC*/
++	PACKING union CCU_A_REG_CCU_INFO16        CCU_INFO16;       /* 10C0*/
++	PACKING union CCU_A_REG_CCU_INFO17        CCU_INFO17;       /* 10C4*/
++	PACKING union CCU_A_REG_CCU_INFO18        CCU_INFO18;       /* 10C8*/
++	PACKING union CCU_A_REG_CCU_INFO19        CCU_INFO19;       /* 10CC*/
++	PACKING union CCU_A_REG_CCU_INFO20        CCU_INFO20;       /* 10D0*/
++	PACKING union CCU_A_REG_CCU_INFO21        CCU_INFO21;       /* 10D4*/
++	PACKING union CCU_A_REG_CCU_INFO22        CCU_INFO22;       /* 10D8*/
++	PACKING union CCU_A_REG_CCU_INFO23        CCU_INFO23;       /* 10DC*/
++	PACKING union CCU_A_REG_CCU_INFO24        CCU_INFO24;       /* 10E0*/
++	PACKING union CCU_A_REG_CCU_INFO25        CCU_INFO25;       /* 10E4*/
++	PACKING union CCU_A_REG_CCU_INFO26        CCU_INFO26;       /* 10E8*/
++	PACKING union CCU_A_REG_CCU_INFO27        CCU_INFO27;       /* 10EC*/
++	PACKING union CCU_A_REG_CCU_INFO28        CCU_INFO28;       /* 10F0*/
++	PACKING union CCU_A_REG_CCU_INFO29        CCU_INFO29;       /* 10F4*/
++	PACKING union CCU_A_REG_CCU_INFO30        CCU_INFO30;       /* 10F8*/
++	PACKING union CCU_A_REG_CCU_INFO31        CCU_INFO31;       /* 10FC*/
++	PACKING union CCU_A_REG_AAO_INT_PERIOD    AAO_INT_PERIOD;   /* 1100*/
++	PACKING union CCU_A_REG_AAO_INT_CNT       AAO_INT_CNT;      /* 1104*/
++	PACKING union CCU_A_REG_AFO_INT_PERIOD    AFO_INT_PERIOD;   /* 1108*/
++	PACKING union CCU_A_REG_AFO_INT_CNT       AFO_INT_CNT;      /* 110C*/
++	PACKING union CCU_A_REG_PSO_INT_PERIOD    PSO_INT_PERIOD;   /* 1110*/
++	PACKING union CCU_A_REG_PSO_INT_CNT       PSO_INT_CNT;      /* 1114*/
++	UINT32                          rsv_1118[2];      /* 1118..111C*/
++
++	PACKING union CCU_A_REG_AAO_FRAME_BCNT    AAO_FRAME_BCNT;   /* 1120*/
++	PACKING union CCU_A_REG_AAO_INT_ST        AAO_INT_ST;       /* 1124*/
++	PACKING union CCU_A_REG_AFO_FRAME_BCNT    AFO_FRAME_BCNT;   /* 1128*/
++	PACKING union CCU_A_REG_AFO_INT_ST        AFO_INT_ST;       /* 112C*/
++	PACKING union CCU_A_REG_PSO_FRAME_BCNT    PSO_FRAME_BCNT;   /* 1130*/
++	PACKING union CCU_A_REG_PSO_INT_ST        PSO_INT_ST;       /* 1134*/
++	UINT32                          rsv_1138;         /* 1138*/
++
++	PACKING union CCU_A_REG_CAMSV_INT_EN      CAMSV_INT_EN;     /* 113C*/
++	PACKING union CCU_A_REG_CAMSV_0_ICNT      CAMSV_0_ICNT;     /* 1140*/
++	PACKING union CCU_A_REG_CAMSV_0_INT_ST    CAMSV_0_INT_ST;   /* 1144*/
++	PACKING union CCU_A_REG_CAMSV_1_ICNT      CAMSV_1_ICNT;     /* 1148*/
++	PACKING union CCU_A_REG_CAMSV_1_INT_ST    CAMSV_1_INT_ST;   /* 114C*/
++	PACKING union CCU_A_REG_CAMSV_2_ICNT      CAMSV_2_ICNT;     /* 1150*/
++	PACKING union CCU_A_REG_CAMSV_2_INT_ST    CAMSV_2_INT_ST;   /* 1154*/
++	PACKING union CCU_A_REG_CAMSV_3_ICNT      CAMSV_3_ICNT;     /* 1158*/
++	PACKING union CCU_A_REG_CAMSV_3_INT_ST    CAMSV_3_INT_ST;   /* 115C*/
++	PACKING union CCU_A_REG_CCU_SOF_CNT       CCU_SOF_CNT;      /* 1160*/
++	UINT32                          rsv_1164[14246];  /* 1164..EFF8*/
++	UINT8                           rsv_EFFC;         /* EFFC*/
++	UINT16                          rsv_EFFD;         /* EFFD*/
++	UINT8                           rsv_F0FF;         /* F0FF*/
++	UINT32                          rsv_F100[959];    /* F100..FFF8*/
++	UINT8                           rsv_FFFC;         /* FFFC*/
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __CCU_A_REGS_H__*/
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/Makefile
+@@ -0,0 +1,36 @@
++#
++# Copyright (C) 2016 MediaTek Inc.
++#
++# This program is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License version 2 as
++# published by the Free Software Foundation.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++# GNU General Public License for more details.
++#
++
++#ion
++ccflags-y += -I$(srctree)/drivers/staging/android/ion \
++             -I$(srctree)/drivers/staging/android/ion/mtk \
++             -I$(srctree)/drivers/iommu/
++#for sensorType in ccu_set_sensor_info
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/imgsensor/inc
++#
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/m4u/$(MTK_PLATFORM)/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/mach/$(MTK_PLATFORM)/include/mach
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/irq/$(MTK_PLATFORM)/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat/$(MTK_PLATFORM)/include
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/mmp/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/ccu/src/2.0
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/ccu/inc/
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/ccu/src/$(MTK_PLATFORM)/ccu_ext_interface/
++ccflags-y += -I$(srctree)/drivers/i2c/busses/
++
++
++#obj-$(CONFIG_MTK_VPU) += ccu_hw.o
++obj-y += ccu_hw.o ccu_reg.o ccu_kd_mailbox.o ccu_i2c_hw.o ccu_sw_ver.o ccu_imgsensor.o ccu_mva.o ccu_qos.o
++
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_ext_interface/ccu_ext_interface.h
+@@ -0,0 +1,179 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef __CCU_INTERFACE__
++#define __CCU_INTERFACE__
++
++#include "ccu_types.h"
++
++extern MBOOL sec_vsync_pushed;
++
++/******************************************************************************
++ * Task definition
++ *****************************************************************************/
++enum ccu_msg_id {
++	/*Receive by CCU*/
++	/*CCU Task*/
++	MSG_TO_CCU_IDLE = 0x00000000,
++	MSG_TO_CCU_SENSOR_INIT,
++	MSG_TO_CCU_AE_INIT,
++	MSG_TO_CCU_AE_START,
++	MSG_TO_CCU_AE_STOP,
++	MSG_TO_CCU_SET_AP_AE_FRAME_SYNC_DATA,
++	MSG_TO_CCU_SET_AP_AE_ONCHANGE_DATA,
++	MSG_TO_CCU_GET_CCU_OUTPUT,
++	MSG_TO_CCU_SET_MAX_FRAMERATE,
++	MSG_TO_CCU_GET_AE_DEBUG_INFO,
++	MSG_TO_CCU_SET_3A_SYNC_STATE,
++	MSG_TO_CCU_SYNC_AE_SETTING,
++	MSG_TO_CCU_START_FRAME_SYNC,
++	MSG_TO_CCU_STOP_FRAME_SYNC,
++	MSG_TO_CCU_QUERY_FRAME_SYNC_DONE,
++	MSG_TO_CCU_SUSPEND,
++	MSG_TO_CCU_RESUME,
++	MSG_TO_CCU_SHUTDOWN,
++    // for new framesync
++	MSG_TO_CCU_FRAME_SYNC_SET_SENSOR_INFO,
++	MSG_TO_CCU_FRAME_SYNC_SET_AE_INFO,
++	MSG_TO_CCU_FS_START_FRAME_SYNC,
++	MSG_TO_CCU_FS_STOP_FRAME_SYNC,
++	MSG_TO_CCU_FS_QUERY_FRAME_SYNC_DONE,
++	MSG_TO_CCU_FRAME_SYNC_PERFRAME_CTRL,
++	MSG_TO_CCU_UPDATE_TG_SENSOR_MAP,
++	MSG_TO_CCU_INVALIDATE_TG_SENSOR_MAP,
++
++#ifdef CCU_AF_ENABLE
++	MSG_TO_CCU_AF_INIT,
++	MSG_TO_CCU_AF_START,
++	MSG_TO_CCU_AF_ALGO_DONE,
++	MSG_TO_CCU_AF_ACQUIRE_AFO_BUFFER,
++	MSG_TO_CCU_AF_SET_HW_REG,
++	MSG_TO_CCU_AF_STOP,
++	MSG_TO_CCU_AF_ABORT,
++#endif /*CCU_AF_ENABLE*/
++	/*To identify ccu control msg count*/
++	DELIMITER_CCU_CONTROL_CNT_1,
++	/*CCU internal task*/
++#ifdef CCU_AF_ENABLE
++	MSG_TO_CCU_AF_CQ0,
++	MSG_TO_CCU_AF_AFO,
++	MSG_TO_CCU_AF_CQ0B,
++	MSG_TO_CCU_AF_AFOB,
++#endif /*CCU_AF_ENABLE*/
++	MSG_CCU_INTERNAL_BANK_AE_ALGO,
++	MSG_CCU_INTERNAL_FRAME_AE_ALGO,
++	MSG_CCU_INTERNAL_VSYNC_AE_SYNC,
++	MSG_CCU_INTERNAL_FRAME_SYNC,
++	MSG_CCU_INTERNAL_PR_LOG,
++	/*To identify ccu control msg count*/
++	DELIMITER_CCU_CONTROL_CNT_2,
++
++	/*Send to APMCU*/
++	/*CCU Ack/Done*/
++	/**< Ack cmd for #MSG_TO_CCU_SENSOR_INIT */
++	MSG_CCU_DONE_SENSOR_INIT,
++	/**< Ack cmd for #MSG_TO_CCU_AE_INIT */
++	MSG_CCU_DONE_AE_INIT,
++	/**< Ack cmd for #MSG_TO_CCU_AE_START */
++	MSG_CCU_ACK_AE_START,
++	/**< Ack cmd for #MSG_TO_CCU_AE_STOP */
++	MSG_CCU_ACK_AE_STOP,
++	/**< Ack cmd for #MSG_TO_CCU_SET_AP_AE_FRAME_SYNC_DATA */
++	MSG_CCU_ACK_SET_AP_AE_FRAME_SYNC_DATA,
++	/**< Ack cmd for #MSG_TO_CCU_SET_AP_AE_ONCHANGE_DATA */
++	MSG_CCU_ACK_SET_AP_AE_ONCHANGE_DATA,
++	/**< Ack cmd for #MSG_TO_CCU_GET_CCU_OUTPUT */
++	MSG_CCU_ACK_GET_CCU_OUTPUT,
++	/**< Ack cmd for #MSG_TO_CCU_SET_MAX_FRAMERATE */
++	MSG_CCU_ACK_SET_MAX_FRAMERATE,
++	/**< Ack cmd for #MSG_TO_CCU_GET_AE_DEBUG_INFO */
++	MSG_CCU_ACK_GET_AE_DEBUG_INFO,
++	/**< Ack cmd for #MSG_TO_CCU_SET_3A_SYNC_STATE */
++	MSG_CCU_ACK_SET_3A_SYNC_STATE,
++	/**< Ack cmd for #MSG_TO_CCU_SYNC_AE_SETTING */
++	MSG_CCU_ACK_SYNC_AE_SETTING,
++	MSG_CCU_ACK_START_FRAME_SYNC,
++	MSG_CCU_ACK_STOP_FRAME_SYNC,
++	MSG_CCU_ACK_QUERY_FRAME_SYNC_DONE,
++	/**< Ack cmd for #MSG_TO_CCU_SUSPEND */
++	MSG_CCU_ACK_SUSPEND,
++	/**< Ack cmd for #MSG_TO_CCU_RESUME */
++	MSG_CCU_ACK_RESUME,
++	/**< Ack cmd for #MSG_TO_CCU_SHUTDOWN */
++	MSG_CCU_DONE_SHUTDOWN,
++
++#ifdef CCU_AF_ENABLE
++	MSG_CCU_ACK_AF_INIT,
++	MSG_CCU_ACK_AF_START,
++	MSG_CCU_ACK_AF_ALGO_DONE,
++	MSG_CCU_ACK_AF_ACQUIRE_AFO_BUFFER,
++	MSG_CCU_ACK_AF_SET_HW_REG,
++	MSG_CCU_ACK_AF_STOP,
++	MSG_CCU_ACK_AF_ABORT,
++#endif /*CCU_AF_ENABLE*/
++	/*APMCU Task*/
++	MSG_TO_APMCU_FLUSH_LOG,
++	MSG_TO_APMCU_CCU_ASSERT,
++	MSG_TO_APMCU_CCU_WARNING
++#ifdef CCU_AF_ENABLE
++	, MSG_TO_APMCU_CAM_A_AFO_i,
++	MSG_TO_APMCU_CAM_B_AFO_i
++#endif /*CCU_AF_ENABLE*/
++};
++
++enum ccu_tg_info {
++	CCU_CAM_TG_NONE = 0x0,
++	CCU_CAM_TG_1    = 0x1,
++	CCU_CAM_TG_2    = 0x2,
++	CCU_CAM_TG_MAX
++};
++
++struct ccu_msg { /*16bytes*/
++		enum ccu_msg_id msg_id;
++		 MUINT32 in_data_ptr;
++		 MUINT32 out_data_ptr;
++		enum ccu_tg_info tg_info;
++};
++
++/******************************************************************************
++ * Special isr task (execute in isr)
++ *****************************************************************************/
++#define ISR_SP_TASK_SHUTDOWN 0x000000FF
++#define ISR_SP_TASK_TRG_I2C_DONE 0x000000C1
++#define ISR_SP_TASK_RST_I2C_DONE 0x000000B9
++
++/******************************************************************************
++ * Special ap isr task (execute in apmcu_isr)
++ *****************************************************************************/
++#define APISR_SP_TASK_TRIGGER_I2C 0x000000A1
++#define APISR_SP_TASK_RESET_I2C   0x000000A2
++
++/******************************************************************************
++ * Error code definition
++ *****************************************************************************/
++#define CCU_ERROR_NO               (0)
++#define CCU_ERROR_QUEUE_FULL       (1)
++
++/******************************************************************************
++ * Status definition
++ *****************************************************************************/
++#define CCU_STATUS_INIT_DONE              0xffff0000
++#define CCU_STATUS_INIT_DONE_2            0xffff00a5
++
++/******************************************************************************
++ * Direct-link source definition
++ *****************************************************************************/
++#define AE_STREAM_DL_SRC_AAO  0x00000000
++#define AE_STREAM_DL_SRC_PSO  0x00000001
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_ext_interface/ccu_mailbox_extif.h
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++/*
++ * Module: CCU mailbox external interface
++ *
++ * Description:
++ *	External interface for both CCU/APMCU side reference,
++ *  Develop an unified data structure
++ *  and circular queue full/empty definition
++ */
++#ifndef __CCU_MAILBOX_EXTIF__
++#define __CCU_MAILBOX_EXTIF__
++
++#include "ccu_ext_interface.h"
++
++/*must be power of 2 for modulo operation take work*/
++#define CCU_MAILBOX_QUEUE_SIZE 8
++
++/*
++ * Mailbox is a circular queue
++ * Composed of 2 pointer front/rear, and a buffer of struct ccu_msg
++ *
++ *!!! Implement mailbox operation with following rules !!!
++ *    - Initial queue with front=rear=0
++ *    - Dequeue with read queue[front+1] and
++ *    - increase front pointer by 1 (modulus add)
++ *    - Enqueue with write into queue[rear+1] and
++ *	  - increase rear pointer by 1 (modulus add)
++ *    - Queue is full when front=rear+1
++ *	  - (modulus add: rear+1 = rear+1 % CCU_MAILBOX_QUEUE_SIZE)
++ *    - Queue is empty when front=rear
++ */
++struct ccu_mailbox_t {
++		MUINT32 front;
++		MUINT32 rear;
++		struct ccu_msg queue[CCU_MAILBOX_QUEUE_SIZE];
++};
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_ext_interface/ccu_types.h
+@@ -0,0 +1,74 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef CCU_TYPES_H
++#define CCU_TYPES_H
++
++/*****************************************************************************/
++/* typedef unsigned char   BOOLEAN;    // uint8_t*/
++#define MUINT8 unsigned char
++#define MUINT16 unsigned short
++#define MUINT32 unsigned int
++/*typedef unsigned long  MUINT64;*/
++/**/
++#define MINT8 signed char
++#define MINT16 signed short
++#define MINT32 signed int
++/*typedef signed long    MINT64;*/
++/**/
++#define MFLOAT float
++#define MDOUBLE double
++/**/
++#define MVOID void
++#define MBOOL int
++
++#ifndef MTRUE
++#define MTRUE 1
++#endif
++
++#ifndef MFALSE
++#define MFALSE 0
++#endif
++
++#ifndef MNULL
++#define MNULL 0
++#endif
++
++/******************************************************************************
++ *Sensor Types
++ *****************************************************************************/
++/* #define CCU_CODE_SLIM*/
++/* typedef unsigned char   BOOLEAN;    // uint8_t*/
++#define U8 unsigned char	/* uint8_t*/
++#define U16 unsigned short	/* uint16_t*/
++#define U32 unsigned int	/* uint32_t*/
++/*typedef unsigned long long  U64;    // uint64_t*/
++#define I8 char		/* int8_t*/
++#define I16 short		/* int16_t*/
++#define I32 int		/* int32_t*/
++/*typedef long long           I64;    // int64_t*/
++
++#ifndef NULL
++#define NULL                0
++#endif				/* NULL*/
++
++/******************************************************************************
++ * Error code
++ *****************************************************************************/
++#define ERR_NONE                    (0)
++#define ERR_INVALID                 (-1)
++#define ERR_TIMEOUT                 (-2)
++
++
++#endif				/* CCU_TYPES_H*/
++
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_hw.c
+@@ -0,0 +1,972 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/syscalls.h>
++#include <linux/fcntl.h>
++#include <linux/uaccess.h>
++
++#include <linux/slab.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/kthread.h>
++#include <linux/dma-mapping.h>
++#include <linux/spinlock.h>
++#include <linux/iommu.h>
++
++#include "mtk_ion.h"
++#include "ion_drv.h"
++#include <linux/iommu.h>
++
++#ifdef CONFIG_MTK_IOMMU
++#include "mtk_iommu.h"
++#include <dt-bindings/memory/mt6763-larb-port.h>
++#else
++#include "m4u.h"
++#endif
++
++#include <linux/io.h> /*for mb();*/
++
++#include "ccu_hw.h"
++#include "ccu_reg.h"
++#include "ccu_cmn.h"
++#include "ccu_kd_mailbox.h"
++#include "ccu_i2c.h"
++#include "ccu_mva.h"
++
++#include "kd_camera_feature.h"/*for sensorType in ccu_set_sensor_info*/
++
++static uint64_t camsys_base;
++static uint64_t bin_base;
++static uint64_t dmem_base;
++
++static struct ccu_device_s *ccu_dev;
++static struct task_struct *enque_task;
++
++static struct mutex cmd_mutex;
++static wait_queue_head_t cmd_wait;
++static bool cmd_done;
++
++struct ccu_mailbox_t *pMailBox[MAX_MAILBOX_NUM];
++static struct ccu_msg receivedCcuCmd;
++static struct ccu_msg CcuAckCmd;
++
++/*isr work management*/
++struct ap_task_manage_t {
++	struct workqueue_struct *ApTaskWorkQueue;
++	struct mutex ApTaskMutex;
++	struct list_head ApTskWorkList;
++};
++
++struct ap_task_manage_t ap_task_manage;
++
++
++static struct CCU_INFO_STRUCT ccuInfo;
++static bool bWaitCond;
++static bool AFbWaitCond[2];
++static unsigned int g_LogBufIdx = 1;
++static unsigned int AFg_LogBufIdx[2] = {1, 1};
++
++static int _ccu_powerdown(void);
++static int ccu_irq_enable(void);
++static int ccu_irq_disable(void);
++
++static inline unsigned int CCU_MsToJiffies(unsigned int Ms)
++{
++	return ((Ms * HZ + 512) >> 10);
++}
++
++
++static inline void lock_command(void)
++{
++	mutex_lock(&cmd_mutex);
++	cmd_done = false;
++}
++
++static inline int wait_command(void)
++{
++	return wait_event_interruptible_timeout(cmd_wait, cmd_done,
++				msecs_to_jiffies(15));
++}
++
++static inline void unlock_command(void)
++{
++	mutex_unlock(&cmd_mutex);
++}
++
++
++static void isr_sp_task(void)
++{
++	MUINT32 sp_task = ccu_read_reg(ccu_base, CCU_STA_REG_SP_ISR_TASK);
++
++	switch (sp_task) {
++
++	default:
++	{
++		LOG_DBG("no %s: %x\n", __func__, sp_task);
++		break;
++	}
++	}
++}
++
++#define CCU_ISR_WORK_BUFFER_SZIE 16
++
++
++irqreturn_t ccu_isr_handler(int irq, void *dev_id)
++{
++	enum mb_result mailboxRet;
++
++	LOG_DBG("+++:%s\n", __func__);
++
++	/*write clear mode*/
++	LOG_DBG("write clear mode\n");
++	if (!ccuInfo.IsCcuPoweredOn) {
++		LOG_DBG_MUST("CCU off no need to service isr (%d)",
++			ccuInfo.IsCcuPoweredOn);
++		return IRQ_HANDLED;
++	}
++
++	ccu_write_reg(ccu_base, EINTC_CLR, 0xFF);
++	LOG_DBG("read clear mode\n");
++	ccu_read_reg(ccu_base, EINTC_ST);
++	/**/
++
++	isr_sp_task();
++
++while (1) {
++	mailboxRet = mailbox_receive_cmd(&receivedCcuCmd);
++
++	if (mailboxRet == MAILBOX_QUEUE_EMPTY) {
++		LOG_DBG_MUST("MAIL_BOX IS EMPTY");
++		goto ISR_EXIT;
++	}
++
++	LOG_DBG("receivedCcuCmd.msg_id : 0x%x\n", receivedCcuCmd.msg_id);
++
++	switch (receivedCcuCmd.msg_id) {
++
++	case MSG_TO_APMCU_FLUSH_LOG:
++	{
++		/*for ccu_waitirq();*/
++		LOG_DBG
++		("got %s:%d, wakeup %s\n",
++		 "MSG_TO_APMCU_FLUSH_LOG",
++		 receivedCcuCmd.in_data_ptr,
++		 "ccuInfo.WaitQueueHead");
++		bWaitCond = true;
++		g_LogBufIdx = receivedCcuCmd.in_data_ptr;
++
++		wake_up_interruptible(&ccuInfo.WaitQueueHead);
++		LOG_DBG("wakeup ccuInfo.WaitQueueHead done\n");
++		break;
++	}
++	case MSG_TO_APMCU_CCU_ASSERT:
++	{
++		LOG_ERR
++		("got %s:%d, wakeup %s\n",
++		 "MSG_TO_APMCU_CCU_ASSERT",
++		 receivedCcuCmd.in_data_ptr,
++		 "ccuInfo.WaitQueueHead");
++		LOG_ERR
++			("======== AP_ISR_CCU_ASSERT ========\n");
++		bWaitCond = true;
++		g_LogBufIdx = 0xFFFFFFFF;	/* -1*/
++
++		wake_up_interruptible(&ccuInfo.WaitQueueHead);
++		LOG_ERR("wakeup ccuInfo.WaitQueueHead done\n");
++		break;
++	}
++	case MSG_TO_APMCU_CCU_WARNING:
++	{
++		LOG_ERR
++		("got %s:%d, wakeup %s\n",
++		 "MSG_TO_APMCU_CCU_WARNING",
++		 receivedCcuCmd.in_data_ptr,
++		 "ccuInfo.WaitQueueHead");
++		LOG_ERR
++			("======== AP_ISR_CCU_WARNING ========\n");
++		bWaitCond = true;
++		g_LogBufIdx = -2;
++
++		wake_up_interruptible(&ccuInfo.WaitQueueHead);
++		LOG_ERR("wakeup ccuInfo.WaitQueueHead done\n");
++		break;
++	}
++#ifdef CCU_AF_ENABLE
++	case MSG_TO_APMCU_CAM_A_AFO_i:
++	{
++		LOG_DBG
++		       ("AFWaitQueueHead:%d\n",
++			receivedCcuCmd.in_data_ptr);
++		if (receivedCcuCmd.tg_info == 1) {
++			LOG_DBG
++		       ("======== AFO_A_done_from_CCU ========\n");
++		    AFbWaitCond[0] = true;
++			AFg_LogBufIdx[0] = 3;
++
++			wake_up_interruptible(&ccuInfo.AFWaitQueueHead[0]);
++			LOG_DBG("wakeup ccuInfo.AFWaitQueueHead done\n");
++		} else if (receivedCcuCmd.tg_info == 2) {
++			LOG_DBG
++		       ("======== AFO_B_done_from_CCU ========\n");
++			AFbWaitCond[1] = true;
++			AFg_LogBufIdx[1] = 4;
++
++			wake_up_interruptible(&ccuInfo.AFWaitQueueHead[1]);
++			LOG_DBG("wakeup ccuInfo.AFBWaitQueueHead done\n");
++		} else {
++			AFbWaitCond[0] = true;
++			AFbWaitCond[1] = true;
++			AFg_LogBufIdx[0] = 5;
++			AFg_LogBufIdx[1] = 5;
++			wake_up_interruptible(&ccuInfo.AFWaitQueueHead[0]);
++			LOG_DBG("wakeup ccuInfo.AFWaitQueueHead done\n");
++			wake_up_interruptible(&ccuInfo.AFWaitQueueHead[1]);
++			LOG_DBG("wakeup ccuInfo.AFBWaitQueueHead done\n");
++			LOG_DBG("abort and wakeup\n");
++		}
++		break;
++	}
++	case MSG_TO_APMCU_CAM_B_AFO_i:
++	{
++		LOG_DBG
++		       ("AFBWaitQueueHead:%d\n",
++			receivedCcuCmd.in_data_ptr);
++		LOG_DBG
++		       ("======== AFO_B_done_from_CCU ========\n");
++		AFbWaitCond[1] = true;
++		AFg_LogBufIdx[1] = 4;
++
++		wake_up_interruptible(&ccuInfo.AFWaitQueueHead[1]);
++		LOG_DBG("wakeup ccuInfo.AFBWaitQueueHead done\n");
++		break;
++	}
++#endif /*CCU_AF_ENABLE*/
++
++	default:
++		LOG_DBG("got msgId: %d, cmd_wait\n", receivedCcuCmd.msg_id);
++		ccu_memcpy(&CcuAckCmd, &receivedCcuCmd, sizeof(struct ccu_msg));
++		cmd_done = true;
++		wake_up_interruptible(&cmd_wait);
++		break;
++
++	}
++}
++
++ISR_EXIT:
++
++	LOG_DBG("---:%s\n", __func__);
++
++	/**/
++	return IRQ_HANDLED;
++}
++
++static bool users_queue_is_empty(void)
++{
++	struct list_head *head;
++	struct ccu_user_s *user;
++
++	ccu_lock_user_mutex();
++
++	list_for_each(head, &ccu_dev->user_list) {
++		user = vlist_node_of(head, struct ccu_user_s);
++		mutex_lock(&user->data_mutex);
++
++		if (!list_empty(&user->enque_ccu_cmd_list)) {
++			mutex_unlock(&user->data_mutex);
++			ccu_unlock_user_mutex();
++			return false;
++		}
++		mutex_unlock(&user->data_mutex);
++	}
++
++	ccu_unlock_user_mutex();
++
++	return true;
++}
++
++static int ccu_enque_cmd_loop(void *arg)
++{
++	struct list_head *head;
++	struct ccu_user_s *user;
++	struct ccu_cmd_s *cmd;
++
++	DEFINE_WAIT_FUNC(wait, woken_wake_function);
++
++	/*set_current_state(TASK_INTERRUPTIBLE);*/
++	for (; !kthread_should_stop();) {
++		LOG_DBG("+:%s\n", __func__);
++
++		/* wait commands if there is no one in user's queue */
++		LOG_DBG("wait for ccu_dev->cmd_wait\n");
++		add_wait_queue(&ccu_dev->cmd_wait, &wait);
++		while (1) {
++			if (!users_queue_is_empty()) {
++				LOG_DBG("awake & condition pass\n");
++				break;
++			}
++
++			wait_woken(&wait, TASK_INTERRUPTIBLE,
++				MAX_SCHEDULE_TIMEOUT);
++			LOG_DBG("awake for ccu_dev->cmd_wait\n");
++		}
++		remove_wait_queue(&ccu_dev->cmd_wait, &wait);
++
++		ccu_lock_user_mutex();
++
++		/* consume the user's queue */
++		list_for_each(head, &ccu_dev->user_list) {
++
++			user = vlist_node_of(head, struct ccu_user_s);
++			mutex_lock(&user->data_mutex);
++		/* flush thread will handle the remaining queue if flush */
++			if (user->flush ||
++				list_empty(&user->enque_ccu_cmd_list)) {
++				mutex_unlock(&user->data_mutex);
++				continue;
++			}
++
++			/* get first node from enque list */
++			cmd = vlist_node_of(user->enque_ccu_cmd_list.next,
++				struct ccu_cmd_s);
++
++			list_del_init(vlist_link(cmd, struct ccu_cmd_s));
++			user->running = true;
++			mutex_unlock(&user->data_mutex);
++
++			LOG_DBG("%s +:new command\n", __func__);
++			ccu_send_command(cmd);
++
++			mutex_lock(&user->data_mutex);
++			list_add_tail(vlist_link(cmd, struct ccu_cmd_s),
++				&user->deque_ccu_cmd_list);
++			user->running = false;
++
++			LOG_DBG("list_empty(%d)\n",
++				(int)list_empty(&user->deque_ccu_cmd_list));
++
++			mutex_unlock(&user->data_mutex);
++
++			wake_up_interruptible_all(&user->deque_wait);
++
++			LOG_DBG("wake_up user->deque_wait done\n");
++			LOG_DBG("%s -:new command\n", __func__);
++		}
++		ccu_unlock_user_mutex();
++
++
++		/* release cpu for another operations */
++		usleep_range(1, 10);
++	}
++
++	LOG_DBG("-:%s\n", __func__);
++	return 0;
++}
++
++static void ccu_ap_task_mgr_init(void)
++{
++	mutex_init(&ap_task_manage.ApTaskMutex);
++}
++
++int ccu_init_hw(struct ccu_device_s *device)
++{
++	int ret = 0, n;
++
++	ccuInfo.IsCcuPoweredOn = 0;
++#ifdef CONFIG_MTK_CHIP
++	init_check_sw_ver();
++#endif
++
++	/* init mutex */
++	mutex_init(&cmd_mutex);
++	/* init waitqueue */
++	init_waitqueue_head(&cmd_wait);
++	init_waitqueue_head(&ccuInfo.WaitQueueHead);
++	init_waitqueue_head(&ccuInfo.AFWaitQueueHead[0]);
++	init_waitqueue_head(&ccuInfo.AFWaitQueueHead[1]);
++	/* init atomic task counter */
++	/*ccuInfo.taskCount = ATOMIC_INIT(0);*/
++
++	/* Init spinlocks */
++	spin_lock_init(&(ccuInfo.SpinLockCcuRef));
++	spin_lock_init(&(ccuInfo.SpinLockCcu));
++	for (n = 0; n < CCU_IRQ_TYPE_AMOUNT; n++) {
++		spin_lock_init(&(ccuInfo.SpinLockIrq[n]));
++		spin_lock_init(&(ccuInfo.SpinLockIrqCnt[n]));
++	}
++	spin_lock_init(&(ccuInfo.SpinLockRTBC));
++	spin_lock_init(&(ccuInfo.SpinLockClock));
++	spin_lock_init(&(ccuInfo.SpinLockI2cPower));
++	ccuInfo.IsI2cPoweredOn = 0;
++	ccuInfo.IsI2cPowerDisabling = 0;
++	/**/
++	ccu_ap_task_mgr_init();
++
++	ccu_base = device->ccu_base;
++	camsys_base = device->camsys_base;
++	bin_base = device->bin_base;
++	dmem_base = device->dmem_base;
++
++	ccu_dev = device;
++
++	LOG_DBG("(0x%llx),(0x%llx),(0x%llx)\n",
++		ccu_base, camsys_base, bin_base);
++
++
++	if (request_irq(device->irq_num, ccu_isr_handler,
++		IRQF_TRIGGER_NONE, "ccu", NULL)) {
++		LOG_ERR("fail to request ccu irq!\n");
++		ret = -ENODEV;
++		goto out;
++	}
++
++	LOG_DBG("create ccu_enque_cmd_loop\n");
++	enque_task = kthread_create(ccu_enque_cmd_loop, NULL, "ccu-enque");
++	if (IS_ERR(enque_task)) {
++		ret = PTR_ERR(enque_task);
++		enque_task = NULL;
++		goto out;
++	}
++	wake_up_process(enque_task);
++
++out:
++	return ret;
++}
++
++int ccu_uninit_hw(struct ccu_device_s *device)
++{
++	ccu_i2c_free_dma_buf_mva_all();
++
++	if (enque_task) {
++		kthread_stop(enque_task);
++		enque_task = NULL;
++	}
++
++	flush_workqueue(ap_task_manage.ApTaskWorkQueue);
++	destroy_workqueue(ap_task_manage.ApTaskWorkQueue);
++
++	return 0;
++}
++
++int ccu_mmap_hw(struct file *filp, struct vm_area_struct *vma)
++{
++	return 0;
++}
++
++int ccu_memcpy(void *dest, void *src, int length)
++{
++	int i = 0;
++
++	char *destPtr = (char *)dest;
++	char *srcPtr = (char *)src;
++
++	for (i = 0; i < length; i++)
++		destPtr[i] = srcPtr[i];
++
++	return length;
++}
++
++int ccu_memclr(void *dest, int length)
++{
++	int i = 0;
++
++	char *destPtr = (char *)dest;
++
++	for (i = 0; i < length; i++)
++		destPtr[i] = 0;
++
++	return length;
++}
++
++
++int ccu_send_command(struct ccu_cmd_s *pCmd)
++{
++	int ret;
++	/*unsigned int mva_buffers = 0;*/
++
++	LOG_DBG("+:%s\n", __func__);
++
++	lock_command();
++	LOG_DBG("call ccu to do enque buffers\n");
++
++	/* 1. push to mailbox_send */
++	LOG_DBG("send command: id(%d), in(%x), out(%x)\n",
++		pCmd->task.msg_id, pCmd->task.in_data_ptr,
++		pCmd->task.out_data_ptr);
++	mailbox_send_cmd(&(pCmd->task));
++
++	/* 2. wait until done */
++	LOG_DBG("wait ack command...\n");
++	ret = wait_command();
++	if (ret == 0) {
++		pCmd->status = CCU_ENG_STATUS_TIMEOUT;
++		LOG_ERR("timeout to wait ack command: %d\n",
++			pCmd->task.msg_id);
++		goto out;
++	} else if (ret < 0) {
++		LOG_ERR("interrupted by system signal: %d/%d\n",
++			pCmd->task.msg_id, ret);
++
++		if (ret == -ERESTARTSYS)
++			LOG_ERR("interrupted as -ERESTARTSYS\n");
++
++		pCmd->status = ret;
++		goto out;
++	}
++
++	pCmd->status = CCU_ENG_STATUS_SUCCESS;
++
++	/* 3. fill pCmd with received command */
++	ccu_memcpy(&pCmd->task, &CcuAckCmd, sizeof(struct ccu_msg));
++
++	LOG_DBG("got ack command: id(%d), in(%x), out(%x)\n",
++		pCmd->task.msg_id, pCmd->task.in_data_ptr,
++		pCmd->task.out_data_ptr);
++
++out:
++
++	unlock_command();
++
++	LOG_DBG("-:%s\n", __func__);
++
++	return ret;
++
++}
++
++int ccu_power(struct ccu_power_s *power)
++{
++	int ret = 0;
++	int32_t timeout = 10;
++
++	LOG_DBG("+:%s,(0x%llx)(0x%llx)\n", __func__, ccu_base, camsys_base);
++	LOG_DBG("power->bON: %d\n", power->bON);
++
++	if (power->bON == 1) {
++		/*CCU power on sequence*/
++		ccu_clock_enable();
++
++		/*0. Set CCU_A_RESET. CCU_HW_RST=1*/
++		/*TSF be affected.*/
++		ccu_write_reg(ccu_base, RESET, 0xFF3FFCFF);
++		/*CCU_HW_RST.*/
++		ccu_write_reg(ccu_base, RESET, 0x00010000);
++		LOG_DBG("reset wrote\n");
++		/*ccu_write_reg_bit(ccu_base, RESET, CCU_HW_RST, 1);*/
++
++		/*1. Enable CCU CAMSYS_CG_CON bit12 CCU_CGPDN=0*/
++		ccu_irq_enable();
++		LOG_DBG("CCU CG released\n");
++
++		/*use user space buffer*/
++		ccu_write_reg(ccu_base, CCU_DATA_REG_LOG_BUF0,
++			power->workBuf.mva_log[0]);
++		ccu_write_reg(ccu_base, CCU_DATA_REG_LOG_BUF1,
++			power->workBuf.mva_log[1]);
++
++		LOG_DBG("LogBuf_mva[0](0x%x)\n", power->workBuf.mva_log[0]);
++		LOG_DBG("LogBuf_mva[1](0x%x)\n", power->workBuf.mva_log[1]);
++
++		ccuInfo.IsI2cPoweredOn = 1;
++		ccuInfo.IsCcuPoweredOn = 1;
++
++	} else if (power->bON == 0) {
++		/*CCU Power off*/
++		if (ccuInfo.IsCcuPoweredOn)
++			ret = _ccu_powerdown();
++		else
++			LOG_DBG_MUST("ccu not power on yet\n");
++
++	} else if (power->bON == 2) {
++		/*Restart CCU, no need to release CG*/
++
++		/*0. Set CCU_A_RESET. CCU_HW_RST=1*/
++		/*TSF be affected.*/
++		ccu_write_reg(ccu_base, RESET, 0xFF3FFCFF);
++		/*CCU_HW_RST.*/
++		ccu_write_reg(ccu_base, RESET, 0x00010000);
++		LOG_DBG("reset wrote\n");
++		/*ccu_write_reg_bit(ccu_base, RESET, CCU_HW_RST, 1);*/
++
++		/*use user space buffer*/
++		ccu_write_reg(ccu_base, CCU_DATA_REG_LOG_BUF0,
++			power->workBuf.mva_log[0]);
++		ccu_write_reg(ccu_base, CCU_DATA_REG_LOG_BUF1,
++			power->workBuf.mva_log[1]);
++
++		LOG_DBG("LogBuf_mva[0](0x%x)\n", power->workBuf.mva_log[0]);
++		LOG_DBG("LogBuf_mva[1](0x%x)\n", power->workBuf.mva_log[1]);
++	} else if (power->bON == 3) {
++		/*Pause CCU, but don't pullup CG*/
++
++		/*Check CCU halt status*/
++		while ((ccu_read_reg(ccu_base, CCU_STA_REG_SW_INIT_DONE) !=
++			CCU_STATUS_INIT_DONE_2) && (timeout >= 0)) {
++			mdelay(1);
++			LOG_DBG("wait ccu halt done\n");
++			LOG_DBG("ccu halt stat: %x\n",
++				ccu_read_reg_bit(ccu_base, DONE_ST, CCU_HALT));
++			timeout = timeout - 1;
++		}
++
++		if (timeout <= 0) {
++			LOG_ERR("ccu_pause timeout\n");
++			return -ETIMEDOUT;
++		}
++
++		/*Set CCU_A_RESET. CCU_HW_RST=1*/
++		ccu_write_reg_bit(ccu_base, RESET, CCU_HW_RST, 1);
++
++		ccuInfo.IsCcuPoweredOn = 0;
++
++	} else if (power->bON == 4) {
++		/*CCU boot fail, just enable CG*/
++
++		ccu_irq_disable();
++		ccu_clock_disable();
++		ccuInfo.IsCcuPoweredOn = 0;
++
++	} else {
++		LOG_ERR("invalid power option: %d\n", power->bON);
++	}
++
++	LOG_DBG("-:%s\n", __func__);
++	return ret;
++}
++
++int ccu_force_powerdown(void)
++{
++	int ret = 0;
++
++	if (ccuInfo.IsCcuPoweredOn == 1) {
++		LOG_WARN(
++		"CCU kernel drv released on CCU running, try to force shutdown\n");
++		LOG_WARN("dump cam_mtcmos_check\n");
++		cam_mtcmos_check();
++		/*Set special isr task to MSG_TO_CCU_SHUTDOWN*/
++		ccu_write_reg(ccu_base, CCU_INFO29, MSG_TO_CCU_SHUTDOWN);
++		/*Interrupt to CCU*/
++		/* MCU write this field to trigger ccu interrupt pulse */
++		ccu_write_reg_bit(ccu_base, CTL_CCU_INT, INT_CTL_CCU, 1);
++
++		ret = _ccu_powerdown();
++
++		if (ret < 0)
++			return ret;
++
++		mdelay(60);
++		LOG_WARN("CCU force shutdown success\n");
++	}
++
++	return 0;
++}
++
++static int _ccu_powerdown(void)
++{
++	int32_t timeout = 10;
++	unsigned long flags;
++
++	if (ccu_read_reg_bit(ccu_base, RESET, CCU_HW_RST) == 1) {
++		LOG_INF_MUST("ccu reset is up, skip halt checking.\n");
++	} else {
++		while ((ccu_read_reg_bit(ccu_base, CCU_ST, CCU_SYS_HALT) == 0)
++			&& timeout > 0) {
++			mdelay(1);
++			LOG_DBG("wait ccu shutdown done\n");
++			LOG_DBG("ccu shutdown stat: %x\n",
++				ccu_read_reg_bit(ccu_base, DONE_ST, CCU_HALT));
++			timeout = timeout - 1;
++		}
++
++		if (timeout <= 0) {
++			LOG_ERR("%s timeout\n", __func__);
++/*Even timed-out, clock disable is still necessary, DO NOT return here.*/
++		}
++	}
++
++	/*Set CCU_A_RESET. CCU_HW_RST=1*/
++	ccu_write_reg_bit(ccu_base, RESET, CCU_HW_RST, 1);
++	/*CCF*/
++	ccu_irq_disable();
++	ccu_clock_disable();
++
++	spin_lock_irqsave(&ccuInfo.SpinLockI2cPower, flags);
++	ccuInfo.IsI2cPowerDisabling = 1;
++	spin_unlock_irqrestore(&ccuInfo.SpinLockI2cPower, flags);
++
++	ccu_i2c_controller_uninit_all();
++	ccu_i2c_free_dma_buf_mva_all();
++	ccuInfo.IsI2cPoweredOn = 0;
++	ccuInfo.IsI2cPowerDisabling = 0;
++	ccuInfo.IsCcuPoweredOn = 0;
++
++	return 0;
++}
++
++int ccu_run(void)
++{
++	int32_t timeout = 10000;
++	struct ccu_mailbox_t *ccuMbPtr = NULL;
++	struct ccu_mailbox_t *apMbPtr = NULL;
++	uint32_t status;
++
++	LOG_DBG("+:%s\n", __func__);
++
++	/*smp_inner_dcache_flush_all();*/
++	/*LOG_DBG("cache flushed 2\n");*/
++	/*3. Set CCU_A_RESET. CCU_HW_RST=0*/
++	/*ccu_write_reg_bit(ccu_base, RESET, CCU_HW_RST, 0);*/
++	ccu_write_reg_bit(ccu_base, CCU_CTL, CCU_RUN_REQ, 1);
++
++	do {
++		status = ccu_read_reg(ccu_base, CCU_ST);
++		LOG_DBG_MUST("wait ccu run : %x\n", status);
++	} while (!(status&0x10));
++
++	ccu_write_reg_bit(ccu_base, CCU_CTL, CCU_RUN_REQ, 0);
++
++	LOG_DBG("released CCU reset, wait for initial done, %x\n",
++		ccu_read_reg(ccu_base, RESET));
++	LOG_DBG("CCU reset: %x\n", ccu_read_reg(ccu_base, RESET));
++
++	/*4. Pulling CCU init done spare register*/
++	while ((ccu_read_reg(ccu_base, CCU_STA_REG_SW_INIT_DONE) !=
++		CCU_STATUS_INIT_DONE) && (timeout >= 0)) {
++		udelay(100);
++		LOG_DBG_MUST("wait ccu initial done\n");
++		LOG_DBG_MUST("ccu initial stat: %x\n",
++			ccu_read_reg(ccu_base, CCU_STA_REG_SW_INIT_DONE));
++		timeout = timeout - 1;
++	}
++
++	if (timeout <= 0) {
++		LOG_ERR("CCU init timeout\n");
++		LOG_ERR("ccu initial debug info: %x\n",
++			ccu_read_reg(ccu_base, CCU_INFO28));
++		return -ETIMEDOUT;
++	}
++
++	LOG_DBG_MUST("ccu initial done\n");
++	LOG_DBG_MUST("ccu initial stat: %x\n",
++		ccu_read_reg(ccu_base, CCU_STA_REG_SW_INIT_DONE));
++	LOG_DBG_MUST("ccu initial debug info: %x\n",
++		ccu_read_reg(ccu_base, CCU_INFO29));
++	LOG_DBG_MUST("ccu initial debug info00: %x\n",
++		ccu_read_reg(ccu_base, CCU_INFO00));
++	LOG_DBG_MUST("ccu initial debug info01: %x\n",
++		ccu_read_reg(ccu_base, CCU_INFO01));
++
++/*
++ * 20160930
++ * Due to AHB2GMC HW Bug, mailbox use SRAM
++ * Driver wait CCU main initialize done and query
++ * INFO00 & INFO01 as mailbox address
++ */
++	pMailBox[MAILBOX_SEND] =
++		(struct ccu_mailbox_t *)(uintptr_t)(dmem_base +
++		ccu_read_reg(ccu_base, CCU_DATA_REG_MAILBOX_CCU));
++	pMailBox[MAILBOX_GET] =
++		(struct ccu_mailbox_t *)(uintptr_t)(dmem_base +
++		ccu_read_reg(ccu_base, CCU_DATA_REG_MAILBOX_APMCU));
++
++
++	ccuMbPtr = (struct ccu_mailbox_t *) pMailBox[MAILBOX_SEND];
++	apMbPtr = (struct ccu_mailbox_t *) pMailBox[MAILBOX_GET];
++
++	mailbox_init(apMbPtr, ccuMbPtr);
++
++	/*tell ccu that driver has initialized mailbox*/
++	ccu_write_reg(ccu_base, CCU_STA_REG_SW_INIT_DONE, 0);
++
++	timeout = 100;
++	while ((ccu_read_reg(ccu_base, CCU_STA_REG_SW_INIT_DONE) !=
++		CCU_STATUS_INIT_DONE_2) && (timeout >= 0)) {
++		udelay(100);
++		LOG_DBG_MUST("wait ccu log test\n");
++		timeout = timeout - 1;
++	}
++
++	if (timeout <= 0) {
++		LOG_ERR("CCU init timeout 2\n");
++		LOG_ERR("ccu initial debug info: %x\n",
++			ccu_read_reg(ccu_base, CCU_INFO28));
++		return -ETIMEDOUT;
++	}
++
++	LOG_DBG_MUST("ccu log test done\n");
++	LOG_DBG_MUST("ccu log test stat: %x\n",
++		ccu_read_reg(ccu_base, CCU_STA_REG_SW_INIT_DONE));
++	LOG_DBG_MUST("ccu log test debug info: %x\n",
++		ccu_read_reg(ccu_base, CCU_INFO29));
++
++	LOG_DBG_MUST("-:%s\n", __func__);
++
++	return 0;
++}
++
++
++int ccu_waitirq(struct CCU_WAIT_IRQ_STRUCT *WaitIrq)
++{
++	signed int ret = 0, Timeout = WaitIrq->EventInfo.Timeout;
++
++	LOG_DBG("Clear(%d),bWaitCond(%d),Timeout(%d)\n",
++		WaitIrq->EventInfo.Clear, bWaitCond, Timeout);
++	LOG_DBG("arg is struct CCU_WAIT_IRQ_STRUCT, size:%zu\n",
++		sizeof(struct CCU_WAIT_IRQ_STRUCT));
++
++	if (Timeout != 0) {
++		/* 2. start to wait signal */
++		LOG_DBG("+:wait_event_interruptible_timeout\n");
++		Timeout = wait_event_interruptible_timeout(
++			ccuInfo.WaitQueueHead,
++			bWaitCond,
++			CCU_MsToJiffies(WaitIrq->EventInfo.Timeout));
++		bWaitCond = false;
++		LOG_DBG("-:wait_event_interruptible_timeout\n");
++	} else {
++		LOG_DBG("+:ccu wait_event_interruptible\n");
++		/*task_count_temp = atomic_read(&(ccuInfo.taskCount))*/
++		/*if(task_count_temp == 0)*/
++		/*{*/
++
++		mutex_unlock(&ap_task_manage.ApTaskMutex);
++		LOG_DBG("unlock ApTaskMutex\n");
++		wait_event_interruptible(ccuInfo.WaitQueueHead, bWaitCond);
++		LOG_DBG("accuiring ApTaskMutex\n");
++		mutex_lock(&ap_task_manage.ApTaskMutex);
++		LOG_DBG("got ApTaskMutex\n");
++/*}*/
++/*else*/
++/*{*/
++/*LOG_DBG("ccuInfo.taskCount is not zero: %d\n", task_count_temp);*/
++/*}*/
++		bWaitCond = false;
++		LOG_DBG("-:ccu wait_event_interruptible\n");
++	}
++
++	if (Timeout > 0) {
++		LOG_DBG("remain timeout:%d, task: %d\n", Timeout, g_LogBufIdx);
++		/*send to user if not timeout*/
++		WaitIrq->EventInfo.TimeInfo.passedbySigcnt = (int)g_LogBufIdx;
++	}
++	/*EXIT:*/
++
++	return ret;
++}
++
++int ccu_AFwaitirq(struct CCU_WAIT_IRQ_STRUCT *WaitIrq, int tg_num)
++{
++	signed int ret = 0, Timeout = WaitIrq->EventInfo.Timeout;
++
++	LOG_DBG("Clear(%d),AFbWaitCond(%d),Timeout(%d)\n",
++		WaitIrq->EventInfo.Clear, AFbWaitCond[tg_num-1], Timeout);
++	LOG_DBG("arg is struct CCU_WAIT_IRQ_STRUCT, size:%zu\n",
++		sizeof(struct CCU_WAIT_IRQ_STRUCT));
++
++	if (Timeout != 0) {
++		/* 2. start to wait signal */
++		LOG_DBG("+:wait_event_interruptible_timeout\n");
++	AFbWaitCond[tg_num-1] = false;
++		Timeout = wait_event_interruptible_timeout(
++			ccuInfo.AFWaitQueueHead[tg_num-1],
++			AFbWaitCond[tg_num-1],
++			CCU_MsToJiffies(WaitIrq->EventInfo.Timeout));
++
++		LOG_DBG("-:wait_event_interruptible_timeout\n");
++	} else {
++		LOG_DBG("+:ccu wait_event_interruptible\n");
++		/*task_count_temp = atomic_read(&(ccuInfo.taskCount))*/
++		/*if(task_count_temp == 0)*/
++		/*{*/
++
++		mutex_unlock(&ap_task_manage.ApTaskMutex);
++		LOG_DBG("unlock ApTaskMutex\n");
++		wait_event_interruptible(ccuInfo.AFWaitQueueHead[tg_num-1],
++			AFbWaitCond[tg_num-1]);
++		LOG_DBG("accuiring ApTaskMutex\n");
++		mutex_lock(&ap_task_manage.ApTaskMutex);
++		LOG_DBG("got ApTaskMutex\n");
++/*}*/
++/*else*/
++/*{*/
++/*LOG_DBG("ccuInfo.taskCount is not zero: %d\n", task_count_temp);*/
++/*}*/
++		AFbWaitCond[tg_num-1] = false;
++		LOG_DBG("-:ccu wait_event_interruptible\n");
++	}
++
++	if (Timeout > 0) {
++		LOG_DBG("remain timeout:%d, task: %d\n",
++			Timeout, AFg_LogBufIdx[tg_num-1]);
++		/*send to user if not timeout*/
++		WaitIrq->EventInfo.TimeInfo.passedbySigcnt =
++		(int)AFg_LogBufIdx[tg_num-1];
++	}
++	/*EXIT:*/
++
++	return ret;
++}
++
++int ccu_flushLog(int argc, int *argv)
++{
++	LOG_DBG("bWaitCond(%d)\n", bWaitCond);
++
++	bWaitCond = true;
++
++	wake_up_interruptible(&ccuInfo.WaitQueueHead);
++
++	LOG_DBG("bWaitCond(%d)\n", bWaitCond);
++	return 0;
++}
++
++int ccu_read_info_reg(int regNo)
++{
++	int *offset;
++
++	if (regNo < 0 || regNo >= 32) {
++		LOG_ERR("invalid regNo");
++		return 0;
++	}
++
++	offset = (int *)(uintptr_t)(ccu_base + 0x60 + regNo * 4);
++
++	LOG_DBG("%s: %x\n", __func__, (unsigned int)(*offset));
++
++	return *offset;
++}
++
++int ccu_query_power_status(void)
++{
++	return ccuInfo.IsCcuPoweredOn;
++}
++
++int ccu_irq_enable(void)
++{
++	int ret = 0;
++
++	LOG_DBG_MUST("%s+.\n", __func__);
++	if (request_irq(ccu_dev->irq_num, ccu_isr_handler,
++		IRQF_TRIGGER_NONE, "ccu", NULL)) {
++		LOG_ERR("fail to request ccu irq!\n");
++		ret = -ENODEV;
++	}
++
++	return 0;
++}
++
++int ccu_irq_disable(void)
++{
++	LOG_DBG_MUST("%s+.\n", __func__);
++	free_irq(ccu_dev->irq_num, NULL);
++	return 0;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_hw.h
+@@ -0,0 +1,42 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef _MT6798_CCU_HW_H_
++#define _MT6798_CCU_HW_H_
++
++#include "ccu_reg.h"
++#include "ccu_drv.h"
++extern void cam_mtcmos_check(void);
++
++/*spare register define*/
++#define CCU_STA_REG_SW_INIT_DONE        CCU_INFO30
++#define CCU_STA_REG_3A_INIT_DONE        CCU_INFO01
++#define CCU_STA_REG_SP_ISR_TASK          CCU_INFO24
++#define CCU_STA_REG_I2C_TRANSAC_LEN        CCU_INFO25
++#define CCU_STA_REG_I2C_DO_DMA_EN         CCU_INFO26
++
++
++/*
++ * KuanFu Yeh@20160715
++ * Spare Register         Data Type        Field
++ * 0        int32        APMCU mailbox addr.
++ * 1        int32        CCU mailbox addr.
++ * 2        int32        DRAM log buffer addr.1
++ * 3        int32        DRAM log buffer addr.2
++ */
++#define CCU_DATA_REG_MAILBOX_APMCU        CCU_INFO00
++#define CCU_DATA_REG_MAILBOX_CCU        CCU_INFO01
++#define CCU_DATA_REG_LOG_BUF0                CCU_INFO02
++#define CCU_DATA_REG_LOG_BUF1                CCU_INFO03
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_i2c_hw.c
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include "ccu_cmn.h"
++#include "ccu_i2c.h"
++#include "ccu_i2c_hw.h"
++#include "ccu_n3d_a.h"
++
++static unsigned long g_n3d_base;
++
++int ccu_i2c_set_n3d_base(unsigned long n3d_base)
++{
++	g_n3d_base = n3d_base;
++
++	return 0;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_i2c_hw.h
+@@ -0,0 +1,22 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CCU_I2C_HW_H__
++#define __CCU_I2C_HW_H__
++
++/*---------------------------------------------------------------------------*/
++/*        i2c interface from ccu_i2c_hw.c */
++/*---------------------------------------------------------------------------*/
++extern int ccu_i2c_set_n3d_base(unsigned long n3d_base);
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_imgsensor.c
+@@ -0,0 +1,94 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include <linux/types.h>
++#include "ccu_cmn.h"
++#include "ccu_imgsensor_if.h"
++#include "ccu_imgsensor.h"
++#include "kd_camera_feature.h"/*for IMGSENSOR_SENSOR_IDX*/
++
++/*>>>>> Information get from imgsensor driver*/
++static int32_t g_ccu_sensor_current_fps[IMGSENSOR_SENSOR_IDX_MAX_NUM] = {-1};
++#define SENSOR_NAME_MAX_LEN 50
++static struct ccu_sensor_info g_ccu_sensor_info
++	[IMGSENSOR_SENSOR_IDX_MAX_NUM];
++static char g_ccu_sensor_name
++	[IMGSENSOR_SENSOR_IDX_MAX_NUM][SENSOR_NAME_MAX_LEN];
++/*<<<<< Information get from imgsensor driver*/
++
++void ccu_set_current_fps(int32_t sensorType, int32_t current_fps)
++{
++	g_ccu_sensor_current_fps[sensorType] = current_fps;
++	LOG_DBG_MUST("ccu catch current fps : type(%d), fps(%d)\n",
++		sensorType, current_fps);
++}
++
++void ccu_get_current_fps(int32_t *current_fps_list)
++{
++	int i;
++
++	for (i = IMGSENSOR_SENSOR_IDX_MIN_NUM;
++		i < IMGSENSOR_SENSOR_IDX_MAX_NUM ; i++)
++		current_fps_list[i] = g_ccu_sensor_current_fps[i];
++}
++
++void ccu_set_sensor_info(int32_t sensorType, struct ccu_sensor_info *info)
++{
++	if (sensorType == IMGSENSOR_SENSOR_IDX_NONE) {
++		/*Non-sensor*/
++		LOG_ERR("No sensor been detected.\n");
++	} else if ((sensorType >= IMGSENSOR_SENSOR_IDX_MIN_NUM) &&
++		(sensorType < IMGSENSOR_SENSOR_IDX_MAX_NUM)) {
++		g_ccu_sensor_info[sensorType].slave_addr  = info->slave_addr;
++		g_ccu_sensor_info[sensorType].i2c_id  = info->i2c_id;
++		if (info->sensor_name_string != NULL) {
++			memcpy(g_ccu_sensor_name[sensorType],
++			info->sensor_name_string,
++			strlen(info->sensor_name_string)+1);
++			g_ccu_sensor_info[sensorType].sensor_name_string =
++			g_ccu_sensor_name[sensorType];
++		}
++		LOG_DBG_MUST("ccu catch sensor %d i2c slave address : 0x%x\n",
++		sensorType, info->slave_addr);
++		LOG_DBG_MUST("ccu catch sensor %d name : %s\n", sensorType,
++		g_ccu_sensor_info[sensorType].sensor_name_string);
++		LOG_DBG_MUST("ccu catch sensor %d i2c_id : %d\n", sensorType,
++		g_ccu_sensor_info[sensorType].i2c_id);
++	} else {
++		LOG_DBG_MUST("ccu catch sensor i2c slave address fail!\n");
++	}
++}
++
++void ccu_get_sensor_i2c_info(struct ccu_i2c_info *sensor_info)
++{
++	int32_t i;
++
++	for (i = IMGSENSOR_SENSOR_IDX_MIN_NUM;
++		i < IMGSENSOR_SENSOR_IDX_MAX_NUM; ++i) {
++		sensor_info[i].slave_addr =
++		g_ccu_sensor_info[i].slave_addr;
++		sensor_info[i].i2c_id =
++		g_ccu_sensor_info[i].i2c_id;
++	}
++}
++
++void ccu_get_sensor_name(char **sensor_name)
++{
++	int32_t i;
++
++	for (i = IMGSENSOR_SENSOR_IDX_MIN_NUM;
++		i < IMGSENSOR_SENSOR_IDX_MAX_NUM; ++i) {
++		sensor_name[i] =
++		g_ccu_sensor_info[i].sensor_name_string;
++	}
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_imgsensor.h
+@@ -0,0 +1,23 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef _CCU_IMGSENSOR_H_
++#define _CCU_IMGSENSOR_H_
++#include <ccu_i2c.h>
++void ccu_get_current_fps(int32_t *current_fps_list);
++
++void ccu_get_sensor_i2c_info(struct ccu_i2c_info *sensor_info);
++
++void ccu_get_sensor_name(char **sensor_name);
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_kd_mailbox.c
+@@ -0,0 +1,199 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#include <linux/io.h>
++
++#include "ccu_cmn.h"
++#include "ccu_reg.h"
++#include "ccu_kd_mailbox.h"
++#include "ccu_mailbox_extif.h"
++
++static struct ccu_mailbox_t *_ccu_mailbox;
++static struct ccu_mailbox_t *_apmcu_mailbox;
++
++static enum mb_result _mailbox_write_to_buffer(struct ccu_msg *task);
++
++/******************************************************************************
++ * Public functions
++ *****************************************************************************/
++enum mb_result mailbox_init(struct ccu_mailbox_t *apmcu_mb_addr,
++	struct ccu_mailbox_t *ccu_mb_addr)
++{
++	_ccu_mailbox = ccu_mb_addr;
++	_apmcu_mailbox = apmcu_mb_addr;
++
++	LOG_DBG("ccu_mailbox addr: %p\n", _ccu_mailbox);
++	LOG_DBG("apmcu_mailbox addr: %p\n", _apmcu_mailbox);
++	LOG_DBG("memclr _ccu_mailbox: %d\n",
++		ccu_memclr(_ccu_mailbox, sizeof(struct ccu_mailbox_t)));
++	LOG_DBG("memclr _apmcu_mailbox: %d\n",
++		ccu_memclr(_apmcu_mailbox, sizeof(struct ccu_mailbox_t)));
++
++	/* memory barrier to check mailbox value wrote into DRAM*/
++	/* instead of keep in CPU write buffer*/
++	mb();
++
++	return MAILBOX_OK;
++}
++
++
++enum mb_result mailbox_send_cmd(struct ccu_msg *task)
++{
++	/*Fill slot*/
++	enum mb_result result = _mailbox_write_to_buffer(task);
++
++	if (result != MAILBOX_OK)
++		return result;
++
++	LOG_DBG("sending cmd: f(%d), r(%d), cmd(%d), in(%x), out(%x)\n",
++			_ccu_mailbox->front,
++			_ccu_mailbox->rear,
++			_ccu_mailbox->queue[_ccu_mailbox->rear].msg_id,
++			_ccu_mailbox->queue[_ccu_mailbox->rear].in_data_ptr,
++			_ccu_mailbox->queue[_ccu_mailbox->rear].out_data_ptr);
++
++	/*Send interrupt*/
++	/* MCU write this field to trigger ccu interrupt pulse */
++	ccu_write_reg_bit(ccu_base, CTL_CCU_INT, INT_CTL_CCU, 1);
++
++	return MAILBOX_OK;
++}
++
++
++enum mb_result mailbox_receive_cmd(struct ccu_msg *task)
++{
++	enum mb_result result;
++	 MUINT32 rear;
++	 MUINT32 front;
++
++	MUINT32 nextReadSlot;
++
++	if (((uintptr_t)&(_apmcu_mailbox) & (uintptr_t)0x3) != 0) {
++		LOG_DBG_MUST(
++		"ccu _apmcu_mailbox address not aligned %p\n",
++		&(_apmcu_mailbox));
++		return -1;
++	}
++
++	rear = _apmcu_mailbox->rear;
++	front = _apmcu_mailbox->front;
++
++	/*Check if queue is empty*/
++	/*empty when front=rear*/
++	if (rear != front) {
++		/*modulus add: rear+1 = rear+1 % CCU_MAILBOX_QUEUE_SIZE*/
++		nextReadSlot =
++		(_apmcu_mailbox->front + 1) & (CCU_MAILBOX_QUEUE_SIZE - 1);
++	if (((uintptr_t)&(_apmcu_mailbox->queue[nextReadSlot])
++		& (uintptr_t)0x3) != 0) {
++		LOG_DBG_MUST(
++		"ccu _apmcu_mailbox->queue[nextReadSlot] address not aligned %p\n",
++		&(_apmcu_mailbox->queue[nextReadSlot]));
++	} else {
++		ccu_memcpy(task, &(_apmcu_mailbox->queue[nextReadSlot]),
++		sizeof(struct ccu_msg));
++	}
++		_apmcu_mailbox->front = nextReadSlot;
++
++		_apmcu_mailbox->front = nextReadSlot;
++
++		LOG_DBG(
++		"received cmd: f(%d), r(%d), cmd(%d), in(%x), out(%x)\n",
++		_apmcu_mailbox->front,
++		_apmcu_mailbox->rear,
++		_apmcu_mailbox->queue[nextReadSlot].msg_id,
++		_apmcu_mailbox->queue[nextReadSlot].in_data_ptr,
++		_apmcu_mailbox->queue[nextReadSlot].out_data_ptr);
++
++		result = MAILBOX_OK;
++	} else {
++		LOG_DBG("apmcu mailbox is empty\n");
++		result = MAILBOX_QUEUE_EMPTY;
++	}
++
++	return result;
++}
++
++
++/******************************************************************************
++ * Private functions
++ ******************************************************************************/
++static int ccu_msg_copy(struct ccu_msg *dest, struct ccu_msg *src)
++{
++	/*LOG_DBG("src->msg_id: %d\n", src->msg_id);*/
++	dest->msg_id = src->msg_id;
++	/*LOG_DBG("dest->msg_id: %d\n", dest->msg_id);*/
++
++	/*LOG_DBG("src->in_data_ptr: %d\n", src->in_data_ptr);*/
++	dest->in_data_ptr = src->in_data_ptr;
++	/*LOG_DBG("dest->in_data_ptr: %d\n", dest->in_data_ptr);*/
++
++	/*LOG_DBG("src->out_data_ptr: %d\n", src->out_data_ptr);*/
++	dest->out_data_ptr = src->out_data_ptr;
++	/*LOG_DBG("dest->out_data_ptr: %d\n", dest->out_data_ptr);*/
++
++	dest->tg_info = src->tg_info;
++	/*LOG_DBG_MUST("dest->tg_info: %d\n", dest->tg_info);*/
++	return 0;
++}
++
++static enum mb_result _mailbox_write_to_buffer(struct ccu_msg *task)
++{
++	enum mb_result result;
++	MUINT32 nextWriteSlot =
++	(_ccu_mailbox->rear + 1) & (CCU_MAILBOX_QUEUE_SIZE - 1);
++
++/*Check if queue is full*/
++/*full when front=rear+1*/
++/*(modulus add: rear+1 = rear+1 % CCU_MAILBOX_QUEUE_SIZE)*/
++	if (nextWriteSlot == _ccu_mailbox->front) {
++		LOG_DBG("ccu mailbox queue full !!\n");
++		result = MAILBOX_QUEUE_FULL;
++	} else {
++		LOG_DBG("copy cmd to mailbox slot: %d\n", nextWriteSlot);
++		LOG_DBG("target mailbox slot address: %p\n",
++
++		&(_ccu_mailbox->queue[nextWriteSlot]));
++
++		LOG_DBG("incming cmd: cmd(%d), in(%x), out(%x)\n",
++				task->msg_id,
++				task->in_data_ptr,
++				task->out_data_ptr
++				);
++
++		LOG_DBG("writing target: slot(%d), cmd(%d), in(%x), out(%x)\n",
++				nextWriteSlot,
++				_ccu_mailbox->queue[nextWriteSlot].msg_id,
++				_ccu_mailbox->queue[nextWriteSlot].in_data_ptr,
++				_ccu_mailbox->queue[nextWriteSlot].out_data_ptr
++				);
++
++		ccu_msg_copy(&(_ccu_mailbox->queue[nextWriteSlot]), task);
++		_ccu_mailbox->rear = nextWriteSlot;
++
++		LOG_DBG("wrote target: slot(%d), cmd(%d), in(%x), out(%x)\n",
++			_ccu_mailbox->rear,
++			_ccu_mailbox->queue[_ccu_mailbox->rear].msg_id,
++			_ccu_mailbox->queue[_ccu_mailbox->rear].in_data_ptr,
++			_ccu_mailbox->queue[_ccu_mailbox->rear].out_data_ptr
++			);
++
++		/* memory barrier to check mailbox value wrote into DRAM*/
++		/* instead of keep in CPU write buffer*/
++		mb();
++
++		result = MAILBOX_OK;
++	}
++
++	return result;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_kd_mailbox.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef __CCU_MAILBOX_H__
++#define __CCU_MAILBOX_H__
++
++#include "ccu_ext_interface/ccu_mailbox_extif.h"
++
++enum mb_result {
++		MAILBOX_OK = 0,
++		MAILBOX_QUEUE_FULL,
++		MAILBOX_QUEUE_EMPTY
++};
++
++enum mb_result mailbox_init(struct ccu_mailbox_t *apmcu_mb_addr,
++	struct ccu_mailbox_t *ccu_mb_addr);
++
++enum mb_result mailbox_send_cmd(struct ccu_msg *task);
++
++enum mb_result mailbox_receive_cmd(struct ccu_msg *task);
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_mva.c
+@@ -0,0 +1,172 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include "ccu_cmn.h"
++#include "ccu_platform_def.h"
++#include "ccu_mva.h"
++
++static struct ion_client *_ccu_ion_client;
++static struct m4u_client_t *m4u_client;
++
++static int _ccu_config_m4u_port(void);
++
++int ccu_ion_init(void)
++{
++	MBOOL need_init = MFALSE;
++
++	ccu_lock_ion_client_mutex();
++	if (!_ccu_ion_client && g_ion_device) {
++		LOG_INF_MUST("CCU ION_client need init\n");
++		need_init = MTRUE;
++	}
++
++	if (need_init == MTRUE) {
++		_ccu_ion_client = ion_client_create(g_ion_device, "ccu");
++		LOG_INF_MUST("CCU ION_client create success: 0x%p\n",
++			_ccu_ion_client);
++	}
++
++	m4u_client = m4u_create_client();
++	if (IS_ERR_OR_NULL(m4u_client))
++		LOG_ERR("create client fail!\n");
++
++
++	ccu_unlock_ion_client_mutex();
++	return 0;
++}
++
++int ccu_ion_uninit(void)
++{
++	MBOOL need_uninit = MFALSE;
++
++	ccu_lock_ion_client_mutex();
++	if (_ccu_ion_client && g_ion_device) {
++		LOG_INF_MUST("CCU ION_client need uninit\n");
++		need_uninit = MTRUE;
++	}
++
++	if (need_uninit == MTRUE) {
++		ion_client_destroy(_ccu_ion_client);
++		LOG_INF_MUST("CCU ION_client destroy done.\n");
++		_ccu_ion_client = NULL;
++	}
++
++	if (m4u_client)
++		m4u_destroy_client(m4u_client);
++
++	ccu_unlock_ion_client_mutex();
++	return 0;
++}
++
++int ccu_deallocate_mva(uint32_t mva)
++{
++	int ret = 0;
++
++	LOG_DBG("X-:%s\n", __func__);
++	if (m4u_client == NULL) {
++		LOG_ERR("%s: m4u_client is null!\n",
++			__func__);
++		return -EINVAL;
++	}
++
++	if (mva != 0) {
++		ret = m4u_dealloc_mva(m4u_client, CCUG_OF_M4U_PORT, mva);
++		if (ret)
++			LOG_ERR("dealloc mva fail");
++	}
++
++	return ret;
++}
++
++int ccu_allocate_mva(uint32_t *mva, void *va, int buffer_size)
++{
++	int ret = 0;
++	struct sg_table *sg_table = NULL;
++	unsigned int flag;
++
++	ret = _ccu_config_m4u_port();
++	if (ret) {
++		LOG_ERR("fail to config m4u port!\n");
++		return ret;
++	}
++
++	/* alloc mva */
++	flag = M4U_FLAGS_START_FROM;
++	ret = m4u_alloc_mva(m4u_client, CCUG_OF_M4U_PORT, (unsigned long)va,
++		sg_table, buffer_size,
++		M4U_PROT_READ | M4U_PROT_WRITE, flag, mva);
++	if (ret)
++		LOG_ERR("alloc mva fail");
++
++	return ret;
++}
++
++
++
++static int _ccu_config_m4u_port(void)
++{
++	int ret = 0;
++
++#if defined(CONFIG_MTK_M4U)
++	struct M4U_PORT_STRUCT port;
++
++	port.ePortID = CCUG_OF_M4U_PORT;
++	port.Virtuality = 1;
++	port.Security = 0;
++	port.domain = 3;
++	port.Distance = 1;
++	port.Direction = 0;
++
++	ret = m4u_config_port(&port);
++#endif
++	return ret;
++}
++
++void ccu_ion_free_import_handle(struct ion_handle *handle)
++{
++	if (!_ccu_ion_client) {
++		LOG_ERR("invalid ion client!\n");
++		return;
++	}
++	if (handle == NULL) {
++		LOG_ERR("invalid ion handle!\n");
++		return;
++	}
++
++	ion_free(_ccu_ion_client, handle);
++}
++
++struct ion_handle *ccu_ion_import_handle(int fd)
++{
++	struct ion_handle *handle = NULL;
++
++	if (!_ccu_ion_client) {
++		LOG_ERR("ccu invalid ion client!\n");
++		return handle;
++	}
++	if (fd == -1) {
++		LOG_ERR("ccu invalid ion fd!\n");
++		return handle;
++	}
++
++	handle = ion_import_dma_buf_fd(_ccu_ion_client, fd);
++	LOG_INF_MUST(
++	"ccu_ion_import_fd : %d, %s : 0x%p\n",
++	fd, __func__, handle);
++	if (!(handle)) {
++		LOG_ERR("ccu mport ion handle failed!\n");
++		return NULL;
++	}
++
++	return handle;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_mva.h
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef _CCU_MVA_H_
++#define _CCU_MVA_H_
++
++#include "mtk_ion.h"
++#include "ion_drv.h"
++#include <linux/iommu.h>
++#ifdef CONFIG_MTK_IOMMU
++#include "mtk_iommu.h"
++#include <dt-bindings/memory/mt6763-larb-port.h>
++#else
++#include "m4u.h"
++#endif
++
++int ccu_ion_init(void);
++int ccu_ion_uninit(void);
++int ccu_allocate_mva(uint32_t *mva, void *va, int buffer_size);
++int ccu_deallocate_mva(uint32_t mva);
++struct ion_handle *ccu_ion_import_handle(int fd);
++void ccu_ion_free_import_handle(struct ion_handle *handle);
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_platform_def.h
+@@ -0,0 +1,44 @@
++/*
++ * Copyright (C) 2017 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++#ifndef _CCU_PLATFORM_DEF_
++#define _CCU_PLATFORM_DEF_
++
++#include "m4u.h"
++
++/*For user/kernel space sync.*/
++#define CCU_HW_OFFSET  (0x0)
++#define CCU_PMEM_BASE  (0x1A090000)
++#define CCU_PMEM_SIZE  (0x8000)
++#define CCU_DMEM_BASE  (0x1A080000)
++#define CCU_DMEM_SIZE  (0x8000)
++#define CCU_DMEM_OFFSET  (0x0)
++#define CCU_LOG_SIZE  (0x400)
++#define CCU_HW_DUMP_SIZE  (0x550)
++#define CCU_CAMSYS_BASE  (0x1A000000)
++#define CCU_CAMSYS_SIZE  (0x1000)
++#define CCU_N3D_A_BASE  (0x1A040000)
++#define CCU_N3D_A_SIZE  (0x1000)
++#define CCU_SENSOR_BIN_SIZE  (0x4000)
++
++#ifdef MTK_CCU_EMULATOR
++/*#define CCUI_OF_M4U_PORT M4U_PORT_CAM_IMGI*/
++/*#define CCUI_OF_M4U_PORT M4U_PORT_CAM_CCUI*/
++/*#define CCUO_OF_M4U_PORT M4U_PORT_CAM_CCUO*/
++/*#define CCUG_OF_M4U_PORT M4U_PORT_CAM_CCUG*/
++#else
++#define CCUI_OF_M4U_PORT M4U_PORT_CAM_CCUI
++#define CCUO_OF_M4U_PORT M4U_PORT_CAM_CCUO
++#define CCUG_OF_M4U_PORT M4U_PORT_CAM_CCUG
++#endif
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_qos.c
+@@ -0,0 +1,25 @@
++/*
++ * Copyright (C) 2018 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++#include "ccu_qos.h"
++#include "ccu_cmn.h"
++#include "ccu_hw.h"
++
++void ccu_qos_init(void)
++{
++
++}
++
++void ccu_qos_uninit(void)
++{
++
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_qos.h
+@@ -0,0 +1,21 @@
++/*
++ * Copyright (C) 2018 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++#ifndef _CCU_QOS_H_
++#define _CCU_QOS_H_
++#include "ccu_reg.h"
++
++void ccu_qos_init(void);
++void ccu_qos_uninit(void);
++
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_reg.c
+@@ -0,0 +1,20 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include "ccu_reg.h"
++
++/*js_test*/
++#include "CCU_A_c_header.h"
++struct CCU_A_REGS *g_CCU_A_BASE;
++
++uint64_t ccu_base;
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_reg.h
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef _MT6799_CCU_REG_H_
++#define _MT6799_CCU_REG_H_
++
++#include <sync_write.h>
++#include "ccu_sw_ver.h"
++#include "CCU_A_c_header.h"
++
++/*For CCU_A_c_header_v2*/
++/*
++ *#define SW_VER_SPLIT 0
++ *#if (SW_VER_SPLIT == 1)
++ *#include "CCU_A_c_header_v2.h"
++ *#define ccu_read_reg(base, regName)					\
++ *	((g_ccu_sw_version == CHIP_SW_VER_01) ?			\
++ *			((PCCU_A_REGS)base)->regName.Raw :		\
++ *			((PCCU_A_REGS_V2)base)->regName.Raw		\
++ *	)
++ *#define ccu_write_reg(base, regName, val)				\
++ *	do { if (g_ccu_sw_version == CHIP_SW_VER_01) {		\
++ *			((PCCU_A_REGS)base)->regName.Raw = val;		\
++ *		} else {\
++ *			((PCCU_A_REGS_V2)base)->regName.Raw = val;	\
++ *		} } while (0)
++ *#define ccu_read_reg_bit(base, regName, fieldNmae)		\
++ *	((g_ccu_sw_version == CHIP_SW_VER_01) ?\
++ *			((PCCU_A_REGS)base)->regName.Bits.fieldNmae :	\
++ *			((PCCU_A_REGS_V2)base)->regName.Bits.fieldNmae	\
++ *	)
++ *#define ccu_write_reg_bit(base, regName, fieldNmae, val)		\
++ *	do { if (g_ccu_sw_version == CHIP_SW_VER_01) {\
++ *			((PCCU_A_REGS)base)->regName.Bits.fieldNmae = val;\
++ *		} else { \
++ *			((PCCU_A_REGS_V2)base)->regName.Bits.fieldNmae = val; \
++ *		} } while (0)
++ *#else
++ */
++/*#define ccu_read_reg(base, regName) \*/
++/*(((struct CCU_A_REGS *)base)->regName.Raw)*/
++/*#define ccu_write_reg(base, regName, val) \*/
++/*(((struct CCU_A_REGS *)base)->regName.Raw = val)*/
++
++#define ccu_read_reg_bit(base, regName, fieldNmae) \
++(((struct CCU_A_REGS *)(uintptr_t)base)->regName.Bits.fieldNmae)
++#define ccu_write_reg_bit(base, regName, fieldNmae, val) \
++(((struct CCU_A_REGS *)(uintptr_t)base)->regName.Bits.fieldNmae = val)
++#define ccu_read_reg(base, regName) \
++readl(&(((struct CCU_A_REGS *)(uintptr_t)base)->regName))
++#define ccu_write_reg(base, regName, val) \
++writel(val, &(((struct CCU_A_REGS *)(uintptr_t)base)->regName))
++
++/*#endif*/
++
++#define CCU_SET_BIT(reg, bit) \
++((*(unsigned int *)(reg)) |= (unsigned int)(1 << (bit)))
++#define CCU_CLR_BIT(reg, bit) \
++((*(unsigned int *)(reg)) &= ~((unsigned int)(1 << (bit))))
++
++extern uint64_t ccu_base;
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_sw_ver.c
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifdef CONFIG_MTK_CHIP
++
++#include <linux/kernel.h>
++
++#include "ccu_cmn.h"
++#include "ccu_sw_ver.h"
++
++enum chip_sw_ver g_ccu_sw_version = -1;
++
++int init_check_sw_ver(void)
++{
++	g_ccu_sw_version = mt_get_chip_sw_ver();
++
++	if ((g_ccu_sw_version != CHIP_SW_VER_02) &&
++		(g_ccu_sw_version == CHIP_SW_VER_01)) {
++		LOG_ERR("have a wrong software version:%x!\n",
++			g_ccu_sw_version);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/ccu_sw_ver.h
+@@ -0,0 +1,27 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifdef CONFIG_MTK_CHIP
++
++#ifndef _CCU_SW_VER_H_
++#define _CCU_SW_VER_H_
++
++#include <mt-plat/mtk_chip.h>
++
++extern enum chip_sw_ver g_ccu_sw_version;
++
++int init_check_sw_ver(void);
++
++#endif
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/ccu/src/mt6771/common.h
+@@ -0,0 +1,21 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef __COMMON_H__
++#define __COMMON_H__
++
++#define UINT8 unsigned char
++#define UINT16 unsigned short
++#define UINT32 unsigned int
++
++#endif				/* __COMMON_H__*/
+--- a/drivers/misc/mediatek/Kconfig
++++ b/drivers/misc/mediatek/Kconfig
+@@ -165,4 +165,7 @@
+ # Camera ISP, DIP and WPE: /dev/camera-isp, /dev/camera-dip, /dev/camera-wpe
+ source "drivers/misc/mediatek/cameraisp/Kconfig"
+ 
++# Camera CCU, /dev/ccu
++source "drivers/misc/mediatek/ccu/src/Kconfig"
++
+ endif
+--- a/drivers/misc/mediatek/Makefile
++++ b/drivers/misc/mediatek/Makefile
+@@ -93,3 +93,5 @@
+ obj-$(CONFIG_MTK_ARCHCOUNTER_TIMESYNC) += timer/timesync/
+ # Camera ISP, DIP and WPE: /dev/camera-isp, /dev/camera-dip, /dev/camera-wpe
+ obj-$(CONFIG_MTK_CAMERA_ISP) += cameraisp/
++# Camera CCU: /dev/ccu
++obj-$(CONFIG_MTK_CCU) += ccu/src/

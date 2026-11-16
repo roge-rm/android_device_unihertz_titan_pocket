@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="app_name">Pocket Keyboard</string>
+    <string name="settings_summary">Keys, touchpad and display mode</string>
+
+    <!-- Keyboard screen -->
+    <string name="category_light">Keyboard light</string>
+    <string name="light">Keyboard light</string>
+    <string name="light_timeout">Turn off after</string>
+    <string name="category_touchpad">Touchpad</string>
+    <string name="swipes">Swipes</string>
+    <string name="cursor_speed">Cursor speed</string>
+    <string name="category_shortcuts">Shortcuts</string>
+    <string name="shortcut_browser">Alt+B: browser</string>
+    <string name="shortcut_camera">Alt+C: camera</string>
+    <string name="shortcut_settings">Alt+S: Settings</string>
+    <string name="category_function_keys">Function keys</string>
+    <string name="func1_press">FUNC1 press</string>
+    <string name="func1_long_press">FUNC1 long press</string>
+    <string name="func2_press">FUNC2 press</string>
+    <string name="func2_long_press">FUNC2 long press</string>
+    <string name="category_display">Display</string>
+    <string name="display_mode">Display mode</string>
+    <string name="save_failed">Couldn\'t save the setting</string>
+    <string name="pad_failed">The touchpad mode didn\'t change</string>
+
+    <string-array name="light_timeout_entries">
+        <item>0.5 seconds</item>
+        <item>1 second</item>
+        <item>2 seconds</item>
+        <item>3.5 seconds</item>
+        <item>5 seconds</item>
+        <item>10 seconds</item>
+    </string-array>
+    <string-array name="light_timeout_values">
+        <item>500</item>
+        <item>1000</item>
+        <item>2000</item>
+        <item>3500</item>
+        <item>5000</item>
+        <item>10000</item>
+    </string-array>
+    <!-- Values are KeyboardSettings.SwipeMode names. -->
+    <string-array name="swipe_entries">
+        <item>Off</item>
+        <item>Scroll</item>
+        <item>Move text cursor</item>
+    </string-array>
+    <string-array name="swipe_values">
+        <item>OFF</item>
+        <item>SCROLL</item>
+        <item>CURSOR</item>
+    </string-array>
+    <!-- Values are KeyboardSettings.cursorStep. -->
+    <string-array name="cursor_speed_entries">
+        <item>Low</item>
+        <item>Normal</item>
+        <item>High</item>
+    </string-array>
+    <string-array name="cursor_speed_values">
+        <item>0.16</item>
+        <item>0.08</item>
+        <item>0.04</item>
+    </string-array>
+    <!-- Values are the action IDs PocketKeyHooks runs; "none" saves nothing. -->
+    <string-array name="press_entries">
+        <item>Nothing</item>
+        <item>Flashlight</item>
+        <item>Camera</item>
+        <item>Browser</item>
+        <item>Notifications</item>
+        <item>Settings</item>
+    </string-array>
+    <string-array name="press_values">
+        <item>none</item>
+        <item>flashlight</item>
+        <item>camera</item>
+        <item>browser</item>
+        <item>notifications</item>
+        <item>settings</item>
+    </string-array>
+
+    <!-- Display mode screen -->
+    <string name="use_display_mode">Use display mode</string>
+    <string name="category_square">Square</string>
+    <string name="category_other">Other</string>
+    <string name="portrait_mini">Portrait mini</string>
+    <string name="custom">Custom</string>
+    <string name="custom_not_set">Not set</string>
+    <!-- Width x height, density. -->
+    <string name="mode_size"><xliff:g id="width">%1$d</xliff:g> x <xliff:g id="height">%2$d</xliff:g>, <xliff:g id="density">%3$d</xliff:g> dpi</string>
+    <string name="keep_after_reboot">Keep after reboot</string>
+    <string name="display_footer">Hold FUNC1 and FUNC2 to go back to normal. Hold the red key during the boot animation to start normal.</string>
+    <string name="row_dp"><xliff:g id="dp">%1$d</xliff:g> dp</string>
+    <string name="column_render"><xliff:g id="render">%1$d</xliff:g> px</string>
+    <string name="width">Width</string>
+    <string name="height">Height</string>
+    <string name="density">Density</string>
+    <string name="custom_bad_number">Enter whole numbers</string>
+</resources>

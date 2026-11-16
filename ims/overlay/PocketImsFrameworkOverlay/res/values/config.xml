@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <bool name="config_device_volte_available">true</bool>
+    <!-- Video calls need the system side vtservice and libimsma, which this build doesn't carry. -->
+    <bool name="config_device_vt_available">false</bool>
+    <!-- Wi-Fi calling needs MTK's wfo service; the stock APK publishes none on a Gen93 modem. -->
+    <bool name="config_device_wfc_ims_available">false</bool>
+</resources>

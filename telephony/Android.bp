@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Framework telephony settings, as stock (SIM_HOTSWAP.md).
+
+runtime_resource_overlay {
+    name: "PocketTelephonyFrameworkOverlay",
+    resource_dirs: ["overlay/PocketTelephonyFrameworkOverlay/res"],
+    manifest: "overlay/PocketTelephonyFrameworkOverlay/AndroidManifest.xml",
+    product_specific: true,
+}

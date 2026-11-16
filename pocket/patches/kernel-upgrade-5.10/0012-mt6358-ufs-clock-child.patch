@@ -1,0 +1,91 @@
+--- a/drivers/mfd/mt6397-core.c
++++ b/drivers/mfd/mt6397-core.c
+@@ -99,6 +99,18 @@
+ 	},
+ };
+ 
++/* Optional board-owned EXTBUF7 clock; never instantiate without its DT node. */
++static const struct mfd_cell mt6358_ufs_clock_dev = {
++	.name = "mt6358-ufs-clock",
++	.of_compatible = "mediatek,mt6358-ufs-clock",
++};
++
++/* Optional battery OC driver on stock's mt-pmic node, which names the fg_cur_h and fg_cur_l IRQs. */
++static const struct mfd_cell mt6358_battery_oc_dev = {
++	.name = "mt6358-battery-oc",
++	.of_compatible = "mediatek,mt-pmic",
++};
++
+ static const struct mfd_cell mt6397_devs[] = {
+ 	{
+ 		.name = "mt6397-rtc",
+@@ -156,6 +168,45 @@
+ 	.cell_size = ARRAY_SIZE(mt6397_devs),
+ 	.irq_init = mt6397_irq_init,
+ };
++
++static int mt6358_add_ufs_clock(struct platform_device *pdev)
++{
++	struct device_node *clock;
++	int ret = 0;
++
++	if (!IS_ENABLED(CONFIG_COMMON_CLK_MT6358_UFS))
++		return 0;
++	clock = of_get_compatible_child(pdev->dev.of_node,
++				       "mediatek,mt6358-ufs-clock");
++	if (clock && of_device_is_available(clock))
++		ret = devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_NONE,
++				   &mt6358_ufs_clock_dev, 1, NULL, 0, NULL);
++	of_node_put(clock);
++	return ret;
++}
++
++/*
++ * A failure here only logs: without the driver, gpufreq keeps its boot hold
++ * at the battery OC limit.
++ */
++static void mt6358_add_battery_oc(struct platform_device *pdev)
++{
++	struct device_node *np;
++	int ret;
++
++	if (!IS_ENABLED(CONFIG_MT6358_BATTERY_OC))
++		return;
++	np = of_get_compatible_child(pdev->dev.of_node, "mediatek,mt-pmic");
++	if (np && of_device_is_available(np)) {
++		ret = devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_NONE,
++					   &mt6358_battery_oc_dev, 1, NULL, 0, NULL);
++		if (ret)
++			dev_err(&pdev->dev, "battery OC child not added: %d\n", ret);
++	} else {
++		dev_info(&pdev->dev, "no mt-pmic node, battery OC not added\n");
++	}
++	of_node_put(np);
++}
+ 
+ static int mt6397_probe(struct platform_device *pdev)
+ {
+@@ -189,6 +240,9 @@
+ 	}
+ 
+ 	pmic->chip_id = (id >> pmic_core->cid_shift) & 0xff;
++	/* Log the ID read above; no extra register access. */
++	dev_info(&pdev->dev, "chip id register 0x%x = 0x%04x\n",
++		 pmic_core->cid_addr, id);
+ 
+ 	platform_set_drvdata(pdev, pmic);
+ 
+@@ -203,6 +257,13 @@
+ 	ret = devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_NONE,
+ 				   pmic_core->cells, pmic_core->cell_size,
+ 				   NULL, 0, pmic->irq_domain);
++	if (!ret && pmic_core == &mt6358_core) {
++		ret = mt6358_add_ufs_clock(pdev);
++		if (ret)
++			mfd_remove_devices(&pdev->dev);
++		else
++			mt6358_add_battery_oc(pdev);
++	}
+ 	if (ret) {
+ 		irq_domain_remove(pmic->irq_domain);
+ 		dev_err(&pdev->dev, "failed to add child devices: %d\n", ret);

@@ -1,0 +1,6 @@
+# Engineering software KeyMint (keymint/) runs in the platform hal_keymint_system domain.
+# It also registers the shared secret and secure clock services, which the vendor
+# policy normally grants to hal_keymint through hal_keymint_default.
+allow hal_keymint_system { hal_secureclock_service hal_sharedsecret_service }:service_manager { add find };
+# keystore2 finds both for shared secret negotiation and timestamps.
+allow keystore { hal_secureclock_service hal_sharedsecret_service }:service_manager find;

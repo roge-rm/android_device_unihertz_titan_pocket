@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <!-- SIM slots take a card in or out while running, so no restart prompt. -->
+    <bool name="config_hotswapCapable">true</bool>
+</resources>

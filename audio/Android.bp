@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Headset jack through the ACCDET input device (AUDIO_PORT.md).
+
+runtime_resource_overlay {
+    name: "PocketAudioJackOverlay",
+    resource_dirs: ["overlay/PocketAudioJackOverlay/res"],
+    manifest: "overlay/PocketAudioJackOverlay/AndroidManifest.xml",
+    product_specific: true,
+}

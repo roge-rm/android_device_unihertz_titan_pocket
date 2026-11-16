@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0
+// Experimental MT6771 handoff path; not a validated full board conversion.
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/pwrap@1000d000";
+		__overlay__ {
+			compatible = "mediatek,mt6771-pwrap";
+		};
+	};
+	fragment@1 {
+		target-path = "/pwrap@1000d000/mt6358-pmic";
+		__overlay__ {
+			compatible = "mediatek,mt6358";
+		};
+	};
+};

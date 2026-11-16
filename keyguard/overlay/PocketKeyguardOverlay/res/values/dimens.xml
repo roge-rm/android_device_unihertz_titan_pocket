@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <!-- The screen is only 524 dp tall, so the space around the bouncer goes to the keys. -->
+    <!-- Below the status bar, above the bouncer. -->
+    <dimen name="keyguard_security_container_padding_top">0dp</dimen>
+    <dimen name="keyguard_security_view_top_margin">0dp</dimen>
+    <!-- Minimum space under the bouncer; there is no nav bar. -->
+    <dimen name="keyguard_security_view_bottom_margin">8dp</dimen>
+    <!-- PIN and password entry field. -->
+    <dimen name="keyguard_password_height">56dp</dimen>
+    <!-- Around the emergency call button. -->
+    <dimen name="keyguard_eca_top_margin">4dp</dimen>
+    <dimen name="keyguard_eca_bottom_margin">4dp</dimen>
+    <!-- Gap between key rows and under the entry field. -->
+    <dimen name="num_pad_entry_row_margin_bottom">8dp</dimen>
+    <!-- Volume panel slider, from 254dp. The ringer drawer (150dp open) opens upward from
+         just above the slider, so (524 - 200) / 2 - 4 = 158dp keeps it on screen. -->
+    <dimen name="volume_dialog_slider_height">200dp</dimen>
+    <!-- Lock icon padding, from 48px. The icon box is 2 x 36dp at the stable density, 98px
+         here, and SystemUI multiplies this padding by the resolution scale (1, 1.5 or 2 with
+         the display modes). 48px left 2px for the icon at 720 and a negative size, drawn
+         upside down, at 1080 and 1440. 16px gives 66, 50 and 34px. -->
+    <dimen name="lock_icon_padding">16px</dimen>
+</resources>

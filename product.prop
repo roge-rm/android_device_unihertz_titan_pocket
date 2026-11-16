@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Product build.prop additions. The build picks this file up as TARGET_PRODUCT_PROP
+# while BoardConfig leaves that unset (build/make/core/config.mk).
+
+# Bluetooth (WIFI_PORT.md, milestone 10): the A16 stack only starts profiles whose
+# property is true. No LE audio: the stock HAL is HIDL 1.0. A2DP is software
+# through our system-side Bluetooth audio HAL (bluetooth-audio/, AUDIO_PORT.md).
+bluetooth.profile.a2dp.source.enabled=true
+bluetooth.profile.avrcp.target.enabled=true
+bluetooth.profile.gatt.enabled=true
+bluetooth.profile.hfp.ag.enabled=true
+bluetooth.profile.hid.host.enabled=true
+bluetooth.profile.map.server.enabled=true
+bluetooth.profile.opp.enabled=true
+bluetooth.profile.pan.nap.enabled=true
+bluetooth.profile.pan.panu.enabled=true
+bluetooth.profile.pbap.server.enabled=true
+# The controller lists READ_DEFAULT_ERRONEOUS_DATA_REPORTING but answers it with a
+# command status, which aborts the gd stack. Read by patches/android/0006.
+bluetooth.hci.skip_erroneous_data_reporting=true
+bluetooth.hci.disable_sniff_subrating=true
+# Use the system-side Bluetooth audio HAL: the Bluetooth stack opens the AIDL provider
+# IBluetoothAudioProviderFactory/sysbta and audio policy swaps the vendor "bluetooth"
+# module for /system/etc/sysbta_audio_policy_configuration.xml. Read by the Bluetooth
+# and frameworks/av overrides; the stock vendor bluetooth module reads a different
+# session from the one the A16 stack starts.
+persist.bluetooth.system_audio_hal.enabled=true
+
+# FM: settings for Lineage FMRadio's MediaTek libfmjni, from the MT6631 values in stock
+# libfmjni's CUST_update_cfg with the stock props (no fm_50khz_support, no
+# fm_short_antenna_support). Stock's jni works in 10 kHz units; Lineage's checks power-up
+# against low_band/high_band and matches fake channels in 100 kHz units, so those are
+# 100 kHz here. Band 1 is 87.5 to 108 MHz, the app's own range (stock used band 3, from
+# 76 MHz). seek_space 1 is 100 kHz steps. noise_floor_detect stays off: stock never calls it.
+ro.fm.chip=0x6631
+ro.fm.band=1
+ro.fm.low_band=875
+ro.fm.high_band=1080
+ro.fm.seek_space=1
+ro.fm.max_scan_num=40
+ro.fm.seek_lev=4
+ro.fm.scan_sort=0
+ro.fm.short_ana_sup=1
+ro.fm.rssi_th_l2=-102
+ro.fm.fake_chans=4
+ro.fm.fake_chan_0=921 -205
+ro.fm.fake_chan_1=960 -152
+ro.fm.fake_chan_2=1040 -152
+ro.fm.fake_chan_3=1075 -205

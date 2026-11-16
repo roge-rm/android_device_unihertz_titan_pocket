@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0
+// Enables, as stock, the nodes Mali, gpufreq and freq hopping use; the v9 board disables them.
+// Other properties stay as captured. mfgcfg is the clock provider for gpufreq's subsys_mfg_cg, and
+// of_clk_init skips it while it's disabled. mali_tb stays off: nothing in stock or here binds it.
+// gpufreq also gets vgpu-supply and vsram_gpu-supply, the phandles of the MT6358 buck_vgpu (0x6e) and
+// ldo_vsram_gpu (0x7f), so its regulator_get defers until they register instead of taking a dummy.
+// Stock has no supply properties; check-pocket-gpu-dt.py checks the phandles.
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/mfgcfg@13000000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@1 {
+		target-path = "/gpufreq";
+		__overlay__ {
+			status = "okay";
+			vgpu-supply = <0x6e>;
+			vsram_gpu-supply = <0x7f>;
+		};
+	};
+	fragment@2 {
+		target-path = "/mali@13040000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@3 {
+		target-path = "/fhctl@1000ce00";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};

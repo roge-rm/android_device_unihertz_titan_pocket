@@ -1,0 +1,1031 @@
+--- /dev/null
++++ b/drivers/input/keyboard/mediatek/Kconfig
+@@ -0,0 +1,54 @@
++# SPDX-License-Identifier: GPL-2.0
++# MediaTek keypad (mtk-kpd), ported from the Titan Pocket 4.14 vendor kernel.
++
++config KEYBOARD_MTK
++	tristate "MediaTek Keypad Support"
++	depends on OF && ARCH_MEDIATEK
++	help
++	  The MediaTek keypad matrix at kp@10010000, as the input device
++	  mtk-kpd. With KPD_PWRKEY_USE_PMIC it also reports the MT6358
++	  power and home keys.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called mtk-kpd.
++
++if KEYBOARD_MTK
++
++config KPD_PWRKEY_USE_PMIC
++	bool "Power key from the MT6358 PMIC"
++	depends on MFD_MT6397
++	help
++	  Report the MT6358 PWRKEY and HOMEKEY interrupts on mtk-kpd, as
++	  mediatek,kpd-sw-pwrkey and mediatek,kpd-sw-rstkey.
++
++config ONEKEY_REBOOT_NORMAL_MODE
++	bool "Long press reboot by Powerkey only on normal mode"
++	depends on KPD_PWRKEY_USE_PMIC
++
++config TWOKEY_REBOOT_NORMAL_MODE
++	bool "Long press reboot by Powerkey + other key on normal mode"
++	depends on KPD_PWRKEY_USE_PMIC
++
++config ONEKEY_REBOOT_OTHER_MODE
++	bool "Long press reboot by Powerkey only on other mode"
++	depends on KPD_PWRKEY_USE_PMIC
++
++config TWOKEY_REBOOT_OTHER_MODE
++	bool "Long press reboot by Powerkey + other key on other mode"
++	depends on KPD_PWRKEY_USE_PMIC
++
++config KPD_PMIC_LPRST_TD
++	int "Long press reboot timeout period"
++	depends on ONEKEY_REBOOT_NORMAL_MODE || TWOKEY_REBOOT_NORMAL_MODE
++	range 0 3
++	default "0"
++	help
++	  MT6358 RG_PWRKEY_RST_TD: 0 is 8 s, 1 is 11 s, 2 is 14 s, 3 is 5 s.
++
++config MTK_MRDUMP_KEY
++	bool "MediaTek mrdump reset key support"
++	help
++	  Adds KEY_RESTART to mtk-kpd and listens on the
++	  "mediatek, mrdump_ext_rst-eint" node's IRQ when it has one.
++
++endif
+--- /dev/null
++++ b/drivers/input/keyboard/mediatek/Makefile
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0
++ccflags-y += -I$(srctree)/drivers/input/keyboard/mediatek
++ccflags-y += -I$(srctree)/drivers/input/keyboard/mediatek/mt6771
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include
++
++obj-$(CONFIG_KEYBOARD_MTK) += mtk-kpd.o
++mtk-kpd-y := kpd.o mt6771/hal_kpd.o
++mtk-kpd-$(CONFIG_KPD_PWRKEY_USE_PMIC) += kpd-mt6358.o
+--- /dev/null
++++ b/drivers/input/keyboard/mediatek/kpd-mt6358.c
+@@ -0,0 +1,149 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2018 MediaTek Inc.
++ *
++ * MT6358 power and home key interrupts for mtk-kpd, from the 4.14 vendor
++ * mt6358 pmic_irq.c (key_int_handler, PMIC_EINT_SETTING), and the
++ * long-press reset fields stock writes through pmic_set_register_value.
++ *
++ * The IRQs come by name from the stock mediatek,mt-pmic node under the
++ * MT6358, which is also the interrupt controller (5.10 mt6358-irq.c). The
++ * register writes go through the MT6358 mfd's pwrap regmap.
++ */
++
++#include <linux/interrupt.h>
++#include <linux/irq.h>
++#include <linux/mfd/mt6358/core.h>
++#include <linux/mfd/mt6397/core.h>
++#include <linux/of.h>
++#include <linux/of_irq.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include "kpd.h"
++
++/* MT6358 TOP_RST_MISC, as the 4.14 mt6771 upmu_hw.h */
++#define MT6358_TOP_RST_MISC		0x014c
++#define RG_HOMEKEY_RST_EN		BIT(8)
++#define RG_PWRKEY_RST_EN		BIT(9)
++#define RG_PWRKEY_RST_TD_SHIFT		12
++#define RG_PWRKEY_RST_TD_MASK		(0x3 << RG_PWRKEY_RST_TD_SHIFT)
++
++static const char * const kpd_mt6358_irq_names[] = {
++	"pwrkey", "pwrkey_r", "homekey", "homekey_r",
++};
++
++static struct regmap *kpd_mt6358_map;
++static int kpd_mt6358_irqs[ARRAY_SIZE(kpd_mt6358_irq_names)];
++
++static irqreturn_t key_int_handler(int irq, void *data)
++{
++	struct irq_data *d = irq_get_irq_data(irq);
++
++	if (!d)
++		return IRQ_HANDLED;
++
++	switch (irqd_to_hwirq(d)) {
++	case MT6358_IRQ_PWRKEY:
++		kpd_pwrkey_pmic_handler(0x1);
++		break;
++	case MT6358_IRQ_PWRKEY_R:
++		kpd_pwrkey_pmic_handler(0x0);
++		break;
++	case MT6358_IRQ_HOMEKEY:
++		kpd_pmic_rstkey_handler(0x1);
++		break;
++	case MT6358_IRQ_HOMEKEY_R:
++		kpd_pmic_rstkey_handler(0x0);
++		break;
++	}
++	return IRQ_HANDLED;
++}
++
++/*
++ * Finds the MT6358 regmap and the four key IRQs. -EPROBE_DEFER until the
++ * MT6358 mfd has bound and registered its IRQ domain.
++ */
++int kpd_mt6358_lookup(void)
++{
++	struct device_node *np, *pmic;
++	struct platform_device *pdev;
++	struct mt6397_chip *chip;
++	int i, irq, ret = 0;
++
++	np = of_find_compatible_node(NULL, NULL, "mediatek,mt-pmic");
++	if (!np || !of_device_is_available(np)) {
++		of_node_put(np);
++		return -ENODEV;
++	}
++	for (i = 0; i < ARRAY_SIZE(kpd_mt6358_irq_names); i++) {
++		irq = of_irq_get_byname(np, kpd_mt6358_irq_names[i]);
++		if (irq <= 0) {
++			ret = irq ? irq : -ENXIO;
++			goto out;
++		}
++		kpd_mt6358_irqs[i] = irq;
++	}
++
++	pmic = of_get_parent(np);
++	pdev = pmic ? of_find_device_by_node(pmic) : NULL;
++	of_node_put(pmic);
++	if (!pdev) {
++		ret = -EPROBE_DEFER;
++		goto out;
++	}
++	chip = platform_get_drvdata(pdev);
++	if (!chip || !chip->regmap || !chip->irq_domain)
++		ret = -EPROBE_DEFER;
++	else
++		kpd_mt6358_map = chip->regmap;
++	put_device(&pdev->dev);
++out:
++	of_node_put(np);
++	return ret;
++}
++
++/* Requests the key IRQs as stock's PMIC_EINT_SETTING does. */
++int kpd_mt6358_init(struct device *dev)
++{
++	int i, ret;
++
++	if (!kpd_mt6358_map)
++		return -ENODEV;
++	for (i = 0; i < ARRAY_SIZE(kpd_mt6358_irq_names); i++) {
++		ret = devm_request_threaded_irq(dev, kpd_mt6358_irqs[i], NULL,
++				key_int_handler, IRQF_TRIGGER_NONE,
++				kpd_mt6358_irq_names[i], NULL);
++		if (ret < 0) {
++			kpd_notice("request %s irq fail (%d)\n",
++				   kpd_mt6358_irq_names[i], ret);
++			return ret;
++		}
++	}
++	return 0;
++}
++
++/*
++ * RG_PWRKEY_RST_EN, RG_HOMEKEY_RST_EN and, when td >= 0, RG_PWRKEY_RST_TD,
++ * each as one read-modify-write like pmic_set_register_value.
++ */
++int kpd_mt6358_set_lprst(unsigned int pwrkey_en, unsigned int homekey_en,
++			 int td)
++{
++	int ret;
++
++	if (!kpd_mt6358_map)
++		return -ENODEV;
++	ret = regmap_update_bits(kpd_mt6358_map, MT6358_TOP_RST_MISC,
++				 RG_PWRKEY_RST_EN,
++				 pwrkey_en ? RG_PWRKEY_RST_EN : 0);
++	if (!ret)
++		ret = regmap_update_bits(kpd_mt6358_map, MT6358_TOP_RST_MISC,
++					 RG_HOMEKEY_RST_EN,
++					 homekey_en ? RG_HOMEKEY_RST_EN : 0);
++	if (!ret && td >= 0)
++		ret = regmap_update_bits(kpd_mt6358_map, MT6358_TOP_RST_MISC,
++					 RG_PWRKEY_RST_TD_MASK,
++					 td << RG_PWRKEY_RST_TD_SHIFT);
++	return ret;
++}
+--- /dev/null
++++ b/drivers/input/keyboard/mediatek/kpd.c
+@@ -0,0 +1,456 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2010 MediaTek, Inc.
++ *
++ * Author: Terry Chang <terry.chang@mediatek.com>
++ *
++ * MediaTek keypad (mtk-kpd), ported from the Titan Pocket 4.14 vendor kernel.
++ * Input name, IDs and key bits are stock's, so the stock mtk-kpd.kl and
++ * mtk-kpd.idc apply. The volume keys come from the keypad matrix, the power
++ * and home keys from MT6358 interrupts (kpd-mt6358.c).
++ */
++
++#include "kpd.h"
++#ifdef CONFIG_PM_SLEEP
++#include <linux/pm_wakeup.h>
++#endif
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_irq.h>
++#include <linux/clk.h>
++#include <linux/debugfs.h>
++#include <linux/pinctrl/consumer.h>
++
++#define KPD_NAME	"mtk-kpd"
++
++int kpd_klog_en;
++void __iomem *kp_base;
++static unsigned int kp_irqnr;
++struct input_dev *kpd_input_dev;
++static struct dentry *kpd_droot;
++unsigned long call_status;
++static bool kpd_suspend;
++static u32 kpd_keymap[KPD_NUM_KEYS];
++static u16 kpd_keymap_state[KPD_NUM_MEMS];
++
++#ifdef CONFIG_PM_SLEEP
++static struct wakeup_source *kpd_suspend_lock;
++#endif
++struct keypad_dts_data kpd_dts_data;
++
++/* for keymap handling */
++static void kpd_keymap_handler(unsigned long data);
++static DECLARE_TASKLET_OLD(kpd_keymap_tasklet, kpd_keymap_handler);
++
++static struct platform_driver kpd_pdrv;
++
++static void kpd_memory_setting(void)
++{
++	kpd_init_keymap(kpd_keymap);
++	kpd_init_keymap_state(kpd_keymap_state);
++}
++
++static ssize_t kpd_call_state_store(struct device_driver *ddri,
++		const char *buf, size_t count)
++{
++	int ret;
++
++	ret = kstrtoul(buf, 10, &call_status);
++	if (ret) {
++		kpd_print("kpd call state: Invalid values\n");
++		return -EINVAL;
++	}
++
++	switch (call_status) {
++	case 1:
++		kpd_print("kpd call state: Idle state!\n");
++		break;
++	case 2:
++		kpd_print("kpd call state: ringing state!\n");
++		break;
++	case 3:
++		kpd_print("kpd call state: active or hold state!\n");
++		break;
++
++	default:
++		kpd_print("kpd call state: Invalid values\n");
++		break;
++	}
++	return count;
++}
++
++static ssize_t kpd_call_state_show(struct device_driver *ddri, char *buf)
++{
++	return scnprintf(buf, PAGE_SIZE, "%ld\n", call_status);
++}
++
++static DRIVER_ATTR_RW(kpd_call_state);
++static struct driver_attribute *kpd_attr_list[] = {
++	&driver_attr_kpd_call_state,
++};
++
++static int kpd_create_attr(struct device_driver *driver)
++{
++	int idx, err = 0;
++	int num = ARRAY_SIZE(kpd_attr_list);
++
++	if (driver == NULL)
++		return -EINVAL;
++
++	for (idx = 0; idx < num; idx++) {
++		err = driver_create_file(driver, kpd_attr_list[idx]);
++		if (err) {
++			kpd_info("driver_create_file (%s) = %d\n",
++				kpd_attr_list[idx]->attr.name, err);
++			break;
++		}
++	}
++	return err;
++}
++
++static int kpd_delete_attr(struct device_driver *driver)
++{
++	int idx;
++	int num = ARRAY_SIZE(kpd_attr_list);
++
++	if (!driver)
++		return -EINVAL;
++
++	for (idx = 0; idx < num; idx++)
++		driver_remove_file(driver, kpd_attr_list[idx]);
++
++	return 0;
++}
++
++#ifdef CONFIG_KPD_PWRKEY_USE_PMIC
++void kpd_pwrkey_pmic_handler(unsigned long pressed)
++{
++	kpd_print("Power Key generate, pressed=%ld\n", pressed);
++	if (!kpd_input_dev) {
++		kpd_print("KPD input device not ready\n");
++		return;
++	}
++	kpd_pmic_pwrkey_hal(pressed);
++}
++
++void kpd_pmic_rstkey_handler(unsigned long pressed)
++{
++	kpd_print("PMIC reset Key generate, pressed=%ld\n", pressed);
++	if (!kpd_input_dev) {
++		kpd_print("KPD input device not ready\n");
++		return;
++	}
++	kpd_pmic_rstkey_hal(pressed);
++}
++#endif
++
++static void kpd_keymap_handler(unsigned long data)
++{
++	u16 i, j;
++	int32_t pressed;
++	u16 new_state[KPD_NUM_MEMS], change, mask;
++	u16 hw_keycode, linux_keycode;
++
++	kpd_get_keymap_state(new_state);
++#ifdef CONFIG_PM_SLEEP
++	__pm_wakeup_event(kpd_suspend_lock, 500);
++#endif
++	for (i = 0; i < KPD_NUM_MEMS; i++) {
++		change = new_state[i] ^ kpd_keymap_state[i];
++		if (change == 0U)
++			continue;
++
++		for (j = 0; j < 16U; j++) {
++			mask = (u16) 1 << j;
++			if ((change & mask) == 0U)
++				continue;
++
++			hw_keycode = (i << 4) + j;
++
++			if (hw_keycode >= KPD_NUM_KEYS)
++				continue;
++
++			/* bit is 1: not pressed, 0: pressed */
++			pressed = ((new_state[i] & mask) == 0U) ? 1 : 0;
++			kpd_print("(%s) HW keycode = %d\n",
++				(pressed == 1) ? "pressed" : "released",
++					hw_keycode);
++
++			linux_keycode = kpd_keymap[hw_keycode];
++			if (linux_keycode == 0U)
++				continue;
++			input_report_key(kpd_input_dev, linux_keycode, pressed);
++			input_sync(kpd_input_dev);
++			kpd_print("report Linux keycode = %d\n", linux_keycode);
++		}
++	}
++
++	memcpy(kpd_keymap_state, new_state, sizeof(new_state));
++	enable_irq(kp_irqnr);
++}
++
++static irqreturn_t kpd_irq_handler(int irq, void *dev_id)
++{
++	/* use _nosync to avoid deadlock */
++	disable_irq_nosync(kp_irqnr);
++	tasklet_schedule(&kpd_keymap_tasklet);
++	return IRQ_HANDLED;
++}
++
++static int kpd_open(struct input_dev *dev)
++{
++	return 0;
++}
++
++static void kpd_get_dts_info(struct device_node *node)
++{
++	int32_t ret;
++
++	of_property_read_u32(node, "mediatek,kpd-key-debounce",
++		&kpd_dts_data.kpd_key_debounce);
++	of_property_read_u32(node, "mediatek,kpd-sw-pwrkey",
++		&kpd_dts_data.kpd_sw_pwrkey);
++	of_property_read_u32(node, "mediatek,kpd-hw-pwrkey",
++		&kpd_dts_data.kpd_hw_pwrkey);
++	of_property_read_u32(node, "mediatek,kpd-sw-rstkey",
++		&kpd_dts_data.kpd_sw_rstkey);
++	of_property_read_u32(node, "mediatek,kpd-hw-rstkey",
++		&kpd_dts_data.kpd_hw_rstkey);
++	of_property_read_u32(node, "mediatek,kpd-use-extend-type",
++		&kpd_dts_data.kpd_use_extend_type);
++	of_property_read_u32(node, "mediatek,kpd-hw-dl-key1",
++		&kpd_dts_data.kpd_hw_dl_key1);
++	of_property_read_u32(node, "mediatek,kpd-hw-dl-key2",
++		&kpd_dts_data.kpd_hw_dl_key2);
++	of_property_read_u32(node, "mediatek,kpd-hw-dl-key3",
++		&kpd_dts_data.kpd_hw_dl_key3);
++	of_property_read_u32(node, "mediatek,kpd-hw-recovery-key",
++		&kpd_dts_data.kpd_hw_recovery_key);
++	of_property_read_u32(node, "mediatek,kpd-hw-factory-key",
++		&kpd_dts_data.kpd_hw_factory_key);
++	of_property_read_u32(node, "mediatek,kpd-hw-map-num",
++		&kpd_dts_data.kpd_hw_map_num);
++	/* stock reads past the array when the map is longer; cap it */
++	if (kpd_dts_data.kpd_hw_map_num > KPD_NUM_KEYS)
++		kpd_dts_data.kpd_hw_map_num = KPD_NUM_KEYS;
++	ret = of_property_read_u32_array(node, "mediatek,kpd-hw-init-map",
++		kpd_dts_data.kpd_hw_init_map,
++			kpd_dts_data.kpd_hw_map_num);
++
++	if (ret) {
++		kpd_print("kpd-hw-init-map was not defined in dts.\n");
++		memset(kpd_dts_data.kpd_hw_init_map, 0,
++			sizeof(kpd_dts_data.kpd_hw_init_map));
++	}
++
++	kpd_print("deb= %d, sw-pwr= %d, hw-pwr= %d, hw-rst= %d, sw-rst= %d\n",
++		  kpd_dts_data.kpd_key_debounce, kpd_dts_data.kpd_sw_pwrkey,
++			kpd_dts_data.kpd_hw_pwrkey, kpd_dts_data.kpd_hw_rstkey,
++				kpd_dts_data.kpd_sw_rstkey);
++}
++
++static int32_t kpd_gpio_init(struct device *dev)
++{
++	struct pinctrl *keypad_pinctrl;
++	struct pinctrl_state *kpd_default;
++	int32_t ret;
++
++	if (dev == NULL) {
++		kpd_print("kpd device is NULL!\n");
++		ret = -1;
++	} else {
++		keypad_pinctrl = devm_pinctrl_get(dev);
++		if (IS_ERR(keypad_pinctrl)) {
++			ret = -1;
++			kpd_print("Cannot find keypad_pinctrl!\n");
++		} else {
++			kpd_default = pinctrl_lookup_state(keypad_pinctrl,
++				"default");
++			if (IS_ERR(kpd_default)) {
++				ret = -1;
++				kpd_print("Cannot find ecall_state!\n");
++			} else
++				ret = pinctrl_select_state(keypad_pinctrl,
++					kpd_default);
++		}
++	}
++	return ret;
++}
++
++static void mt_kpd_debugfs(void)
++{
++	kpd_klog_en = 0;
++	kpd_droot = debugfs_create_dir("keypad", NULL);
++	if (IS_ERR_OR_NULL(kpd_droot))
++		return;
++
++	debugfs_create_u32("debug", 0600, kpd_droot, &kpd_klog_en);
++}
++
++static int kpd_pdrv_probe(struct platform_device *pdev)
++{
++	struct clk *kpd_clk = NULL;
++	u32 i;
++	int32_t err = 0;
++
++	if (!pdev->dev.of_node) {
++		kpd_notice("no kpd dev node\n");
++		return -ENODEV;
++	}
++#ifdef CONFIG_KPD_PWRKEY_USE_PMIC
++	err = kpd_mt6358_lookup();
++	if (err == -EPROBE_DEFER)
++		return err;
++	if (err)
++		kpd_notice("no MT6358 power key (%d)\n", err);
++#endif
++
++	kpd_clk = devm_clk_get(&pdev->dev, "kpd-clk");
++	if (!IS_ERR(kpd_clk)) {
++		err = clk_prepare_enable(kpd_clk);
++		if (err)
++			kpd_notice("get kpd-clk fail: %d\n", err);
++	} else {
++		kpd_notice("kpd-clk is default set by ccf.\n");
++	}
++
++	kp_base = of_iomap(pdev->dev.of_node, 0);
++	if (!kp_base) {
++		kpd_notice("KP iomap failed\n");
++		return -ENODEV;
++	}
++
++	kp_irqnr = irq_of_parse_and_map(pdev->dev.of_node, 0);
++	if (!kp_irqnr) {
++		kpd_notice("KP get irqnr failed\n");
++		return -ENODEV;
++	}
++	kpd_info("kp base: 0x%p, kp irq: %d\n", kp_base, kp_irqnr);
++	err = kpd_gpio_init(&pdev->dev);
++	if (err != 0)
++		kpd_print("gpio init failed\n");
++
++	kpd_get_dts_info(pdev->dev.of_node);
++
++	kpd_memory_setting();
++
++	kpd_input_dev = devm_input_allocate_device(&pdev->dev);
++	if (!kpd_input_dev) {
++		kpd_notice("input allocate device fail.\n");
++		return -ENOMEM;
++	}
++
++	kpd_input_dev->name = KPD_NAME;
++	kpd_input_dev->id.bustype = BUS_HOST;
++	kpd_input_dev->id.vendor = 0x2454;
++	kpd_input_dev->id.product = 0x6500;
++	kpd_input_dev->id.version = 0x0010;
++	kpd_input_dev->open = kpd_open;
++	kpd_input_dev->dev.parent = &pdev->dev;
++
++	__set_bit(EV_KEY, kpd_input_dev->evbit);
++#if defined(CONFIG_KPD_PWRKEY_USE_PMIC)
++	__set_bit(kpd_dts_data.kpd_sw_pwrkey, kpd_input_dev->keybit);
++	kpd_keymap[8] = 0;
++#endif
++	if (!kpd_dts_data.kpd_use_extend_type) {
++		for (i = 17; i < KPD_NUM_KEYS; i += 9)
++			kpd_keymap[i] = 0;
++	}
++	for (i = 0; i < KPD_NUM_KEYS; i++) {
++		if (kpd_keymap[i] != 0)
++			__set_bit(kpd_keymap[i], kpd_input_dev->keybit);
++	}
++
++	if (kpd_dts_data.kpd_sw_rstkey)
++		__set_bit(kpd_dts_data.kpd_sw_rstkey, kpd_input_dev->keybit);
++#ifdef CONFIG_MTK_MRDUMP_KEY
++	__set_bit(KEY_RESTART, kpd_input_dev->keybit);
++#endif
++
++	err = input_register_device(kpd_input_dev);
++	if (err) {
++		kpd_notice("register input device failed (%d)\n", err);
++		kpd_input_dev = NULL;
++		return err;
++	}
++#ifdef CONFIG_PM_SLEEP
++	kpd_suspend_lock = wakeup_source_register(&pdev->dev, "kpd wakelock");
++#endif
++	/* register IRQ and EINT */
++	kpd_set_debounce(kpd_dts_data.kpd_key_debounce);
++	err = request_irq(kp_irqnr, kpd_irq_handler, IRQF_TRIGGER_NONE,
++			KPD_NAME, NULL);
++	if (err) {
++		kpd_notice("register IRQ failed (%d)\n", err);
++		kpd_input_dev = NULL;
++		return err;
++	}
++
++	if (enable_irq_wake(kp_irqnr) < 0)
++		kpd_notice("irq %d enable irq wake fail\n", kp_irqnr);
++
++#ifdef CONFIG_MTK_MRDUMP_KEY
++	mt_eint_register();
++#endif
++#ifdef CONFIG_KPD_PWRKEY_USE_PMIC
++	/*
++	 * Stock's PMIC driver requests these at its own probe; there is no
++	 * such driver on 5.10, so mtk-kpd does it once its input device is up.
++	 */
++	err = kpd_mt6358_init(&pdev->dev);
++	if (err)
++		kpd_notice("MT6358 power key setup failed (%d)\n", err);
++	else
++		long_press_reboot_function_setting();
++#endif
++	err = kpd_create_attr(&kpd_pdrv.driver);
++	if (err) {
++		kpd_notice("create attr file fail\n");
++		kpd_delete_attr(&kpd_pdrv.driver);
++		return err;
++	}
++	/* Add kpd debug node */
++	mt_kpd_debugfs();
++
++	kpd_notice("kpd_probe OK.\n");
++
++	return err;
++}
++
++static int kpd_pdrv_suspend(struct platform_device *pdev, pm_message_t state)
++{
++	kpd_suspend = true;
++	kpd_print("suspend!! (%d)\n", kpd_suspend);
++	return 0;
++}
++
++static int kpd_pdrv_resume(struct platform_device *pdev)
++{
++	kpd_suspend = false;
++	kpd_print("resume!! (%d)\n", kpd_suspend);
++	return 0;
++}
++
++static const struct of_device_id kpd_of_match[] = {
++	{.compatible = "mediatek,mt8167-keypad"},
++	{.compatible = "mediatek,kp"},
++	{},
++};
++
++static struct platform_driver kpd_pdrv = {
++	.probe = kpd_pdrv_probe,
++	.suspend = kpd_pdrv_suspend,
++	.resume = kpd_pdrv_resume,
++	.driver = {
++		   .name = KPD_NAME,
++		   .of_match_table = kpd_of_match,
++		   .suppress_bind_attrs = true,
++		   },
++};
++
++module_platform_driver(kpd_pdrv);
++
++MODULE_AUTHOR("Mediatek Corporation");
++MODULE_DESCRIPTION("MTK Keypad (KPD) Driver");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/drivers/input/keyboard/mediatek/kpd.h
+@@ -0,0 +1,61 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2010 MediaTek Inc.
++ *
++ * MediaTek keypad (mtk-kpd), ported from the Titan Pocket 4.14 vendor kernel.
++ */
++
++#ifndef __KPD_H__
++#define __KPD_H__
++
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/input.h>
++#include <linux/interrupt.h>
++#include <linux/platform_device.h>
++#include <linux/delay.h>
++#include <hal_kpd.h>
++
++struct keypad_dts_data {
++	u32 kpd_key_debounce;
++	u32 kpd_sw_pwrkey;
++	u32 kpd_hw_pwrkey;
++	u32 kpd_sw_rstkey;
++	u32 kpd_hw_rstkey;
++	u32 kpd_use_extend_type;
++	u32 kpd_hw_map_num;
++	u32 kpd_hw_init_map[KPD_NUM_KEYS];
++	u32 kpd_hw_dl_key1;
++	u32 kpd_hw_dl_key2;
++	u32 kpd_hw_dl_key3;
++	u32 kpd_hw_recovery_key;
++	u32 kpd_hw_factory_key;
++};
++
++extern struct keypad_dts_data kpd_dts_data;
++extern int kpd_klog_en;
++
++#define KPD_SAY		"kpd: "
++
++#define kpd_print(fmt, arg...)	do { \
++	if (kpd_klog_en) \
++		pr_debug(KPD_SAY fmt, ##arg); \
++	} while (0)
++#define kpd_info(fmt, arg...)	do { \
++	if (kpd_klog_en) \
++		pr_info(KPD_SAY fmt, ##arg); \
++	} while (0)
++#define kpd_notice(fmt, arg...)	pr_notice(KPD_SAY fmt, ##arg)
++
++#ifdef CONFIG_KPD_PWRKEY_USE_PMIC
++/* MT6358 PWRKEY and HOMEKEY (kpd-mt6358.c) */
++void kpd_pwrkey_pmic_handler(unsigned long pressed);
++void kpd_pmic_rstkey_handler(unsigned long pressed);
++int kpd_mt6358_lookup(void);
++int kpd_mt6358_init(struct device *dev);
++int kpd_mt6358_set_lprst(unsigned int pwrkey_en, unsigned int homekey_en,
++			 int td);
++#endif
++
++#endif				/* __KPD_H__ */
+--- /dev/null
++++ b/drivers/input/keyboard/mediatek/mt6771/hal_kpd.c
+@@ -0,0 +1,212 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * MT6771 keypad HAL, ported from the Titan Pocket 4.14 vendor kernel. The
++ * PMIC register writes go through kpd-mt6358.c instead of upmu_common.
++ */
++
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_irq.h>
++#include <linux/irq.h>
++#include <kpd.h>
++#include <hal_kpd.h>
++#include <mt-plat/mtk_boot_common.h>
++
++#ifdef CONFIG_KPD_PWRKEY_USE_PMIC
++static int kpd_enable_lprst = 1;
++#endif
++static u16 kpd_keymap_state[KPD_NUM_MEMS] = {
++	0xffff, 0xffff, 0xffff, 0xffff, 0x00ff
++};
++
++static void enable_kpd(int enable)
++{
++	if (enable == 1) {
++		mt_reg_sync_writew((u16) (enable), KP_EN);
++		kpd_print("KEYPAD is enabled\n");
++	} else if (enable == 0) {
++		mt_reg_sync_writew((u16) (enable), KP_EN);
++		kpd_print("KEYPAD is disabled\n");
++	}
++}
++
++void kpd_get_keymap_state(u16 state[])
++{
++	state[0] = readw(KP_MEM1);
++	state[1] = readw(KP_MEM2);
++	state[2] = readw(KP_MEM3);
++	state[3] = readw(KP_MEM4);
++	state[4] = readw(KP_MEM5);
++	kpd_print("register = %x %x %x %x %x\n",
++		state[0], state[1], state[2], state[3], state[4]);
++}
++
++/*
++ * Long-press power key reset, as stock: in every boot mode the stock config
++ * (ONEKEY_REBOOT_NORMAL_MODE and _OTHER_MODE, LPRST_TD 0) sets
++ * PWRKEY_RST_EN 1, HOMEKEY_RST_EN 0 and PWRKEY_RST_TD 0 (8 s).
++ */
++void long_press_reboot_function_setting(void)
++{
++#ifdef CONFIG_KPD_PWRKEY_USE_PMIC
++	if (kpd_enable_lprst && get_boot_mode() == NORMAL_BOOT) {
++		kpd_info("Normal Boot long press reboot selection\n");
++#ifdef CONFIG_KPD_PMIC_LPRST_TD
++		kpd_info("Enable normal mode LPRST\n");
++#ifdef CONFIG_ONEKEY_REBOOT_NORMAL_MODE
++		kpd_mt6358_set_lprst(1, 0, CONFIG_KPD_PMIC_LPRST_TD);
++#endif
++#ifdef CONFIG_TWOKEY_REBOOT_NORMAL_MODE
++		kpd_mt6358_set_lprst(1, 1, CONFIG_KPD_PMIC_LPRST_TD);
++#endif
++#else
++		kpd_info("disable normal mode LPRST\n");
++		kpd_mt6358_set_lprst(0, 0, -1);
++#endif
++	} else {
++		kpd_info("Other Boot Mode long press reboot selection\n");
++#ifdef CONFIG_KPD_PMIC_LPRST_TD
++		kpd_info("Enable other mode LPRST\n");
++#ifdef CONFIG_ONEKEY_REBOOT_OTHER_MODE
++		kpd_mt6358_set_lprst(1, 0, CONFIG_KPD_PMIC_LPRST_TD);
++#endif
++#ifdef CONFIG_TWOKEY_REBOOT_OTHER_MODE
++		kpd_mt6358_set_lprst(1, 1, CONFIG_KPD_PMIC_LPRST_TD);
++#endif
++#else
++		kpd_info("disable other mode LPRST\n");
++		kpd_mt6358_set_lprst(0, 0, -1);
++#endif
++	}
++#endif
++}
++
++bool __attribute__ ((weak)) ConditionEnterSuspend(void)
++{
++	return true;
++}
++
++void kpd_wakeup_src_setting(int enable)
++{
++	int is_fm_radio_playing = 0;
++
++	/* If FM is playing, keep keypad as wakeup source */
++	if (ConditionEnterSuspend() == true)
++		is_fm_radio_playing = 0;
++	else
++		is_fm_radio_playing = 1;
++
++	if (is_fm_radio_playing == 0) {
++		if (enable == 1) {
++			kpd_print("enable kpd work!\n");
++			enable_kpd(1);
++		} else {
++			kpd_print("disable kpd work!\n");
++			enable_kpd(0);
++		}
++	}
++}
++
++void kpd_init_keymap(u32 keymap[])
++{
++	int i = 0;
++
++	if (kpd_dts_data.kpd_use_extend_type)
++		kpd_keymap_state[4] = 0xffff;
++	for (i = 0; i < KPD_NUM_KEYS; i++)
++		keymap[i] = kpd_dts_data.kpd_hw_init_map[i];
++}
++
++void kpd_init_keymap_state(u16 keymap_state[])
++{
++	int i = 0;
++
++	for (i = 0; i < KPD_NUM_MEMS; i++)
++		keymap_state[i] = kpd_keymap_state[i];
++	kpd_info("init_keymap_state done: %x %x %x %x %x!\n",
++		 keymap_state[0], keymap_state[1], keymap_state[2],
++		 keymap_state[3], keymap_state[4]);
++}
++
++void kpd_set_debounce(u16 val)
++{
++	mt_reg_sync_writew((u16) (val & KPD_DEBOUNCE_MASK), KP_DEBOUNCE);
++}
++
++void kpd_double_key_enable(int en)
++{
++	u16 tmp;
++
++	tmp = readw(KP_SEL);
++	if (en != 0)
++		writew((u16) (tmp | KPD_DOUBLE_KEY_MASK), KP_SEL);
++	else
++		writew((u16) (tmp & ~KPD_DOUBLE_KEY_MASK), KP_SEL);
++}
++
++void kpd_pmic_rstkey_hal(unsigned long pressed)
++{
++	if (kpd_dts_data.kpd_sw_rstkey != 0) {
++		input_report_key(kpd_input_dev, kpd_dts_data.kpd_sw_rstkey,
++			pressed);
++		input_sync(kpd_input_dev);
++		kpd_print("(%s) HW keycode =%d using PMIC\n",
++		       pressed ? "pressed" : "released",
++		       kpd_dts_data.kpd_sw_rstkey);
++	}
++}
++
++void kpd_pmic_pwrkey_hal(unsigned long pressed)
++{
++	input_report_key(kpd_input_dev, kpd_dts_data.kpd_sw_pwrkey, pressed);
++	input_sync(kpd_input_dev);
++	kpd_print("(%s) HW keycode =%d using PMIC\n",
++	       pressed ? "pressed" : "released", kpd_dts_data.kpd_sw_pwrkey);
++}
++
++#ifdef CONFIG_MTK_MRDUMP_KEY
++static int mrdump_eint_state;
++static int mrdump_ext_rst_irq;
++static irqreturn_t mrdump_rst_eint_handler(int irq, void *data)
++{
++	if (mrdump_eint_state == 0) {
++		irq_set_irq_type(mrdump_ext_rst_irq, IRQ_TYPE_LEVEL_HIGH);
++		mrdump_eint_state = 1;
++	} else {
++		irq_set_irq_type(mrdump_ext_rst_irq, IRQ_TYPE_LEVEL_LOW);
++		mrdump_eint_state = 0;
++	}
++
++	input_report_key(kpd_input_dev, KEY_RESTART, mrdump_eint_state);
++	input_sync(kpd_input_dev);
++
++	return IRQ_HANDLED;
++}
++
++/* The Pocket's node has no interrupts, so this registers nothing there. */
++void mt_eint_register(void)
++{
++	int ret;
++	struct device_node *node;
++
++	/* register EINT handler for MRDUMP_EXT_RST key */
++	node = of_find_compatible_node(NULL, NULL,
++		"mediatek, mrdump_ext_rst-eint");
++	if (!node) {
++		kpd_print("can't find compatible node\n");
++		return;
++	}
++	mrdump_ext_rst_irq = irq_of_parse_and_map(node, 0);
++	of_node_put(node);
++	if (!mrdump_ext_rst_irq) {
++		kpd_print("mrdump_ext_rst-eint has no IRQ\n");
++		return;
++	}
++	ret = request_irq(mrdump_ext_rst_irq, mrdump_rst_eint_handler,
++			  IRQF_TRIGGER_NONE, "mrdump_ext_rst-eint", NULL);
++	if (ret)
++		kpd_print("EINT IRQ LINE NOT AVAILABLE\n");
++}
++#endif
+--- /dev/null
++++ b/drivers/input/keyboard/mediatek/mt6771/hal_kpd.h
+@@ -0,0 +1,49 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * MT6771 keypad registers and HAL, ported from the Titan Pocket 4.14 vendor kernel.
++ */
++
++#ifndef KPD_HAL_H
++#define KPD_HAL_H
++#include <linux/input.h>
++#include <mt-plat/sync_write.h>
++
++extern void __iomem *kp_base;
++extern struct input_dev *kpd_input_dev;
++
++#define KP_STA			(kp_base + 0x0000)
++#define KP_MEM1			(kp_base + 0x0004)
++#define KP_MEM2			(kp_base + 0x0008)
++#define KP_MEM3			(kp_base + 0x000c)
++#define KP_MEM4			(kp_base + 0x0010)
++#define KP_MEM5			(kp_base + 0x0014)
++#define KP_DEBOUNCE		(kp_base + 0x0018)
++#define KP_SCAN_TIMING		(kp_base + 0x001C)
++#define KP_SEL			(kp_base + 0x0020)
++#define KP_EN			(kp_base + 0x0024)
++
++#define KP_COL0_SEL		(1 << 10)
++#define KP_COL1_SEL		(1 << 11)
++#define KP_COL2_SEL		(1 << 12)
++
++#define KPD_DEBOUNCE_MASK	((1U << 14) - 1)
++#define KPD_DOUBLE_KEY_MASK	(1U << 0)
++
++void long_press_reboot_function_setting(void);
++void kpd_wakeup_src_setting(int enable);
++void kpd_get_keymap_state(u16 state[]);
++void kpd_set_debounce(u16 val);
++void kpd_init_keymap(u32 keymap[]);
++void kpd_init_keymap_state(u16 keymap_state[]);
++void kpd_pmic_rstkey_hal(unsigned long pressed);
++void kpd_pmic_pwrkey_hal(unsigned long pressed);
++void mt_eint_register(void);
++void kpd_double_key_enable(int en);
++
++#define KPD_NUM_MEMS	5
++#define KPD_MEM5_BITS	8
++
++#define KPD_NUM_KEYS	72	/* 4 * 16 + KPD_MEM5_BITS */
++#endif
+--- a/drivers/input/keyboard/Kconfig
++++ b/drivers/input/keyboard/Kconfig
+@@ -804,6 +804,8 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called aw9523-key.
+ 
++source "drivers/input/keyboard/mediatek/Kconfig"
++
+ config KEYBOARD_MTK_PMIC
+ 	tristate "MediaTek PMIC keys support"
+ 	depends on MFD_MT6397
+--- a/drivers/input/keyboard/Makefile
++++ b/drivers/input/keyboard/Makefile
+@@ -43,6 +43,7 @@
+ obj-$(CONFIG_KEYBOARD_MATRIX)		+= matrix_keypad.o
+ obj-$(CONFIG_KEYBOARD_MAX7359)		+= max7359_keypad.o
+ obj-$(CONFIG_KEYBOARD_MCS)		+= mcs_touchkey.o
++obj-$(CONFIG_KEYBOARD_MTK)		+= mediatek/
+ obj-$(CONFIG_KEYBOARD_MPR121)		+= mpr121_touchkey.o
+ obj-$(CONFIG_KEYBOARD_MTK_PMIC) 	+= mtk-pmic-keys.o
+ obj-$(CONFIG_KEYBOARD_NEWTON)		+= newtonkbd.o

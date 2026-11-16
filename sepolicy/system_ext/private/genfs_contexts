@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# MTK kernel nodes. Paths are the stock 4.14 ones. Under the first-boot 5.10 kernel and
+# board DT only atag,boot exists; the rest have no driver or DT node (FIRST_BOOT_OFFLINE_CHECKS.md).
+# A path that never appears is harmless.
+genfscon sysfs /devices/platform/10027000.spmi/spmi-0/0-03/10027000.spmi:mt6315@3:mt6315_3_regulator/extbuck_access u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/10027000.spmi/spmi-0/0-06/10027000.spmi:mt6315@6:mt6315_6_regulator/extbuck_access u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/10027000.spmi/spmi-0/0-07/10027000.spmi:mt6315@7:mt6315_7_regulator/extbuck_access u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/10027000.spmi/spmi-0/0-03/10027000.spmi:mt6315@3:extbuck_debug/extbuck_access u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/10027000.spmi/spmi-0/0-06/10027000.spmi:mt6315@6:extbuck_debug/extbuck_access u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/10027000.spmi/spmi-0/0-07/10027000.spmi:mt6315@7:extbuck_debug/extbuck_access u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/1000d000.pwrap/1000d000.pwrap:mt6358-pmic/mt-pmic u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/1000d000.pwrap/1000d000.pwrap:mt6359-pmic/mt-pmic u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/10026000.pwrap/10026000.pwrap:mt6359-pmic/mt-pmic u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/1000d000.pwrap/1000d000.pwrap:main_pmic/mt-pmic u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/10026000.pwrap/10026000.pwrap:mt6359p/mt-pmic u:object_r:sysfs_pmu:s0
+genfscon sysfs /bus/platform/drivers/pmic-codec-accdet/state u:object_r:sysfs_headset:s0
+genfscon sysfs /devices/platform/vibrator@0/leds/vibrator u:object_r:sysfs_vibrator:s0
+# Keyboard light on 5.10: leds-mt65xx-button on the /odm/led@5 node. Stock labels it
+# under leds-mt65xx/, which 5.10 doesn't create. The vendor lights HAL writes brightness.
+genfscon sysfs /devices/platform/odm/odm:led@5/leds/button-backlight u:object_r:sysfs_leds:s0
+# MT6370 RGB LED on 5.10: the PMU is 4-0034, stock labels it under i2c-5/5-0034. The vendor
+# lights HAL writes brightness, trigger and delay_on_off.
+genfscon sysfs /devices/platform/11017000.i2c/i2c-4/4-0034/mt6370_pmu_rgbled/leds u:object_r:sysfs_leds:s0
+# Torch LED from pocket_torch.c, written by PocketTorch in system_server.
+genfscon sysfs /devices/virtual/leds/torch u:object_r:sysfs_pocket_torch:s0
+# Charging control: charging_enabled on the 5.10 MTK charger (kernel patch 0081), written by
+# the health HAL.
+genfscon sysfs /devices/platform/charger/charging_enabled u:object_r:sysfs_pocket_charging:s0
+genfscon sysfs /firmware/devicetree/base/chosen/atag,boot u:object_r:sysfs_boot_info:s0
+genfscon sysfs /bus/platform/drivers/Accdet_Driver/state u:object_r:sysfs_headset:s0
+genfscon sysfs /devices/platform/1000d000.pwrap/mt-pmic u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/mt6333-user u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/mt6311-user u:object_r:sysfs_pmu:s0
+genfscon sysfs /devices/platform/mt-pmic u:object_r:sysfs_pmu:s0
+# 5.10 UFS LUNs. The stock vendor policy labels these under soc/ or bootdevice/,
+# which 5.10 does not create; the board DT puts the host at /11270000.ufshci.
+genfscon sysfs /devices/platform/11270000.ufshci/host0/target0:0:0/0:0:0:0/block/sda u:object_r:sysfs_devices_block:s0
+genfscon sysfs /devices/platform/11270000.ufshci/host0/target0:0:0/0:0:0:1/block/sdb u:object_r:sysfs_devices_block:s0
+genfscon sysfs /devices/platform/11270000.ufshci/host0/target0:0:0/0:0:0:2/block/sdc u:object_r:sysfs_devices_block:s0
+# 5.10 wakeup sources (class wakeup). The platform labels only /class/wakeup; each device-attached
+# wakeup dir needs its own line. genfs matches by prefix, so wakeup2 etc. are covered. Only the first
+# wakeup under each parent was seen; the full list is from /sys/class/wakeup on the phone.
+genfscon sysfs /devices/platform/mt_charger/wakeup u:object_r:sysfs_wakeup:s0
+genfscon sysfs /devices/platform/mt_charger/power_supply/ac/wakeup u:object_r:sysfs_wakeup:s0
+genfscon sysfs /devices/platform/battery/power_supply/battery/wakeup u:object_r:sysfs_wakeup:s0
+genfscon sysfs /devices/platform/1000d000.pwrap/1000d000.pwrap:mt6358-pmic/mt6358-rtc/rtc/rtc0/alarmtimer.0.auto/wakeup u:object_r:sysfs_wakeup:s0
+genfscon sysfs /devices/platform/10010000.kp/wakeup u:object_r:sysfs_wakeup:s0
+# OCV run logger input (kernel patch 0026), read by pocket_battlog.
+genfscon sysfs /devices/platform/battery/power_supply/battery/gauge_log u:object_r:sysfs_pocket_gauge_log:s0

@@ -1,0 +1,11 @@
+# Charging control (health/). The kernel's charging_enabled is root's; the HAL runs as system.
+on late-fs
+    chown system system /sys/devices/platform/charger/charging_enabled
+    chmod 0664 /sys/devices/platform/charger/charging_enabled
+
+service system.lineage-health-pocket /system_ext/bin/hw/vendor.lineage.health-service.pocket
+    class hal
+    user system
+    group system
+    # A crashed HAL can't undo its pause, so charge again; the framework pauses again if it should.
+    onrestart write /sys/devices/platform/charger/charging_enabled 1

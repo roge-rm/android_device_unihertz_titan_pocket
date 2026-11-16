@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Charging control HAL on system_ext (health/): reads and writes the 5.10 charger's
+# charging_enabled. Its rc chowns the file to system first.
+type hal_lineage_health_pocket, domain, coredomain;
+hal_server_domain(hal_lineage_health_pocket, hal_lineage_health)
+
+type hal_lineage_health_pocket_exec, exec_type, system_file_type, file_type;
+init_daemon_domain(hal_lineage_health_pocket)
+
+binder_call(hal_lineage_health_pocket, servicemanager)
+
+type sysfs_pocket_charging, fs_type, sysfs_type;
+allow hal_lineage_health_pocket sysfs_pocket_charging:file rw_file_perms;
+# init chowns it, and writes 1 when the HAL restarts so a crash does not leave charging paused.
+allow init sysfs_pocket_charging:file { setattr w_file_perms };

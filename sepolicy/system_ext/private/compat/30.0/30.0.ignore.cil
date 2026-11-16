@@ -1,0 +1,6 @@
+;; new_objects - types with no analogue in this older policy. The newer
+;;   versions' entries are carried down to this one when the maps combine.
+(type new_objects)
+(typeattribute new_objects)
+(typeattributeset new_objects
+  ( new_objects))

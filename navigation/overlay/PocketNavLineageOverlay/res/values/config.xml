@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <!-- Home 1 (front strip), Back 2, App switch 16, Volume 64. -->
+    <integer name="config_deviceHardwareKeys">83</integer>
+    <!-- Only volume wakes; stock drops Home with the screen off. -->
+    <integer name="config_deviceHardwareWakeKeys">64</integer>
+</resources>

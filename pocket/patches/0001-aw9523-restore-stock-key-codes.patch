@@ -1,0 +1,20 @@
+--- a/drivers/misc/mediatek/aw9523/aw9523_key.c
++++ b/drivers/misc/mediatek/aw9523/aw9523_key.c
+@@ -162,12 +162,12 @@
+     { "M",       KEY_M,            0,   2,   6 },
+     { "B",       KEY_B,            0,   1,   6 },
+     { "N",       KEY_N,            0,   0,   6 },
+-    { "SYM",     251,              0,   5,   2 },
+-    { "ESC",     KEY_ESC,          0,   5,   3 },
+-    { "TAB",     KEY_TAB,          0,   5,   4 },
++    { "SYM",     KEY_COMPOSE,      0,   5,   2 },
++    { "BACK",    KEY_BACK,          0,   5,   3 },
++    { "MENU",    KEY_APPSELECT,    0,   5,   4 },
+     { "SHIFT-L", KEY_LEFTSHIFT,    0,   5,   1 },
+-    { "CTRL",    KEY_LEFTCTRL,     0,   6,   1 },
+-    { "ALT",     KEY_LEFTALT,      0,   7,   1 },
++    { "F13",     KEY_F13,          0,   6,   1 },
++    { "ALT",     KEY_RIGHTALT,     0,   7,   1 },
+ };
+ 
+ // Function implementations

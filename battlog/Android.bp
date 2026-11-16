@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// OCV run logger for tools/make-pocket-oz8806-ocv.py, started by init.pocket.battlog.rc.
+
+sh_binary {
+    name: "pocket_battlog",
+    src: "pocket_battlog.sh",
+    system_ext_specific: true,
+}

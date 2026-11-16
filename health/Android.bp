@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+// Lineage charging control HAL (IChargingControl) on system_ext, as the stock vendor image
+// can't take Lineage's vendor.lineage.health-service.default. ChargingControl.cpp and .h are
+// unchanged copies of hardware/lineage/interfaces/health/aidl/default; the lineage_health
+// soong config in BoardConfig.integration.mk picks the node and modes, as for Lineage's own.
+// No IFastCharge.
+
+cc_binary {
+    name: "vendor.lineage.health-service.pocket",
+    relative_install_path: "hw",
+    system_ext_specific: true,
+    init_rc: ["vendor.lineage.health-service.pocket.rc"],
+    vintf_fragments: ["vendor.lineage.health-service.pocket.xml"],
+    cflags: select(soong_config_variable("lineage_health", "charging_control_charging_path"), {
+        any @ flag_val: ["-DHEALTH_CHARGING_CONTROL_CHARGING_PATH=\"" + flag_val + "\""],
+        default: [],
+    }) + select(soong_config_variable("lineage_health", "charging_control_charging_enabled"), {
+        any @ flag_val: ["-DHEALTH_CHARGING_CONTROL_CHARGING_ENABLED=\"" + flag_val + "\""],
+        default: ["-DHEALTH_CHARGING_CONTROL_CHARGING_ENABLED=\"1\""],
+    }) + select(soong_config_variable("lineage_health", "charging_control_charging_disabled"), {
+        any @ flag_val: ["-DHEALTH_CHARGING_CONTROL_CHARGING_DISABLED=\"" + flag_val + "\""],
+        default: ["-DHEALTH_CHARGING_CONTROL_CHARGING_DISABLED=\"0\""],
+    }) + select(soong_config_variable("lineage_health", "charging_control_supports_bypass"), {
+        true: ["-DHEALTH_CHARGING_CONTROL_SUPPORTS_BYPASS"],
+        false: [],
+        default: ["-DHEALTH_CHARGING_CONTROL_SUPPORTS_BYPASS"],
+    }) + select(soong_config_variable("lineage_health", "charging_control_supports_toggle"), {
+        true: ["-DHEALTH_CHARGING_CONTROL_SUPPORTS_TOGGLE"],
+        false: [],
+        default: ["-DHEALTH_CHARGING_CONTROL_SUPPORTS_TOGGLE"],
+    }) + [
+        "-Wall",
+        "-Werror",
+    ],
+    srcs: [
+        "service.cpp",
+        "ChargingControl.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+        "vendor.lineage.health-V2-ndk",
+    ],
+}

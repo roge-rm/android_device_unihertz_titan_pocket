@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+// Engineering-only software KeyMint on system_ext, so keystore2 has a TEE-level
+// /default device while the TrustKernel Keymaster 4.0 HAL is off (vendor overlay v3).
+// Keys live in process memory with a fixed software root; nothing is hardware backed.
+// main.rs is an unchanged copy of hardware/interfaces/security/keymint/aidl/default/main.rs.
+
+rust_binary {
+    name: "android.hardware.security.keymint-service.pocket",
+    relative_install_path: "hw",
+    system_ext_specific: true,
+    init_rc: ["android.hardware.security.keymint-service.pocket.rc"],
+    vintf_fragments: ["android.hardware.security.keymint-service.pocket.xml"],
+    defaults: [
+        "keymint_use_latest_hal_aidl_rust",
+    ],
+    // The upstream copy trips the stricter clippy set Soong uses outside hardware/.
+    clippy_lints: "none",
+    srcs: [
+        "main.rs",
+    ],
+    rustlibs: [
+        "libandroid_logger",
+        "libbinder_rs",
+        "liblog_rust",
+        "libkmr_hal",
+        "libkmr_hal_nonsecure",
+        "libkmr_ta_nonsecure",
+    ],
+}

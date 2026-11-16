@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# mtk-kpd: the keypad matrix (volume and the side key) and the MT6358 power and home keys.
+# Only the codes the driver sets.
+
+key 102   HOME
+key 114   VOLUME_DOWN
+key 115   VOLUME_UP
+key 116   POWER
+
+# Side shortcut key (keypad matrix slot 1, scancode 0xfa). Stock uses its own FUNC2
+# keycode, which Android 16 doesn't have; F14 stands in until the shortcut service lands.
+key 250   F14

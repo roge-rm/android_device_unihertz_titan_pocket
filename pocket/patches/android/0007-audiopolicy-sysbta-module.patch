@@ -1,0 +1,63 @@
+--- a/frameworks/av/services/audiopolicy/common/managerdefinitions/src/Serializer.cpp
++++ b/frameworks/av/services/audiopolicy/common/managerdefinitions/src/Serializer.cpp
+@@ -24,6 +24,7 @@
+ 
+ #include <libxml/parser.h>
+ #include <libxml/xinclude.h>
++#include <cutils/properties.h>
+ #include <media/convert.h>
+ #include <utils/Log.h>
+ #include <utils/StrongPointer.h>
+@@ -895,6 +896,30 @@
+     if (status != NO_ERROR) {
+         return status;
+     }
++    if (property_get_bool("persist.bluetooth.system_audio_hal.enabled", false)) {
++        // System-side Bluetooth audio HAL: swap the vendor Bluetooth modules for "sysbta".
++        static constexpr const char* kSysbtaFile = "/system/etc/sysbta_audio_policy_configuration.xml";
++        auto sysbtaDoc = make_xmlUnique(xmlParseFile(kSysbtaFile));
++        xmlNodePtr sysbtaRoot = sysbtaDoc ? xmlDocGetRootElement(sysbtaDoc.get()) : nullptr;
++        std::variant<status_t, ModuleTraits::Element> sysbta = BAD_VALUE;
++        if (sysbtaRoot != nullptr) sysbta = deserialize<ModuleTraits>(sysbtaRoot, config);
++        if (std::holds_alternative<ModuleTraits::Element>(sysbta)) {
++            for (size_t i = 0; i < modules.size();) {
++                const char* name = modules[i]->getName();
++                if (strcmp(name, "bluetooth") == 0 || strcmp(name, "bluetooth_qti") == 0 ||
++                        strcmp(name, "a2dp") == 0 || strcmp(name, "a2dpsink") == 0) {
++                    ALOGI("%s: replacing module %s with sysbta", __func__, name);
++                    modules.removeAt(i);
++                } else {
++                    ++i;
++                }
++            }
++            modules.add(std::get<ModuleTraits::Element>(sysbta));
++        } else {
++            ALOGE("%s: could not load %s, keeping the vendor Bluetooth modules", __func__,
++                    kSysbtaFile);
++        }
++    }
+     config->setHwModules(modules);
+ 
+     // Global Configuration
+--- a/system/sepolicy/private/hal_audio.te
++++ b/system/sepolicy/private/hal_audio.te
+@@ -9,7 +9,8 @@
+ 
+ binder_call(hal_audio_server, servicemanager)
+ 
+-r_dir_file(hal_audio, proc)
++# Not for the system-side Bluetooth audio HAL: coredomain may not read plain /proc.
++r_dir_file({ hal_audio -coredomain }, proc)
+ r_dir_file(hal_audio, proc_asound)
+ allow hal_audio_server audio_device:dir r_dir_perms;
+ allow hal_audio_server audio_device:chr_file rw_file_perms;
+@@ -29,7 +30,8 @@
+ allow hal_audio_server self:global_capability_class_set sys_nice;
+ 
+ # allow hal audio to use vnbinder
+-vndbinder_use(hal_audio)
++# Not for the system-side Bluetooth audio HAL: coredomain may not use vndbinder.
++vndbinder_use({ hal_audio -coredomain })
+ 
+ ###
+ ### neverallow rules

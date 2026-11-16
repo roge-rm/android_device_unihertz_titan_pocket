@@ -1,0 +1,78 @@
+--- a/packages/inputmethods/LatinIME/java/src/com/android/inputmethod/latin/LatinIME.java
++++ b/packages/inputmethods/LatinIME/java/src/com/android/inputmethod/latin/LatinIME.java
+@@ -122,6 +122,7 @@
+         SuggestionStripView.Listener, SuggestionStripViewAccessor,
+         DictionaryFacilitator.DictionaryInitializationListener,
+         PermissionsManager.PermissionsResultCallback {
++    private org.lineageos.pocketinput.PocketInputRuntime mPocketInput;
+     static final String TAG = LatinIME.class.getSimpleName();
+     private static final boolean TRACE = false;
+ 
+@@ -614,6 +615,7 @@
+         mDisplayContext = getDisplayContext();
+         KeyboardSwitcher.init(this);
+         super.onCreate();
++        mPocketInput = new org.lineageos.pocketinput.PocketInputRuntime(this);
+ 
+         mHandler.onCreate();
+ 
+@@ -777,6 +779,7 @@
+ 
+     @Override
+     public void onDestroy() {
++        if (mPocketInput != null) mPocketInput.close();
+         mDictionaryFacilitator.closeDictionaries();
+         mSettings.onDestroy();
+         unregisterReceiver(mHideSoftInputReceiver);
+@@ -891,6 +894,7 @@
+ 
+     @Override
+     public void onStartInput(final EditorInfo editorInfo, final boolean restarting) {
++        if (mPocketInput != null) mPocketInput.startEditor(getCurrentInputConnection(), editorInfo, false);
+         mHandler.onStartInput(editorInfo, restarting);
+     }
+ 
+@@ -910,6 +914,7 @@
+ 
+     @Override
+     public void onFinishInput() {
++        if (mPocketInput != null) mPocketInput.finishEditor();
+         mHandler.onFinishInput();
+     }
+ 
+@@ -1881,6 +1886,7 @@
+     // Hooks for hardware keyboard
+     @Override
+     public boolean onKeyDown(final int keyCode, final KeyEvent keyEvent) {
++        if (mPocketInput != null && mPocketInput.onKeyDown(keyEvent)) return true;
+         if (mEmojiAltPhysicalKeyDetector == null) {
+             mEmojiAltPhysicalKeyDetector = new EmojiAltPhysicalKeyDetector(
+                     getApplicationContext().getResources());
+@@ -1906,6 +1912,7 @@
+ 
+     @Override
+     public boolean onKeyUp(final int keyCode, final KeyEvent keyEvent) {
++        if (mPocketInput != null && mPocketInput.onKeyUp(keyEvent)) return true;
+         if (mEmojiAltPhysicalKeyDetector == null) {
+             mEmojiAltPhysicalKeyDetector = new EmojiAltPhysicalKeyDetector(
+                     getApplicationContext().getResources());
+--- a/packages/inputmethods/LatinIME/java/Android.bp
++++ b/packages/inputmethods/LatinIME/java/Android.bp
+@@ -41,6 +41,7 @@
+     jni_libs: ["libjni_latinime"],
+ 
+     static_libs: [
++        "PocketInputEditorAdapter",
+         "android-common",
+         "jsr305",
+         "latinime-common",
+--- a/packages/inputmethods/LatinIME/java/AndroidManifest.xml
++++ b/packages/inputmethods/LatinIME/java/AndroidManifest.xml
+@@ -22,6 +22,7 @@
+     <uses-sdk android:minSdkVersion="30"
+          android:targetSdkVersion="34"/>
+ 
++    <uses-permission android:name="org.lineageos.pocketinput.permission.READ_SETTINGS"/>
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+     <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION"/>
+     <uses-permission android:name="android.permission.GET_ACCOUNTS"/>

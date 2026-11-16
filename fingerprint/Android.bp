@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Front strip fingerprint sensor for the framework (FINGERPRINT_PORT.md).
+
+runtime_resource_overlay {
+    name: "PocketFingerprintFrameworkOverlay",
+    resource_dirs: ["overlay/PocketFingerprintFrameworkOverlay/res"],
+    manifest: "overlay/PocketFingerprintFrameworkOverlay/AndroidManifest.xml",
+    product_specific: true,
+}

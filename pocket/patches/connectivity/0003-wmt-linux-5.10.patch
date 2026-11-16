@@ -1,0 +1,711 @@
+WMT (wmt_drv, OPPO MT6765 common/) on Linux 5.10, applied to the staged tree by
+tools/prepare-connectivity-sources.py (patches.applied in connectivity-sources.json).
+
+- ioremap_nocache to ioremap (the same mapping on arm64).
+- struct timeval to struct __kernel_old_timeval, rtc_time_to_tm to rtc_time64_to_tm.
+- procfs file_operations to proc_ops.
+- stp_uart: 5.10 tty ldisc read signature, drop MIN/MAX that clash with the kernel's.
+- (void) on prototypes for -Wstrict-prototypes.
+- OPPO-only code out, as stock: the oppo_project.h include and get_eng_version()
+  check in wmt_dev.c (stock always asserts on high temperature) and the
+  oplus_rpmh_stats_statics() calls in mtk_wcn_consys_hw.c (stock imports neither).
+
+diff --git a/wifi/common/common_detect/drv_init/bluetooth_drv_init.c b/wifi/common/common_detect/drv_init/bluetooth_drv_init.c
+index d89d5da..78e95a0 100644
+--- a/wifi/common/common_detect/drv_init/bluetooth_drv_init.c
++++ b/wifi/common/common_detect/drv_init/bluetooth_drv_init.c
+@@ -21,7 +21,7 @@
+ #include "bluetooth_drv_init.h"
+ 
+ #ifdef CONFIG_MTK_COMBO_BT
+-int __attribute__((weak)) mtk_wcn_stpbt_drv_init()
++int __attribute__((weak)) mtk_wcn_stpbt_drv_init(void)
+ {
+ 	WMT_DETECT_PR_INFO("Not implement mtk_wcn_stpbt_drv_init\n");
+ 	return 0;
+diff --git a/wifi/common/common_detect/drv_init/fm_drv_init.c b/wifi/common/common_detect/drv_init/fm_drv_init.c
+index 4ec149e..955eb9e 100644
+--- a/wifi/common/common_detect/drv_init/fm_drv_init.c
++++ b/wifi/common/common_detect/drv_init/fm_drv_init.c
+@@ -21,7 +21,7 @@
+ #include "fm_drv_init.h"
+ 
+ #ifdef CONFIG_MTK_FMRADIO
+-int __attribute__((weak)) mtk_wcn_fm_init()
++int __attribute__((weak)) mtk_wcn_fm_init(void)
+ {
+ 	WMT_DETECT_PR_INFO("no impl. mtk_wcn_fm_init\n");
+ 	return 0;
+diff --git a/wifi/common/common_detect/drv_init/gps_drv_init.c b/wifi/common/common_detect/drv_init/gps_drv_init.c
+index ac48b23..af6f902 100644
+--- a/wifi/common/common_detect/drv_init/gps_drv_init.c
++++ b/wifi/common/common_detect/drv_init/gps_drv_init.c
+@@ -21,7 +21,7 @@
+ #include "gps_drv_init.h"
+ 
+ #ifdef CONFIG_MTK_COMBO_GPS
+-int __attribute__((weak)) mtk_wcn_stpgps_drv_init()
++int __attribute__((weak)) mtk_wcn_stpgps_drv_init(void)
+ {
+ 	WMT_DETECT_PR_INFO("no impl. mtk_wcn_stpgps_drv_init\n");
+ 	return 0;
+diff --git a/wifi/common/common_detect/drv_init/wlan_drv_init.c b/wifi/common/common_detect/drv_init/wlan_drv_init.c
+index 7b28ad9..824fd64 100644
+--- a/wifi/common/common_detect/drv_init/wlan_drv_init.c
++++ b/wifi/common/common_detect/drv_init/wlan_drv_init.c
+@@ -20,25 +20,25 @@
+ #include "wmt_detect.h"
+ #include "wlan_drv_init.h"
+ 
+-int __attribute__((weak)) mtk_wcn_wlan_gen4_init()
++int __attribute__((weak)) mtk_wcn_wlan_gen4_init(void)
+ {
+ 	WMT_DETECT_PR_INFO("no impl. mtk_wcn_wlan_gen4_init\n");
+ 	return 0;
+ }
+ 
+-int __attribute__((weak)) mtk_wcn_wlan_gen3_init()
++int __attribute__((weak)) mtk_wcn_wlan_gen3_init(void)
+ {
+ 	WMT_DETECT_PR_INFO("no impl. mtk_wcn_wlan_gen3_init\n");
+ 	return 0;
+ }
+ 
+-int __attribute__((weak)) mtk_wcn_wlan_gen2_init()
++int __attribute__((weak)) mtk_wcn_wlan_gen2_init(void)
+ {
+ 	WMT_DETECT_PR_INFO("no impl. mtk_wcn_wlan_gen2_init\n");
+ 	return 0;
+ }
+ 
+-int __attribute__((weak)) mtk_wcn_wmt_wifi_init()
++int __attribute__((weak)) mtk_wcn_wmt_wifi_init(void)
+ {
+ 	WMT_DETECT_PR_INFO("no impl. mtk_wcn_wmt_wifi_init\n");
+ 	return 0;
+diff --git a/wifi/common/common_main/core/psm_core.c b/wifi/common/common_main/core/psm_core.c
+index b3f7720..cf04735 100755
+--- a/wifi/common/common_main/core/psm_core.c
++++ b/wifi/common/common_main/core/psm_core.c
+@@ -1596,7 +1596,7 @@ INT32 stp_psm_disable_by_tx_rx_density(MTKSTP_PSM_T *stp_psm, INT32 dir)
+ 	return 0;
+ }
+ #else
+-static struct timeval tv_now, tv_end;
++static struct __kernel_old_timeval tv_now, tv_end;
+ static INT32 sample_start;
+ static INT32 tx_sum_len;
+ static INT32 rx_sum_len;
+@@ -1796,7 +1796,7 @@ INT32 stp_psm_check_sleep_enable(MTKSTP_PSM_T *stp_psm)
+ static INT32 _stp_psm_dbg_dmp_in(STP_PSM_RECORD_T *stp_psm_dbg, UINT32 flag, UINT32 line_num)
+ {
+ 	INT32 index = 0;
+-	struct timeval now;
++	struct __kernel_old_timeval now;
+ 
+ 	if (stp_psm_dbg) {
+ 		osal_lock_unsleepable_lock(&stp_psm_dbg->lock);
+@@ -1865,7 +1865,7 @@ static INT32 _stp_psm_dbg_out_printk(STP_PSM_RECORD_T *stp_psm_dbg)
+ static INT32 _stp_psm_opid_dbg_dmp_in(P_STP_PSM_OPID_RECORD p_opid_dbg, UINT32 opid, UINT32 line_num)
+ {
+ 	INT32 index = 0;
+-	struct timeval now;
++	struct __kernel_old_timeval now;
+ 	UINT64 ts;
+ 	ULONG nsec;
+ 
+diff --git a/wifi/common/common_main/core/wmt_ic_soc.c b/wifi/common/common_main/core/wmt_ic_soc.c
+index 08efa60..add099b 100644
+--- a/wifi/common/common_main/core/wmt_ic_soc.c
++++ b/wifi/common/common_main/core/wmt_ic_soc.c
+@@ -3295,13 +3295,13 @@ static INT32 mtk_wcn_soc_patch_dwn(UINT32 index)
+ 
+ 	/* Set FW patch buildtime into EMI for debugging */
+ 	if (emiInfo->emi_ram_mcu_buildtime_offset) {
+-		patchBuildTimeAddr = ioremap_nocache(emiInfo->emi_ap_phy_addr +
++		patchBuildTimeAddr = ioremap(emiInfo->emi_ap_phy_addr +
+ 				emiInfo->emi_patch_mcu_buildtime_offset, PATCH_BUILD_TIME_SIZE);
+ 		if (patchBuildTimeAddr) {
+ 			osal_memcpy_toio(patchBuildTimeAddr, cDataTime, PATCH_BUILD_TIME_SIZE);
+ 			iounmap(patchBuildTimeAddr);
+ 		} else
+-			WMT_ERR_FUNC("ioremap_nocache fail\n");
++			WMT_ERR_FUNC("ioremap fail\n");
+ 	}
+ done:
+ 	if (patchHdr != NULL) {
+@@ -3618,14 +3618,14 @@ INT32 mtk_wcn_soc_rom_patch_dwn(UINT32 ip_ver, UINT32 fw_ver)
+ 					(*mtk_wcn_wlan_emi_mpu_set_protection)(false);
+ 			}
+ 
+-			patchAddr = ioremap_nocache(emiInfo->emi_ap_phy_addr + patchEmiOffset, patchSize);
++			patchAddr = ioremap(emiInfo->emi_ap_phy_addr + patchEmiOffset, patchSize);
+ 			WMT_INFO_FUNC("physAddr=0x%x, size=%d virAddr=0x%p\n",
+ 				emiInfo->emi_ap_phy_addr + patchEmiOffset, patchSize, patchAddr);
+ 			if (patchAddr) {
+ 				osal_memcpy_toio(patchAddr, pPatchBuf, patchSize);
+ 				iounmap(patchAddr);
+ 			} else
+-				WMT_ERR_FUNC("ioremap_nocache fail\n");
++				WMT_ERR_FUNC("ioremap fail\n");
+ 
+ 			if (type == WMTDRV_TYPE_BT)
+ 				patchBuildTimeOffset = emiInfo->emi_ram_bt_buildtime_offset;
+@@ -3635,14 +3635,14 @@ INT32 mtk_wcn_soc_rom_patch_dwn(UINT32 ip_ver, UINT32 fw_ver)
+ 				patchBuildTimeOffset = emiInfo->emi_ram_mcu_buildtime_offset;
+ 			/* Set ROM patch buildtime into EMI for debugging */
+ 			if (patchBuildTimeOffset) {
+-				patchBuildTimeAddr = ioremap_nocache(emiInfo->emi_ap_phy_addr +
++				patchBuildTimeAddr = ioremap(emiInfo->emi_ap_phy_addr +
+ 						patchBuildTimeOffset, PATCH_BUILD_TIME_SIZE);
+ 				if (patchBuildTimeAddr) {
+ 					osal_memcpy_toio(patchBuildTimeAddr, cDataTime,
+ 							PATCH_BUILD_TIME_SIZE);
+ 					iounmap(patchBuildTimeAddr);
+ 				} else
+-					WMT_ERR_FUNC("ioremap_nocache fail\n");
++					WMT_ERR_FUNC("ioremap fail\n");
+ 			}
+ 
+ 			if (type == WMTDRV_TYPE_WIFI) {
+@@ -3696,14 +3696,14 @@ VOID mtk_wcn_soc_restore_wifi_cal_result(VOID)
+ 	WMT_STEP_DO_ACTIONS_FUNC(STEP_TRIGGER_POINT_BEFORE_RESTORE_CAL_RESULT);
+ 	/* Write Wi-Fi data to EMI */
+ 	if (gWiFiCalAddrOffset + gWiFiCalSize < emiInfo->emi_size) {
+-		wifiCalAddr = ioremap_nocache(emiInfo->emi_ap_phy_addr + gWiFiCalAddrOffset,
++		wifiCalAddr = ioremap(emiInfo->emi_ap_phy_addr + gWiFiCalAddrOffset,
+ 				gWiFiCalSize);
+ 		if (wifiCalAddr) {
+ 			osal_memcpy_toio(wifiCalAddr, gWiFiCalResult, gWiFiCalSize);
+ 			iounmap(wifiCalAddr);
+ 			WMT_STEP_DO_ACTIONS_FUNC(STEP_TRIGGER_POINT_AFTER_RESTORE_CAL_RESULT);
+ 		} else {
+-			WMT_ERR_FUNC("ioremap_nocache fail\n");
++			WMT_ERR_FUNC("ioremap fail\n");
+ 		}
+ 	}
+ 	if (mtk_wcn_wlan_emi_mpu_set_protection)
+@@ -3913,7 +3913,7 @@ static INT32 mtk_wcn_soc_calibration_backup(void)
+ 	WMT_STEP_DO_ACTIONS_FUNC(
+ 		STEP_TRIGGER_POINT_POWER_ON_AFTER_BT_WIFI_CALIBRATION);
+ 	gWiFiCalAddrOffset = wifiOffset;
+-	virWiFiAddrBase = ioremap_nocache(
++	virWiFiAddrBase = ioremap(
+ 				emiInfo->emi_ap_phy_addr + gWiFiCalAddrOffset,
+ 				gWiFiCalSize);
+ 	if (virWiFiAddrBase) {
+diff --git a/wifi/common/common_main/core/wmt_lib.c b/wifi/common/common_main/core/wmt_lib.c
+index 42d4739..dc7ad7d 100755
+--- a/wifi/common/common_main/core/wmt_lib.c
++++ b/wifi/common/common_main/core/wmt_lib.c
+@@ -1087,13 +1087,13 @@ static INT32 wmt_lib_is_bt_able_to_reset(VOID)
+ 	if (g_bt_no_acl_link)
+ 		return 1;
+ 	else if (g_bt_no_br_acl_link) {
+-		struct timeval time;
++		struct __kernel_old_timeval time;
+ 		ULONG local_time;
+ 		struct rtc_time tm;
+ 
+ 		osal_do_gettimeofday(&time);
+ 		local_time = (ULONG)(time.tv_sec - (sys_tz.tz_minuteswest * 60));
+-		rtc_time_to_tm(local_time, &tm);
++		rtc_time64_to_tm(local_time, &tm);
+ 		if (tm.tm_hour == 2)
+ 			return 1;
+ 	}
+@@ -1339,7 +1339,7 @@ static INT32 met_thread(void *pvData)
+ 	}
+ 	osal_memset(met_dump_buf, 0, MET_DUMP_SIZE);
+ 
+-	emi_met_base = ioremap_nocache(emi_info->emi_ap_phy_addr + emi_met_offset, emi_met_size);
++	emi_met_base = ioremap(emi_info->emi_ap_phy_addr + emi_met_offset, emi_met_size);
+ 	if (!emi_met_base) {
+ 		osal_free(met_dump_buf);
+ 		WMT_ERR_FUNC("met emi ioremap fail\n");
+diff --git a/wifi/common/common_main/linux/include/osal.h b/wifi/common/common_main/linux/include/osal.h
+index c006d2f..c33de89 100644
+--- a/wifi/common/common_main/linux/include/osal.h
++++ b/wifi/common/common_main/linux/include/osal.h
+@@ -404,7 +404,7 @@ INT32 osal_test_and_clear_bit(UINT32 bitOffset, P_OSAL_BIT_OP_VAR pData);
+ INT32 osal_test_and_set_bit(UINT32 bitOffset, P_OSAL_BIT_OP_VAR pData);
+ 
+ INT32 osal_gettimeofday(PINT32 sec, PINT32 usec);
+-void osal_do_gettimeofday(struct timeval *tv);
++void osal_do_gettimeofday(struct __kernel_old_timeval *tv);
+ INT32 osal_printtimeofday(const PUINT8 prefix);
+ VOID osal_get_local_time(PUINT64 sec, PULONG nsec);
+ UINT64 osal_elapsed_us(UINT64 ts, ULONG usec);
+diff --git a/wifi/common/common_main/linux/osal.c b/wifi/common/common_main/linux/osal.c
+index 0ef123a..de4f78d 100644
+--- a/wifi/common/common_main/linux/osal.c
++++ b/wifi/common/common_main/linux/osal.c
+@@ -1402,7 +1402,7 @@ INT32 osal_usleep_range(ULONG min, ULONG max)
+ INT32 osal_gettimeofday(PINT32 sec, PINT32 usec)
+ {
+ 	INT32 ret = 0;
+-	struct timeval now;
++	struct __kernel_old_timeval now;
+ 
+ 	osal_do_gettimeofday(&now);
+ 
+@@ -1419,7 +1419,7 @@ INT32 osal_gettimeofday(PINT32 sec, PINT32 usec)
+ 	return ret;
+ }
+ 
+-void osal_do_gettimeofday(struct timeval *tv)
++void osal_do_gettimeofday(struct __kernel_old_timeval *tv)
+ {
+ 	struct timespec64 now;
+ 
+diff --git a/wifi/common/common_main/linux/stp_dbg.c b/wifi/common/common_main/linux/stp_dbg.c
+index b8206d5..a011331 100644
+--- a/wifi/common/common_main/linux/stp_dbg.c
++++ b/wifi/common/common_main/linux/stp_dbg.c
+@@ -151,6 +151,7 @@ static struct genl_ops stp_dbg_gnl_ops_array[] = {
+ #endif
+ 		.doit = stp_dbg_nl_bind,
+ 		.dumpit = NULL,
++		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+ 	},
+ 	{
+ 		.cmd = STP_DBG_COMMAND_RESET,
+@@ -160,6 +161,7 @@ static struct genl_ops stp_dbg_gnl_ops_array[] = {
+ #endif
+ 		.doit = stp_dbg_nl_reset,
+ 		.dumpit = NULL,
++		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+ 	},
+ };
+ 
+@@ -1459,7 +1461,7 @@ static _osal_inline_ INT32 stp_dbg_fill_hdr(STP_DBG_HDR_T *hdr, INT32 type, INT3
+ 			      INT32 crc, INT32 dir, INT32 len, INT32 dbg_type)
+ {
+ 
+-	struct timeval now;
++	struct __kernel_old_timeval now;
+ 	UINT64 ts;
+ 	ULONG nsec;
+ 
+diff --git a/wifi/common/common_main/linux/stp_sdio.c b/wifi/common/common_main/linux/stp_sdio.c
+index 6c663ed..cce09ba 100644
+--- a/wifi/common/common_main/linux/stp_sdio.c
++++ b/wifi/common/common_main/linux/stp_sdio.c
+@@ -178,15 +178,15 @@ UINT32 g_stp_sdio_host_count;
+ static struct proc_dir_entry *gStpSdioRxDbgEntry;
+ static INT32 stp_sdio_rxdbg_cnt;
+ static struct stp_sdio_rxdbg stp_sdio_rxdbg_buffer[STP_SDIO_RXDBG_COUNT];
+-static struct timeval old = {0};
++static struct __kernel_old_timeval old = {0};
+ #define TX_NO_ACK_TIMEOUT_ASSERT 5 /* tx no ack timeout assert, unit:second*/
+ 
+ static ssize_t stp_sdio_rxdbg_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos);
+ static ssize_t stp_sdio_rxdbg_write(struct file *filp, const char __user *buf, size_t count,
+ 			     loff_t *f_pos);
+-static const struct file_operations stp_sdio_rxdbg_fops = {
+-	.read = stp_sdio_rxdbg_read,
+-	.write = stp_sdio_rxdbg_write,
++static const struct proc_ops stp_sdio_rxdbg_fops = {
++	.proc_read = stp_sdio_rxdbg_read,
++	.proc_write = stp_sdio_rxdbg_write,
+ };
+ 
+ #endif
+@@ -197,9 +197,9 @@ static struct proc_dir_entry *gStpSdioOwnEntry;
+ static ssize_t stp_sdio_own_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos);
+ static ssize_t stp_sdio_own_write(struct file *filp, const char __user *buf, size_t count,
+ 			   loff_t *f_pos);
+-static const struct file_operations stp_sdio_own_fops = {
+-	.read = stp_sdio_own_read,
+-	.write = stp_sdio_own_write,
++static const struct proc_ops stp_sdio_own_fops = {
++	.proc_read = stp_sdio_own_read,
++	.proc_write = stp_sdio_own_write,
+ };
+ 
+ #endif
+@@ -211,9 +211,9 @@ static struct proc_dir_entry *gStpSdioTxDbgEntry;
+ static ssize_t stp_sdio_txdbg_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos);
+ static ssize_t stp_sdio_txdbg_write(struct file *filp, const char __user *buf, size_t count,
+ 			     loff_t *f_pos);
+-static const struct file_operations stp_sdio_txdbg_fops = {
+-	.read = stp_sdio_txdbg_read,
+-	.write = stp_sdio_txdbg_write,
++static const struct proc_ops stp_sdio_txdbg_fops = {
++	.proc_read = stp_sdio_txdbg_read,
++	.proc_write = stp_sdio_txdbg_write,
+ };
+ 
+ #if STP_SDIO_TXDBG
+@@ -1744,7 +1744,7 @@ static VOID stp_sdio_tx_wkr(struct work_struct *work)
+ 	INT32 ret;
+ 	UINT32 idx;
+ 	MTK_WCN_STP_SDIO_PKT_BUF *pb;
+-	struct timeval now;
++	struct __kernel_old_timeval now;
+ 	UINT64 ts;
+ 	ULONG nsec;
+ 
+@@ -1948,7 +1948,7 @@ static VOID stp_sdio_tx_wkr(struct work_struct *work)
+ 	INT32 ret;
+ 	UINT32 idx;
+ 	MTK_WCN_STP_SDIO_PKT_BUF *pb;
+-	struct timeval now;
++	struct __kernel_old_timeval now;
+ 	UINT64 ts;
+ 	ULONG nsec;
+ 
+diff --git a/wifi/common/common_main/linux/stp_uart.c b/wifi/common/common_main/linux/stp_uart.c
+index 8803c23..8b672cb 100644
+--- a/wifi/common/common_main/linux/stp_uart.c
++++ b/wifi/common/common_main/linux/stp_uart.c
+@@ -44,9 +44,6 @@
+ 
+ #define HCIUARTSETPROTO        _IOW('U', 200, int)
+ 
+-#define MAX(a, b)        ((a) > (b) ? (a) : (b))
+-#define MIN(a, b)        ((a) < (b) ? (a) : (b))
+-
+ #define PFX                         "[UART] "
+ #define UART_LOG_LOUD                 4
+ #define UART_LOG_DBG                  3
+@@ -345,7 +342,7 @@ static VOID stp_uart_tty_receive(struct tty_struct *tty, const unsigned char *da
+ 	UINT32 how_much_put = 0;
+ #if 0
+ 	{
+-		struct timeval now;
++		struct __kernel_old_timeval now;
+ 
+ 		osal_do_gettimeofday(&now);
+ 		pr_warn("[+STP][  ][R] %4d --> sec = %lu, --> usec --> %lu\n",
+@@ -370,7 +367,7 @@ static VOID stp_uart_tty_receive(struct tty_struct *tty, const unsigned char *da
+ 
+ #if 0
+ 	{
+-		struct timeval now;
++		struct __kernel_old_timeval now;
+ 
+ 		osal_do_gettimeofday(&now);
+ 		pr_warn("[-STP][  ][R] %4d --> sec = %lu, --> usec --> %lu\n",
+@@ -530,7 +527,7 @@ static VOID stp_uart_tty_receive(struct tty_struct *tty, const PUINT8 data, PINT
+ 	}
+ #if 0
+ 	{
+-		struct timeval now;
++		struct __kernel_old_timeval now;
+ 
+ 		osal_do_gettimeofday(&now);
+ 	}
+@@ -549,7 +546,7 @@ static VOID stp_uart_tty_receive(struct tty_struct *tty, const PUINT8 data, PINT
+ 
+ #if 0
+ 	{
+-		struct timeval now;
++		struct __kernel_old_timeval now;
+ 
+ 		osal_do_gettimeofday(&now);
+ 	}
+@@ -593,7 +590,7 @@ static INT32 stp_uart_tty_ioctl(struct tty_struct *tty, struct file *file, UINT3
+  * We don't provide read/write/poll interface for user space.
+  */
+ static ssize_t stp_uart_tty_read(struct tty_struct *tty, struct file *file,
+-				 unsigned char __user *buf, size_t nr)
++				 unsigned char *buf, size_t nr, void **cookie, unsigned long offset)
+ {
+ 	return 0;
+ }
+diff --git a/wifi/common/common_main/linux/wmt_dbg.c b/wifi/common/common_main/linux/wmt_dbg.c
+index 4acd3b0..b9150cc 100644
+--- a/wifi/common/common_main/linux/wmt_dbg.c
++++ b/wifi/common/common_main/linux/wmt_dbg.c
+@@ -695,7 +695,7 @@ static INT32 wmt_dbg_ap_reg_read(INT32 par1, INT32 par2, INT32 par3)
+ 	PUINT8 ap_reg_base = NULL;
+ 
+ 	WMT_INFO_FUNC("AP register read, reg address:0x%x\n", par2);
+-	ap_reg_base = ioremap_nocache(par2, 0x4);
++	ap_reg_base = ioremap(par2, 0x4);
+ 	if (ap_reg_base) {
+ 		value = readl(ap_reg_base);
+ 		WMT_INFO_FUNC("AP register read, reg address:0x%x, value:0x%x\n", par2, value);
+@@ -713,7 +713,7 @@ static INT32 wmt_dbg_ap_reg_write(INT32 par1, INT32 par2, INT32 par3)
+ 
+ 	WMT_INFO_FUNC("AP register write, reg address:0x%x, value:0x%x\n", par2, par3);
+ 
+-	ap_reg_base = ioremap_nocache(par2, 0x4);
++	ap_reg_base = ioremap(par2, 0x4);
+ 	if (ap_reg_base) {
+ 		writel(par3, ap_reg_base);
+ 		value = readl(ap_reg_base);
+@@ -1586,10 +1586,9 @@ ssize_t wmt_dbg_write(struct file *filp, const char __user *buffer, size_t count
+ 
+ INT32 wmt_dev_dbg_setup(VOID)
+ {
+-	static const struct file_operations wmt_dbg_fops = {
+-		.owner = THIS_MODULE,
+-		.read = wmt_dbg_read,
+-		.write = wmt_dbg_write,
++	static const struct proc_ops wmt_dbg_fops = {
++		.proc_read = wmt_dbg_read,
++		.proc_write = wmt_dbg_write,
+ 	};
+ 	INT32 i_ret = 0;
+ 
+diff --git a/wifi/common/common_main/linux/wmt_dev.c b/wifi/common/common_main/linux/wmt_dev.c
+index 1a2266d..d85487c 100755
+--- a/wifi/common/common_main/linux/wmt_dev.c
++++ b/wifi/common/common_main/linux/wmt_dev.c
+@@ -73,10 +73,6 @@
+ 
+ #include "connsys_debug_utility.h"
+ 
+-//#ifdef OPLUS_BUG_STABILITY
+-#include <soc/oplus/system/oppo_project.h>
+-//#endif /* OPLUS_BUG_STABILITY */
+-
+ #ifdef CONFIG_COMPAT
+ #define COMPAT_WMT_IOCTL_SET_PATCH_NAME		_IOW(WMT_IOC_MAGIC, 4, compat_uptr_t)
+ #define COMPAT_WMT_IOCTL_LPBK_TEST		_IOWR(WMT_IOC_MAGIC, 8, compat_uptr_t)
+@@ -570,14 +566,14 @@ LONG wmt_dev_tm_temp_query(VOID)
+ 
+ 	static INT32 s_temp_table[HISTORY_NUM] = { 99 };	/* not query yet. */
+ 	static INT32 s_idx_temp_table;
+-	static struct timeval s_query_time;
+-	static struct timeval sync_log_last_time = {0, 0};
++	static struct __kernel_old_timeval s_query_time;
++	static struct __kernel_old_timeval sync_log_last_time = {0, 0};
+ 
+ 	INT32 temp_table[HISTORY_NUM];
+ 	INT32 idx_temp_table;
+-	struct timeval query_time;
++	struct __kernel_old_timeval query_time;
+ 
+-	struct timeval now_time;
++	struct __kernel_old_timeval now_time;
+ 	INT32 current_temp = 0;
+ 	INT32 index = 0;
+ 	LONG return_temp = 0;
+@@ -586,7 +582,7 @@ LONG wmt_dev_tm_temp_query(VOID)
+ 	/* Let us work on the copied version of function static variables */
+ 	osal_lock_unsleepable_lock(&g_temp_query_spinlock);
+ 	osal_memcpy(temp_table, s_temp_table, sizeof(s_temp_table));
+-	osal_memcpy(&query_time, &s_query_time, sizeof(struct timeval));
++	osal_memcpy(&query_time, &s_query_time, sizeof(struct __kernel_old_timeval));
+ 	idx_temp_table = s_idx_temp_table;
+ 	osal_unlock_unsleepable_lock(&g_temp_query_spinlock);
+ 
+@@ -719,12 +715,7 @@ LONG wmt_dev_tm_temp_query(VOID)
+ 
+ 	if (return_temp > MAX_TEMP) {
+ 		return_temp = MAX_TEMP;
+-		//#ifndef OPLUS_BUG_STABILITY
+-		//wmt_lib_trigger_assert_keyword(WMTDRV_TYPE_WMT, 36, "Temperature too high");
+-		//#else
+-		if (get_eng_version() != HIGH_TEMP_AGING)
+-			wmt_lib_trigger_assert_keyword(WMTDRV_TYPE_WMT, 36, "Temperature too high");
+-		//#endif /* OPLUS_BUG_STABILITY */
++		wmt_lib_trigger_assert_keyword(WMTDRV_TYPE_WMT, 36, "Temperature too high");
+ 	}
+ 
+ 	return return_temp;
+diff --git a/wifi/common/common_main/linux/wmt_proc_dbg.c b/wifi/common/common_main/linux/wmt_proc_dbg.c
+index bb26f2d..1f80096 100644
+--- a/wifi/common/common_main/linux/wmt_proc_dbg.c
++++ b/wifi/common/common_main/linux/wmt_proc_dbg.c
+@@ -144,10 +144,9 @@ static ssize_t wmt_dev_proc_for_dump_info_write(struct file *filp, const char __
+ 
+ INT32 wmt_dev_proc_for_dump_info_setup(VOID)
+ {
+-	static const struct file_operations wmt_dump_info_fops = {
+-		.owner = THIS_MODULE,
+-		.read = wmt_dev_proc_for_dump_info_read,
+-		.write = wmt_dev_proc_for_dump_info_write,
++	static const struct proc_ops wmt_dump_info_fops = {
++		.proc_read = wmt_dev_proc_for_dump_info_read,
++		.proc_write = wmt_dev_proc_for_dump_info_write,
+ 	};
+ 
+ 	osal_sleepable_lock_init(&g_dump_info_read_lock);
+@@ -239,10 +238,9 @@ static ssize_t wmt_dev_proc_for_aee_write(struct file *filp, const char __user *
+ 
+ INT32 wmt_dev_proc_for_aee_setup(VOID)
+ {
+-	static const struct file_operations wmt_aee_fops = {
+-		.owner = THIS_MODULE,
+-		.read = wmt_dev_proc_for_aee_read,
+-		.write = wmt_dev_proc_for_aee_write,
++	static const struct proc_ops wmt_aee_fops = {
++		.proc_read = wmt_dev_proc_for_aee_read,
++		.proc_write = wmt_dev_proc_for_aee_write,
+ 	};
+ 
+ 	osal_sleepable_lock_init(&g_aee_read_lock);
+diff --git a/wifi/common/common_main/linux/wmt_step.c b/wifi/common/common_main/linux/wmt_step.c
+index 48dda48..70a09c2 100755
+--- a/wifi/common/common_main/linux/wmt_step.c
++++ b/wifi/common/common_main/linux/wmt_step.c
+@@ -307,7 +307,7 @@ static unsigned char __iomem *wmt_step_get_emi_base_address(void)
+ {
+ 	if (g_step_env.emi_base_addr == NULL) {
+ 		if (gConEmiPhyBase)
+-			g_step_env.emi_base_addr = ioremap_nocache(gConEmiPhyBase, gConEmiSize);
++			g_step_env.emi_base_addr = ioremap(gConEmiPhyBase, gConEmiSize);
+ 	}
+ 
+ 	return g_step_env.emi_base_addr;
+@@ -1655,7 +1655,7 @@ static int wmt_step_do_write_register_action(struct step_reigster_info *p_reg_in
+ 			return -1;
+ 		}
+ 
+-		p_addr = ioremap_nocache(phy_addr, 0x4);
++		p_addr = ioremap(phy_addr, 0x4);
+ 		if (p_addr) {
+ 			CONSYS_REG_WRITE_MASK((unsigned int *)p_addr, p_reg_info->value, p_reg_info->mask);
+ 			WMT_INFO_FUNC(
+@@ -1725,7 +1725,7 @@ static int wmt_step_do_read_register_action(struct step_reigster_info *p_reg_inf
+ 			return -1;
+ 		}
+ 
+-		p_addr = ioremap_nocache(phy_addr, 0x4);
++		p_addr = ioremap(phy_addr, 0x4);
+ 		if (p_addr) {
+ 			if (snprintf(buf, WMT_STEP_REGISTER_ACTION_BUF_LEN,
+ 				"STEP show: reg read Phy addr(0x%08x): 0x%08x\n",
+diff --git a/wifi/common/common_main/linux/wmt_user_proc.c b/wifi/common/common_main/linux/wmt_user_proc.c
+index b03e20a..9557fc9 100644
+--- a/wifi/common/common_main/linux/wmt_user_proc.c
++++ b/wifi/common/common_main/linux/wmt_user_proc.c
+@@ -169,9 +169,8 @@ ssize_t wmt_user_proc_write(struct file *filp, const char __user *buffer, size_t
+ 
+ INT32 wmt_dev_user_proc_setup(VOID)
+ {
+-	static const struct file_operations wmt_user_proc_fops = {
+-		.owner = THIS_MODULE,
+-		.write = wmt_user_proc_write,
++	static const struct proc_ops wmt_user_proc_fops = {
++		.proc_write = wmt_user_proc_write,
+ 	};
+ 	INT32 i_ret = 0;
+ 
+diff --git a/wifi/common/common_main/platform/mt6771.c b/wifi/common/common_main/platform/mt6771.c
+index 5609b21..6432edc 100644
+--- a/wifi/common/common_main/platform/mt6771.c
++++ b/wifi/common/common_main/platform/mt6771.c
+@@ -412,7 +412,7 @@ static VOID consys_set_if_pinmux(MTK_WCN_BOOL enable)
+ 	UINT8 *consys_if_pinmux_reg_base = NULL;
+ 
+ 	/* Switch D die pinmux for connecting A die */
+-	consys_if_pinmux_reg_base = ioremap_nocache(CONSYS_IF_PINMUX_REG_BASE, 0x1000);
++	consys_if_pinmux_reg_base = ioremap(CONSYS_IF_PINMUX_REG_BASE, 0x1000);
+ 	if (!consys_if_pinmux_reg_base) {
+ 		WMT_PLAT_PR_ERR("consys_if_pinmux_reg_base(%x) ioremap fail\n", CONSYS_IF_PINMUX_REG_BASE);
+ 		return;
+@@ -695,7 +695,7 @@ static VOID consys_afe_reg_setting(VOID)
+ 	UINT8 *consys_afe_reg_base = NULL;
+ 
+ 	/*15.default no need,update ANA_WBG(AFE) CR if needed, CONSYS_AFE_REG */
+-	consys_afe_reg_base = ioremap_nocache(CONSYS_AFE_REG_BASE, 0x100);
++	consys_afe_reg_base = ioremap(CONSYS_AFE_REG_BASE, 0x100);
+ 	if (consys_afe_reg_base) {
+ 		CONSYS_REG_WRITE(consys_afe_reg_base + CONSYS_AFE_RG_WBG_PLL_03_OFFSET,
+ 				CONSYS_AFE_RG_WBG_PLL_03_VALUE);
+@@ -1044,7 +1044,7 @@ P_WMT_CONSYS_IC_OPS mtk_wcn_get_consys_ic_ops(VOID)
+ static INT32 consys_emi_coredump_remapping(UINT8 __iomem **addr, UINT32 enable)
+ {
+ 	if (enable) {
+-		*addr = ioremap_nocache(gConEmiPhyBase + CONSYS_EMI_COREDUMP_OFFSET, CONSYS_EMI_MEM_SIZE);
++		*addr = ioremap(gConEmiPhyBase + CONSYS_EMI_COREDUMP_OFFSET, CONSYS_EMI_MEM_SIZE);
+ 		if (*addr) {
+ 			WMT_PLAT_PR_INFO("COREDUMP EMI mapping OK virtual(0x%p) physical(0x%x)\n",
+ 					   *addr, (UINT32) gConEmiPhyBase + CONSYS_EMI_COREDUMP_OFFSET);
+@@ -1088,7 +1088,7 @@ static INT32 consys_dump_osc_state(P_CONSYS_STATE state)
+ 	UINT8 __iomem *addr;
+ 	UINT8 *mcu_top_misc_on_base = NULL;
+ 
+-	mcu_top_misc_on_base = ioremap_nocache(MCU_TOP_MISC_ON_BASE_ADDR, 0x200);
++	mcu_top_misc_on_base = ioremap(MCU_TOP_MISC_ON_BASE_ADDR, 0x200);
+ 
+ 	/* 6771 doesn't have reg_readable function, should check osc state from PMIC */
+ 	if (mcu_top_misc_on_base != 0) {
+@@ -1101,7 +1101,7 @@ static INT32 consys_dump_osc_state(P_CONSYS_STATE state)
+ 	}
+ 	iounmap(mcu_top_misc_on_base);
+ 
+-	addr = ioremap_nocache(gConEmiPhyBase + 0x66500, sizeof(struct consys_sw_state));
++	addr = ioremap(gConEmiPhyBase + 0x66500, sizeof(struct consys_sw_state));
+ 	if (addr)
+ 		memcpy_fromio(&state->sw_state, addr, sizeof(struct consys_sw_state));
+ 	else
+diff --git a/wifi/common/common_main/platform/mtk_wcn_consys_hw.c b/wifi/common/common_main/platform/mtk_wcn_consys_hw.c
+index d23280e..1aecef7 100755
+--- a/wifi/common/common_main/platform/mtk_wcn_consys_hw.c
++++ b/wifi/common/common_main/platform/mtk_wcn_consys_hw.c
+@@ -57,10 +57,6 @@
+ 
+ #include <linux/thermal.h>
+ 
+-#define OPLUS_MT6785_POWERINFO_STANDBY 1
+-#ifdef OPLUS_MT6785_POWERINFO_STANDBY
+-extern void oplus_rpmh_stats_statics(const char *rpm_name,u64 sleep_count,u64 sleep_time);
+-#endif/*OPLUS_MT6785_POWERINFO_STANDBY*/
+ /*******************************************************************************
+ *                              C O N S T A N T S
+ ********************************************************************************
+@@ -342,7 +338,7 @@ static INT32 mtk_wmt_probe(struct platform_device *pdev)
+ 		return iRet;
+ 
+ 	if (gConEmiPhyBase) {
+-		pConnsysEmiStart = ioremap_nocache(gConEmiPhyBase, gConEmiSize);
++		pConnsysEmiStart = ioremap(gConEmiPhyBase, gConEmiSize);
+ 		WMT_PLAT_PR_INFO("Clearing Connsys EMI (virtual(0x%p) physical(0x%pa)) %llu bytes\n",
+ 				   pConnsysEmiStart, &gConEmiPhyBase, gConEmiSize);
+ 		memset_io(pConnsysEmiStart, 0, gConEmiSize);
+@@ -534,18 +530,7 @@ INT32 mtk_wcn_consys_sleep_info_read_all_ctrl(P_CONSYS_STATE state)
+ 					((i == WMT_SLEEP_COUNT_WF) ? "WIFI" : ""),
+ 					((i == WMT_SLEEP_COUNT_GPS) ? "GPS" : ""),
+ 					sleep_counter, sleep_timer);
+-			#ifdef OPLUS_MT6785_POWERINFO_STANDBY
+-				if(i == WMT_SLEEP_COUNT_BT){
+-					oplus_rpmh_stats_statics("BT",sleep_counter,sleep_timer);
+-				}
+-				if(i == WMT_SLEEP_COUNT_WF){
+-					oplus_rpmh_stats_statics("WIFI",sleep_counter,sleep_timer);
+-				}
+-				if(i == WMT_SLEEP_COUNT_GPS){
+-					oplus_rpmh_stats_statics("GPS",sleep_counter,sleep_timer);
+-				}
+ 			}
+-			#endif/*OPLUS_MT6785_POWERINFO_STANDBY*/
+ 			len += osal_sprintf(strbuf + len - 1, "");
+ 			WMT_PLAT_PR_INFO("%s\n", strbuf);
+ 		} else {
+@@ -820,7 +805,7 @@ INT32 mtk_wcn_consys_detect_adie_chipid(UINT32 co_clock_type)
+ 	return chipid;
+ }
+ 
+-struct pinctrl *mtk_wcn_consys_get_pinctrl()
++struct pinctrl *mtk_wcn_consys_get_pinctrl(VOID)
+ {
+ 	return consys_pinctrl;
+ }
+diff --git a/wifi/common/debug_utility/connsys_debug_utility.c b/wifi/common/debug_utility/connsys_debug_utility.c
+index 4c9baf0..16d7357 100644
+--- a/wifi/common/debug_utility/connsys_debug_utility.c
++++ b/wifi/common/debug_utility/connsys_debug_utility.c
+@@ -685,7 +685,7 @@ static enum alarmtimer_restart alarm_timer_handler(struct alarm *alarm,
+ 	unsigned int tsec, tusec;
+ 
+ 	connsys_dedicated_log_get_utc_time(&tsec, &tusec);
+-	rtc_time_to_tm(tsec, &tm);
++	rtc_time64_to_tm(tsec, &tm);
+ 	pr_info("[connsys_log_alarm] alarm_timer triggered [%d-%02d-%02d %02d:%02d:%02d.%09u]"
+ 			, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday
+ 			, tm.tm_hour, tm.tm_min, tm.tm_sec, tusec);
+@@ -880,7 +880,7 @@ static int connlog_emi_init(phys_addr_t emi_base, const struct connlog_emi_confi
+ 	}
+ 
+ 	gDev.phyAddrEmiBase = emi_base;
+-	gDev.virAddrEmiLogBase = ioremap_nocache(gDev.phyAddrEmiBase +
++	gDev.virAddrEmiLogBase = ioremap(gDev.phyAddrEmiBase +
+ 		emi_config->emi_offset, emi_config->emi_size_total);
+ 	if (gDev.virAddrEmiLogBase) {
+ 		pr_info("EMI mapping OK virtual(0x%p) physical(0x%x)\n",

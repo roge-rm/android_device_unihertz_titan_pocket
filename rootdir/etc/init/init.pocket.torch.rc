@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Torch LED (kernel pocket_torch.c) for PocketTorch in system_server (FLASHLIGHT_PORT.md).
+on boot
+    chown system system /sys/devices/virtual/leds/torch/brightness
+    chmod 0660 /sys/devices/virtual/leds/torch/brightness

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# OCV run logger (battlog/). Start with setprop persist.vendor.pocket.battlog 1, stop with 0.
+# The logger sets done or abort itself at the end.
+on post-fs-data
+    mkdir /data/misc/pocket_battlog 0755 system system
+
+# A run cut off by a reboot doesn't start again by itself.
+on load_persist_props_action && property:persist.vendor.pocket.battlog=1
+    setprop persist.vendor.pocket.battlog stopped
+
+on property:sys.boot_completed=1 && property:persist.vendor.pocket.battlog=1
+    start pocket_battlog
+
+# init stop kills the logger, so the wakelock is released here.
+on property:persist.vendor.pocket.battlog=0
+    stop pocket_battlog
+    write /sys/power/wake_unlock pocket_battlog
+
+on property:persist.vendor.pocket.battlog=done
+    stop pocket_battlog
+    write /sys/power/wake_unlock pocket_battlog
+
+on property:persist.vendor.pocket.battlog=abort
+    stop pocket_battlog
+    write /sys/power/wake_unlock pocket_battlog
+
+service pocket_battlog /system_ext/bin/pocket_battlog
+    user system
+    group system wakelock
+    capabilities BLOCK_SUSPEND
+    disabled
+    oneshot

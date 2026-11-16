@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0
+// Foundation providers only; the MT6771 UFS host is not bound by this overlay.
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/infracfg_ao@10001000";
+		__overlay__ {
+			#reset-cells = <1>;
+		};
+	};
+	fragment@1 {
+		target-path = "/ufs_mphy@11fa0000";
+		__overlay__ {
+			compatible = "mediatek,mt6771-ufsphy";
+			// Captured infracfg phandle 0x15; original UniPro/MP gate IDs.
+			clocks = <0x15 62>, <0x15 64>;
+			clock-names = "unipro", "mp";
+			#phy-cells = <0>;
+		};
+	};
+};

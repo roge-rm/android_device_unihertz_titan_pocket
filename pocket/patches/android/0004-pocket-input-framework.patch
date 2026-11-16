@@ -1,0 +1,1039 @@
+--- a/frameworks/base/services/core/java/com/android/server/policy/PhoneWindowManager.java
++++ b/frameworks/base/services/core/java/com/android/server/policy/PhoneWindowManager.java
+@@ -486,6 +486,7 @@
+     ActivityTaskManagerInternal mActivityTaskManagerInternal;
+     AutofillManagerInternal mAutofillManagerInternal;
+     InputManager mInputManager;
++    private PocketKeyHooks mPocketKeys;
+     InputManagerInternal mInputManagerInternal;
+     DreamManagerInternal mDreamManagerInternal;
+     PowerManagerInternal mPowerManagerInternal;
+@@ -2569,6 +2570,8 @@
+         mActivityManagerService = injector.getActivityManagerService();
+         mActivityTaskManagerInternal = LocalServices.getService(ActivityTaskManagerInternal.class);
+         mInputManager = mContext.getSystemService(InputManager.class);
++        mPocketKeys = PocketKeyHooks.create(mContext,
++                () -> mHandler.sendEmptyMessage(MSG_TOGGLE_TORCH));
+         mInputManagerInternal = LocalServices.getService(InputManagerInternal.class);
+         mDreamManagerInternal = LocalServices.getService(DreamManagerInternal.class);
+         mPowerManagerInternal = LocalServices.getService(PowerManagerInternal.class);
+@@ -5131,6 +5134,12 @@
+                         event.getDeviceId() > 0)
+                 && event.getRepeatCount() == 0;
+ 
++        // Titan Pocket keyboard: light, FUNC1/FUNC2 presses and the pad key guard.
++        if (mPocketKeys != null
++                && mPocketKeys.interceptKeyBeforeQueueing(event, policyFlags, interactive)) {
++            return 0;
++        }
++
+         // Specific device key handling
+         if (dispatchKeyToKeyHandlers(event)) {
+             return 0;
+@@ -6722,6 +6731,7 @@
+         // In normal flow, systemReady is called before other system services are ready.
+         // So it is better not to bind keyguard here.
+         mKeyguardDelegate.onSystemReady();
++        if (mPocketKeys != null) mPocketKeys.systemReady(mSafeMode);
+ 
+         mVrManagerInternal = LocalServices.getService(VrManagerInternal.class);
+         if (mVrManagerInternal != null) {
+@@ -6763,6 +6773,7 @@
+             }
+         }
+         mLineageButtons = new LineageButtons(mContext);
++        if (mPocketKeys != null) mPocketKeys.systemBooted();
+         mSideFpsEventHandler.onFingerprintSensorReady();
+         startedWakingUp(Display.DEFAULT_DISPLAY_GROUP, PowerManager.WAKE_REASON_UNKNOWN);
+         finishedWakingUp(Display.DEFAULT_DISPLAY_GROUP, PowerManager.WAKE_REASON_UNKNOWN);
+@@ -7395,6 +7406,8 @@
+     }
+ 
+     private void toggleTorch() {
++        // Titan Pocket: no camera HAL, so the torch is PocketTorch's LED.
++        if (mPocketKeys != null && mPocketKeys.toggleTorch()) return;
+         cancelTorchOff();
+         final boolean origEnabled = mTorchEnabled;
+         try {
+--- a/frameworks/base/services/core/java/com/android/server/power/PowerManagerService.java
++++ b/frameworks/base/services/core/java/com/android/server/power/PowerManagerService.java
+@@ -1499,7 +1499,9 @@
+ 
+             mLightsManager = getLocalService(LightsManager.class);
+             mAttentionLight = mLightsManager.getLight(LightsManager.LIGHT_ID_ATTENTION);
+-            mButtonsLight = mLightsManager.getLight(LightsManager.LIGHT_ID_BUTTONS);
++            // On the Titan Pocket the keyboard light is PocketKeyHooks'.
++            mButtonsLight = com.android.server.policy.PocketKeyHooks.ownsButtonLight()
++                    ? null : mLightsManager.getLight(LightsManager.LIGHT_ID_BUTTONS);
+             mKeyboardLight = mLightsManager.getLight(LightsManager.LIGHT_ID_KEYBOARD);
+             updateDeviceConfigLocked();
+             mDeviceConfigProvider.addOnPropertiesChangedListener(BackgroundThread.getExecutor(),
+--- a/frameworks/base/services/core/Android.bp
++++ b/frameworks/base/services/core/Android.bp
+@@ -179,6 +179,7 @@
+     ],
+ 
+     static_libs: [
++        "PocketInputCore",
+         "android.frameworks.vibrator-V1-java", // AIDL
+         "android.frameworks.devicestate-V1-java", // AIDL
+         "android.hardware.authsecret-V1.0-java",
+--- a/frameworks/base/packages/SystemUI/src/com/android/systemui/statusbar/policy/FlashlightControllerImpl.java
++++ b/frameworks/base/packages/SystemUI/src/com/android/systemui/statusbar/policy/FlashlightControllerImpl.java
+@@ -17,7 +17,9 @@
+ package com.android.systemui.statusbar.policy;
+ 
+ import android.annotation.WorkerThread;
++import android.content.ContentResolver;
+ import android.content.pm.PackageManager;
++import android.database.ContentObserver;
+ import android.hardware.camera2.CameraAccessException;
+ import android.hardware.camera2.CameraCharacteristics;
+ import android.hardware.camera2.CameraManager;
+@@ -56,6 +58,10 @@
+     private static final int DISPATCH_ERROR = 0;
+     private static final int DISPATCH_CHANGED = 1;
+     private static final int DISPATCH_AVAILABILITY_CHANGED = 2;
++
++    // Titan Pocket: PocketTorch in system_server (Settings.Global switches).
++    private static final String POCKET_TORCH = "pocket_torch";
++    private static final String POCKET_TORCH_AVAILABLE = "pocket_torch_available";
+ 
+     private static final String ACTION_FLASHLIGHT_CHANGED =
+         "com.android.settings.flashlight.action.FLASHLIGHT_CHANGED";
+@@ -113,12 +119,37 @@
+             mCameraId.set(getCameraId());
+         } catch (Throwable e) {
+             Log.e(TAG, "Couldn't initialize.", e);
++            tryInitPocketTorch();
+             return;
+         }
+ 
+         if (mCameraId.get() != null) {
+             mCameraManager.registerTorchCallback(mExecutor, mTorchCallback);
+-        }
++        } else {
++            tryInitPocketTorch();
++        }
++    }
++
++    /** No camera has a flash: follow and set PocketTorch's switch instead. */
++    @WorkerThread
++    private void tryInitPocketTorch() {
++        ContentResolver resolver = mSecureSettings.getContentResolver();
++        if (Settings.Global.getInt(resolver, POCKET_TORCH_AVAILABLE, 0) != 1) return;
++        if (!mCameraId.compareAndSet(null, POCKET_TORCH)) return;
++        resolver.registerContentObserver(Settings.Global.getUriFor(POCKET_TORCH), false,
++                new ContentObserver(null) {
++                    @Override
++                    public void onChange(boolean selfChange) {
++                        mExecutor.execute(() -> pocketTorchChanged(resolver));
++                    }
++                });
++        pocketTorchChanged(resolver);
++    }
++
++    @WorkerThread
++    private void pocketTorchChanged(ContentResolver resolver) {
++        mTorchCallback.onTorchModeChanged(POCKET_TORCH,
++                Settings.Global.getInt(resolver, POCKET_TORCH, 0) != 0);
+     }
+ 
+     public void setFlashlight(boolean enabled) {
+@@ -130,6 +161,11 @@
+             if (mCameraId.get() == null) return;
+             synchronized (this) {
+                 if (mFlashlightEnabled != enabled) {
++                    if (POCKET_TORCH.equals(mCameraId.get())) {
++                        Settings.Global.putInt(mSecureSettings.getContentResolver(),
++                                POCKET_TORCH, enabled ? 1 : 0);
++                        return;
++                    }
+                     try {
+                         mCameraManager.setTorchMode(mCameraId.get(), enabled);
+                     } catch (CameraAccessException e) {
+--- a/frameworks/base/services/core/java/com/android/server/lights/LightsService.java
++++ b/frameworks/base/services/core/java/com/android/server/lights/LightsService.java
+@@ -336,8 +336,10 @@
+         @Override
+         public void setModes(int brightnessLevel) {
+             synchronized (this) {
++                // Only a new level is sent again: the vendor HAL turns the LED off
++                // and on for each write, so the battery light blinked on every update.
++                if (brightnessLevel != mBrightnessLevel) mModesUpdate = true;
+                 mBrightnessLevel = brightnessLevel;
+-                mModesUpdate = true;
+             }
+         }
+ 
+--- /dev/null
++++ b/frameworks/base/services/core/java/com/android/server/policy/PocketKeyHooks.java
+@@ -0,0 +1,350 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package com.android.server.policy;
++
++import android.app.KeyguardManager;
++import android.app.StatusBarManager;
++import android.content.ActivityNotFoundException;
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.database.ContentObserver;
++import android.database.Cursor;
++import android.hardware.input.InputManager;
++import android.net.Uri;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.os.PowerManager;
++import android.os.IBinder;
++import android.os.Process;
++import android.os.ServiceManager;
++import android.os.SystemClock;
++import android.os.SystemProperties;
++import android.os.UserHandle;
++import android.provider.DeviceConfig;
++import android.provider.Settings;
++import android.util.Slog;
++import android.util.SparseArray;
++import android.view.InputDevice;
++import android.view.KeyEvent;
++
++import com.android.server.LocalServices;
++import com.android.server.input.InputManagerService;
++import com.android.server.lights.LightsManager;
++import com.android.server.lights.LogicalLight;
++
++import org.lineageos.pocketinput.KeyboardSettings;
++import org.lineageos.pocketinput.KeyboardSettingsCodec;
++import org.lineageos.pocketinput.PocketKeyPolicy;
++
++import lineageos.providers.LineageSettings;
++
++/**
++ * Titan Pocket keyboard keys in every app (packages/PocketInput, KEYBOARD_PORT.md):
++ * the keyboard light, FUNC1 and FUNC2 short and long presses, the pad key guard, and
++ * FUNC1+FUNC2 held to restore the normal display mode (PocketDisplayMode).
++ * Only made when ro.pocket.input_policy is true.
++ *
++ * interceptKeyBeforeQueueing runs on the input dispatcher thread and only decides under
++ * the lock; the light, actions, timers and settings run on our own thread.
++ */
++public final class PocketKeyHooks {
++    private static final String TAG = "PocketKeys";
++    private static final String ENABLE_PROP = "ro.pocket.input_policy";
++    private static final String PAD_GUARD_PROP = "sys.pocket.pad_guard";
++    /** FUNC2, the red side key, on mtk-kpd (mtk-kpd.kl maps it to F14). */
++    private static final int RED_KEY_SCAN_CODE = 250;
++    private static final Uri SETTINGS =
++            Uri.parse("content://org.lineageos.pocketinput.settings/configuration");
++
++    private final Context mContext;
++    private final Runnable mToggleTorch;
++    private final Handler mHandler;
++    private final PocketKeyPolicy mPolicy;
++    /** Device ID to source, filled on first sight. IDs aren't reused while running. */
++    private final SparseArray<PocketKeyPolicy.Source> mSources = new SparseArray<>();
++    private final Runnable mTimer = this::onTimer;
++    private final PocketTorch mTorch;
++    private final PocketDisplayMode mDisplayMode;
++    private LogicalLight mLight;
++    /** The red key went down before systemReady. Set on the input dispatcher thread. */
++    private volatile boolean mRedKeySeen;
++    private volatile boolean mSystemReady;
++
++    /** PowerManagerService leaves the button light to us when this is true. */
++    public static boolean ownsButtonLight() {
++        return SystemProperties.getBoolean(ENABLE_PROP, false);
++    }
++
++    static PocketKeyHooks create(Context context, Runnable toggleTorch) {
++        return ownsButtonLight() ? new PocketKeyHooks(context, toggleTorch) : null;
++    }
++
++    private PocketKeyHooks(Context context, Runnable toggleTorch) {
++        mContext = context;
++        mToggleTorch = toggleTorch;
++        HandlerThread thread = new HandlerThread(TAG, Process.THREAD_PRIORITY_DISPLAY);
++        thread.start();
++        mHandler = new Handler(thread.getLooper());
++        mTorch = new PocketTorch(context, mHandler);
++        mDisplayMode = new PocketDisplayMode(context, mHandler);
++        // Defaults (light on, 3.5 s) until the settings app answers.
++        mPolicy = new PocketKeyPolicy(KeyboardSettings.defaults(), SystemClock::uptimeMillis,
++                new PocketKeyPolicy.Sink() {
++                    @Override public void setLight(boolean on) {
++                        mHandler.post(() -> writeLight(on));
++                    }
++                    @Override public void runAction(String action) {
++                        mHandler.post(() -> run(action));
++                    }
++                    @Override public void restoreDisplay() {
++                        mHandler.post(mDisplayMode::restoreNormal);
++                    }
++                });
++    }
++
++    /**
++     * The boot display mode, normal or the kept one, before the launcher starts, then follow
++     * its setting. safeMode is PhoneWindowManager's.
++     */
++    void systemReady(boolean safeMode) {
++        boolean redKey = redKeyDown() || mRedKeySeen;
++        mSystemReady = true;
++        mHandler.post(() -> {
++            try {
++                mDisplayMode.systemReady(safeMode, redKey);
++            } catch (RuntimeException e) {
++                Slog.w(TAG, "Display mode not started", e);
++            }
++        });
++    }
++
++    /**
++     * Whether the red key is down now, from the kernel's key state of the keypad. Input devices
++     * are open by now: WindowManager waits for them when it checks for safe mode keys, earlier.
++     * InputManagerService is in this process, so its binder is the service object itself.
++     */
++    private boolean redKeyDown() {
++        try {
++            IBinder binder = ServiceManager.getService(Context.INPUT_SERVICE);
++            if (!(binder instanceof InputManagerService)) return false;
++            InputManagerService service = (InputManagerService) binder;
++            InputManager input = mContext.getSystemService(InputManager.class);
++            if (input != null) {
++                for (int id : input.getInputDeviceIds()) {
++                    InputDevice device = input.getInputDevice(id);
++                    if (device != null && "mtk-kpd".equals(device.getName())) {
++                        return service.getScanCodeState(id, InputDevice.SOURCE_ANY,
++                                RED_KEY_SCAN_CODE) > 0;
++                    }
++                }
++            }
++            return service.getKeyCodeState(-1, InputDevice.SOURCE_ANY, KeyEvent.KEYCODE_F14) > 0;
++        } catch (RuntimeException e) {
++            Slog.w(TAG, "Couldn't read the red key", e);
++            return false;
++        }
++    }
++
++    /**
++     * Once per device: the battery light stays on green when full, as stock. Lineage turns it
++     * off when full unless battery_light_full_charge_disabled is 0. A choice already made in
++     * Settings is kept, and the marker stops this running again.
++     */
++    private void seedBatteryLight() {
++        final String marker = "pocket_battery_light_seeded";
++        final String key = LineageSettings.System.BATTERY_LIGHT_FULL_CHARGE_DISABLED;
++        try {
++            if (Settings.Global.getInt(mContext.getContentResolver(), marker, 0) == 1) return;
++            if (LineageSettings.System.getStringForUser(mContext.getContentResolver(), key,
++                    UserHandle.USER_SYSTEM) == null) {
++                LineageSettings.System.putIntForUser(mContext.getContentResolver(), key, 0,
++                        UserHandle.USER_SYSTEM);
++            }
++            Settings.Global.putInt(mContext.getContentResolver(), marker, 1);
++        } catch (RuntimeException e) {
++            Slog.w(TAG, "Battery light setting not seeded", e);
++        }
++    }
++
++    /**
++     * Once per device: SystemUI's falsing check wants a 1.5 in swipe to unlock, 68 % of this
++     * 720 px screen, so lock screen swipes often fail. 0.5 in or 40 % of the screen is enough.
++     * Values already set are kept, and the marker stops this running again.
++     */
++    private void seedSwipeDistance() {
++        final String marker = "pocket_swipe_distance_seeded";
++        try {
++            if (Settings.Global.getInt(mContext.getContentResolver(), marker, 0) == 1) return;
++            seedSystemUi("brightline_falsing_distance_vertical_fling_threshold_in", "0.5");
++            seedSystemUi("brightline_falsing_distance_screen_fraction_max_distance", "0.4");
++            Settings.Global.putInt(mContext.getContentResolver(), marker, 1);
++        } catch (RuntimeException e) {
++            Slog.w(TAG, "Swipe distance not seeded", e);
++        }
++    }
++
++    private static void seedSystemUi(String name, String value) {
++        if (DeviceConfig.getProperty(DeviceConfig.NAMESPACE_SYSTEMUI, name) == null) {
++            DeviceConfig.setProperty(DeviceConfig.NAMESPACE_SYSTEMUI, name, value, false);
++        }
++    }
++
++    /** Settings, screen off and user switches, once providers and broadcasts work. */
++    void systemBooted() {
++        mHandler.post(() -> {
++            mContext.getContentResolver().registerContentObserver(SETTINGS, false,
++                    new ContentObserver(mHandler) {
++                        @Override public void onChange(boolean selfChange) { loadSettings(); }
++                    }, UserHandle.USER_SYSTEM);
++            mContext.registerReceiver(new BroadcastReceiver() {
++                @Override public void onReceive(Context context, Intent intent) {
++                    synchronized (mPolicy) {
++                        mPolicy.setInteractive(false);
++                    }
++                    schedule();
++                    mDisplayMode.screenOff();
++                }
++            }, new IntentFilter(Intent.ACTION_SCREEN_OFF), null, mHandler);
++            mContext.registerReceiver(new BroadcastReceiver() {
++                @Override public void onReceive(Context context, Intent intent) {
++                    mDisplayMode.userSwitched();
++                }
++            }, new IntentFilter(Intent.ACTION_USER_SWITCHED), null, mHandler);
++            loadSettings();
++            mTorch.systemBooted();
++            seedBatteryLight();
++            seedSwipeDistance();
++        });
++    }
++
++    /**
++     * PhoneWindowManager's torch toggle (the flashlight action, power long press).
++     * Returns false when there is no torch LED, so it falls back to the camera.
++     */
++    boolean toggleTorch() {
++        return mTorch.toggle();
++    }
++
++    /** Returns true to drop the event. Injected and virtual keys are left alone. */
++    boolean interceptKeyBeforeQueueing(KeyEvent event, int policyFlags, boolean interactive) {
++        if ((policyFlags & WindowManagerPolicy.FLAG_INJECTED) != 0) return false;
++        PocketKeyPolicy.Source source = source(event.getDeviceId());
++        if (source == PocketKeyPolicy.Source.OTHER) return false;
++        int keyCode = event.getKeyCode();
++        boolean bootHold = !mSystemReady && source == PocketKeyPolicy.Source.KEYPAD
++                && keyCode == KeyEvent.KEYCODE_F14 && event.getAction() == KeyEvent.ACTION_DOWN;
++        if (bootHold) mRedKeySeen = true;
++        boolean drop;
++        synchronized (mPolicy) {
++            if (event.getAction() == KeyEvent.ACTION_DOWN) {
++                drop = mPolicy.onKeyDown(source, keyCode, event.getRepeatCount() != 0,
++                        event.getEventTime(), interactive,
++                        () -> SystemProperties.get(PAD_GUARD_PROP, ""));
++                // The red key held at boot only picks a normal boot, so its press runs nothing.
++                if (bootHold) mPolicy.cancelHold(keyCode);
++            } else if (event.getAction() == KeyEvent.ACTION_UP) {
++                drop = mPolicy.onKeyUp(source, keyCode, event.isCanceled());
++            } else {
++                drop = false;
++            }
++        }
++        schedule();
++        return drop;
++    }
++
++    private PocketKeyPolicy.Source source(int deviceId) {
++        synchronized (mSources) {
++            PocketKeyPolicy.Source known = mSources.get(deviceId);
++            if (known != null) return known;
++        }
++        PocketKeyPolicy.Source source = PocketKeyPolicy.Source.OTHER;
++        InputManager input = mContext.getSystemService(InputManager.class);
++        InputDevice device = input != null ? input.getInputDevice(deviceId) : null;
++        if (device == null) return source;
++        if (!device.isVirtual() && !device.isExternal()) {
++            if ("aw9523-key".equals(device.getName())) source = PocketKeyPolicy.Source.KEYBOARD;
++            else if ("mtk-kpd".equals(device.getName())) source = PocketKeyPolicy.Source.KEYPAD;
++        }
++        synchronized (mSources) {
++            mSources.put(deviceId, source);
++        }
++        return source;
++    }
++
++    /** Under the lock, so two threads can't leave a stale timer. */
++    private void schedule() {
++        synchronized (mPolicy) {
++            long at = mPolicy.nextTimerMillis();
++            mHandler.removeCallbacks(mTimer);
++            if (at >= 0) mHandler.postAtTime(mTimer, at);
++        }
++    }
++
++    private void onTimer() {
++        synchronized (mPolicy) {
++            mPolicy.onTimer(SystemClock.uptimeMillis());
++        }
++        schedule();
++    }
++
++    /** The lights HAL's BUTTONS light, /sys/class/leds/button-backlight on this phone. */
++    private void writeLight(boolean on) {
++        if (mLight == null) {
++            LightsManager lights = LocalServices.getService(LightsManager.class);
++            if (lights != null) mLight = lights.getLight(LightsManager.LIGHT_ID_BUTTONS);
++            if (mLight == null) return;
++        }
++        mLight.setBrightness(on ? PowerManager.BRIGHTNESS_MAX : PowerManager.BRIGHTNESS_OFF_FLOAT);
++    }
++
++    private void loadSettings() {
++        KeyboardSettings settings = null;
++        try (Cursor cursor = mContext.getContentResolver().query(SETTINGS, null, null, null, null)) {
++            if (cursor != null && cursor.moveToFirst()) {
++                settings = KeyboardSettingsCodec.decode(cursor.getString(0));
++            }
++        } catch (RuntimeException e) {
++            Slog.w(TAG, "Pocket keyboard settings unavailable, keeping the last ones", e);
++        }
++        if (settings == null) return;
++        synchronized (mPolicy) {
++            mPolicy.setSettings(settings);
++        }
++        schedule();
++    }
++
++    /** Registered action IDs, the same names the settings app saves. */
++    private void run(String action) {
++        if ("flashlight".equals(action)) {
++            mToggleTorch.run();
++            return;
++        }
++        KeyguardManager keyguard = mContext.getSystemService(KeyguardManager.class);
++        if (keyguard == null || keyguard.isKeyguardLocked()) return;
++        if ("notifications".equals(action)) {
++            StatusBarManager bar = mContext.getSystemService(StatusBarManager.class);
++            if (bar != null) bar.expandNotificationsPanel();
++            return;
++        }
++        Intent intent;
++        if ("browser".equals(action)) {
++            intent = Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_BROWSER);
++        } else if ("camera".equals(action)) {
++            // MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA; MediaStore is in an apex services.core doesn't link.
++            intent = new Intent("android.media.action.STILL_IMAGE_CAMERA");
++        } else if ("settings".equals(action)) {
++            intent = new Intent(Settings.ACTION_SETTINGS);
++        } else {
++            return;
++        }
++        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++        try {
++            mContext.startActivityAsUser(intent, UserHandle.CURRENT);
++        } catch (ActivityNotFoundException | SecurityException e) {
++            Slog.w(TAG, "No activity for " + action);
++        }
++    }
++}
+--- /dev/null
++++ b/frameworks/base/services/core/java/com/android/server/policy/PocketTorch.java
+@@ -0,0 +1,81 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package com.android.server.policy;
++
++import android.content.ContentResolver;
++import android.content.Context;
++import android.database.ContentObserver;
++import android.os.Handler;
++import android.provider.Settings;
++import android.util.Slog;
++
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++
++/**
++ * Titan Pocket torch without a camera HAL (FLASHLIGHT_PORT.md). The kernel's torch
++ * LED (pocket_torch.c) lights both MT6370 flash LEDs at the stock torch currents.
++ *
++ * Settings.Global pocket_torch (0 or 1) is the one switch: SystemUI's flashlight tile
++ * and PhoneWindowManager's torch toggle (FUNC keys, power long press) both write it,
++ * and this writes the LED on every change. pocket_torch_available tells SystemUI to
++ * use it when no camera has a flash. Runs on the PocketKeyHooks thread.
++ */
++final class PocketTorch {
++    private static final String TAG = "PocketTorch";
++    // The real path: /sys/class/leds/torch is a sysfs_leds link system_server can't follow.
++    private static final Path NODE = Paths.get("/sys/devices/virtual/leds/torch/brightness");
++    static final String SETTING = "pocket_torch";
++    static final String AVAILABLE = "pocket_torch_available";
++
++    private final ContentResolver mResolver;
++    private final Handler mHandler;
++    private volatile boolean mAvailable;
++
++    PocketTorch(Context context, Handler handler) {
++        mResolver = context.getContentResolver();
++        mHandler = handler;
++    }
++
++    /** Off at boot, then follow the setting. Call once settings work. */
++    void systemBooted() {
++        mAvailable = Files.isWritable(NODE);
++        Settings.Global.putInt(mResolver, SETTING, 0);
++        Settings.Global.putInt(mResolver, AVAILABLE, mAvailable ? 1 : 0);
++        if (!mAvailable) {
++            Slog.w(TAG, NODE + " not writable, no torch");
++            return;
++        }
++        mResolver.registerContentObserver(Settings.Global.getUriFor(SETTING), false,
++                new ContentObserver(mHandler) {
++                    @Override public void onChange(boolean selfChange) { apply(); }
++                });
++        apply();
++    }
++
++    /** Returns false when there is no torch, so the caller can try the camera. */
++    boolean toggle() {
++        if (!mAvailable) return false;
++        mHandler.post(() -> Settings.Global.putInt(mResolver, SETTING,
++                isOn() ? 0 : 1));
++        return true;
++    }
++
++    boolean isOn() {
++        return Settings.Global.getInt(mResolver, SETTING, 0) != 0;
++    }
++
++    private void apply() {
++        boolean on = isOn();
++        try (FileOutputStream out = new FileOutputStream(NODE.toFile())) {
++            out.write((on ? "1" : "0").getBytes(StandardCharsets.US_ASCII));
++        } catch (IOException e) {
++            Slog.w(TAG, "Couldn't turn the torch " + (on ? "on" : "off"), e);
++        }
++    }
++}
+--- /dev/null
++++ b/frameworks/base/services/core/java/com/android/server/policy/PocketDisplayMode.java
+@@ -0,0 +1,431 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package com.android.server.policy;
++
++import android.app.ActivityManager;
++import android.app.AlertDialog;
++import android.content.BroadcastReceiver;
++import android.content.ContentResolver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.database.ContentObserver;
++import android.graphics.Point;
++import android.hardware.display.DisplayManager;
++import android.os.Environment;
++import android.os.Handler;
++import android.os.RemoteException;
++import android.os.SystemClock;
++import android.provider.Settings;
++import android.util.AtomicFile;
++import android.util.Slog;
++import android.view.ContextThemeWrapper;
++import android.view.Display;
++import android.view.DisplayInfo;
++import android.view.Gravity;
++import android.view.IWindowManager;
++import android.view.Window;
++import android.view.WindowManager;
++import android.view.WindowManagerGlobal;
++import android.window.WindowContext;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++
++import org.lineageos.pocketinput.DisplayModeBoot;
++import org.lineageos.pocketinput.DisplayModeSwitch;
++import org.lineageos.pocketinput.DisplayModes;
++
++/**
++ * Titan Pocket display modes (MINI_MODE_CONTRACT.md). Settings.Global pocket_display_mode
++ * holds the active mode ID (pocket_display_mode_custom the custom size), written by the
++ * Pocket keyboard app and its Quick Settings tile; this forces that mode's size and density
++ * on the default display, as stock's MiniModeController does.
++ *
++ * Every switch from the settings asks "Keep this display mode?" in a system dialog, shown
++ * once the new size is on. DisplayModeSwitch (PocketInputCore) holds the state and the 10 s
++ * timer runs here, so it reverts without the dialog or the app; Revert, the timeout and
++ * screen off put back the last kept mode and write the settings back to it. Boot, the key
++ * combo and a user switch go to normal without asking.
++ *
++ * Each kept mode is saved in pocket_display_mode_kept. With pocket_display_mode_boot 1,
++ * systemReady puts it on without asking instead of normal (DisplayModeBoot), unless it's safe
++ * mode, the red key was held or the crash guard trips; the guard's count is a file in
++ * /data/system, written with fsync so it survives a crash.
++ *
++ * Density is per user. When a mode first goes on, pocket_display_mode_restore keeps
++ * "user saved mode": the user who turned it on, their own forced density before it (Display
++ * size in Settings, 0 for none) and the density the mode set. Back to normal clears the
++ * forced size and, for that user, puts the saved density back unless they changed it since,
++ * then empties the key, meaning nothing to undo. Everything runs on the PocketKeyHooks
++ * thread, the dialog too.
++ *
++ * A revert leaves the settings alone if they changed since the switch began, so a pick racing
++ * the timeout starts its own switch. ACTION_SHUTDOWN clears the crash guard's count.
++ */
++final class PocketDisplayMode implements DisplayModeSwitch.Sink, DisplayModeBoot.Store {
++    private static final String TAG = "PocketDisplayMode";
++    private static final String RESTORE = "pocket_display_mode_restore";
++    private static final int DISPLAY = Display.DEFAULT_DISPLAY;
++    /** Above the lock screen, as the legacy power menu. */
++    private static final int DIALOG_TYPE = WindowManager.LayoutParams.TYPE_KEYGUARD_DIALOG;
++    /** Wait up to 20 x 100 ms for the new size before showing the dialog anyway. */
++    private static final int SHOW_TRIES = 20;
++    private static final long SHOW_POLL_MILLIS = 100;
++    private static final String STARTS_FILE = "pocket_display_mode_starts";
++
++    private final Context mContext;
++    private final ContentResolver mResolver;
++    private final Handler mHandler;
++    private final DisplayModeSwitch mSwitch;
++    private final Runnable mTimer = this::onTimer;
++    private final Runnable mShow = this::showWhenReady;
++    private final Runnable mTick = this::tick;
++    private final DisplayModeBoot mBoot;
++    private final Runnable mStable = this::onStable;
++    private final AtomicFile mStarts;
++    private AlertDialog mDialog;
++    private Context mDialogContext;
++    private int mShowTries;
++
++    /** context is PhoneWindowManager's, the system UI context of the default display. */
++    PocketDisplayMode(Context context, Handler handler) {
++        mContext = context;
++        mResolver = context.getContentResolver();
++        mHandler = handler;
++        mSwitch = new DisplayModeSwitch(SystemClock::uptimeMillis, this);
++        mBoot = new DisplayModeBoot(SystemClock::uptimeMillis, this);
++        mStarts = new AtomicFile(new File(Environment.getDataSystemDirectory(), STARTS_FILE));
++    }
++
++    /**
++     * The kept mode or normal at boot, then follow the settings. Call once settings and
++     * WindowManager work. keyHeld: the red key was down during boot.
++     */
++    void systemReady(boolean safeMode, boolean keyHeld) {
++        DisplayModes.Mode kept = DisplayModes.kept(
++                Settings.Global.getString(mResolver, DisplayModes.KEPT_SETTING));
++        boolean bootOn = Settings.Global.getInt(mResolver, DisplayModeBoot.SETTING, 0) == 1;
++        DisplayModeBoot.Outcome outcome = mBoot.start(bootOn, kept, safeMode, keyHeld);
++        Slog.i(TAG, "Boot display mode: " + outcome + (bootOn ? ", kept " + kept : ""));
++        if (outcome == DisplayModeBoot.Outcome.NORMAL) {
++            mSwitch.force(null);
++        } else {
++            mSwitch.boot(outcome == DisplayModeBoot.Outcome.APPLY ? kept : null);
++        }
++        if (mBoot.stableAt() >= 0) mHandler.postAtTime(mStable, mBoot.stableAt());
++        ContentObserver observer = new ContentObserver(mHandler) {
++            @Override public void onChange(boolean selfChange) { settingsChanged(); }
++        };
++        mResolver.registerContentObserver(Settings.Global.getUriFor(DisplayModes.SETTING), false,
++                observer);
++        mResolver.registerContentObserver(
++                Settings.Global.getUriFor(DisplayModes.CUSTOM_SETTING), false, observer);
++        // ShutdownThread sends this on every shutdown and reboot, never on a crash.
++        mContext.registerReceiver(new BroadcastReceiver() {
++            @Override public void onReceive(Context context, Intent intent) {
++                mHandler.removeCallbacks(mStable);
++                mBoot.shutdown();
++            }
++        }, new IntentFilter(Intent.ACTION_SHUTDOWN), null, mHandler);
++    }
++
++    /** The key combo: normal at once, applied directly in case the observer is stuck. */
++    void restoreNormal() {
++        Slog.i(TAG, "Key combo, back to the normal display");
++        mSwitch.force(null);
++        schedule();
++    }
++
++    /** A user switch: a mode is for the user who turned it on, so back to normal. */
++    void userSwitched() {
++        mSwitch.force(null);
++        schedule();
++    }
++
++    /** Screen off while asking reverts. */
++    void screenOff() {
++        mSwitch.screenOff();
++        schedule();
++    }
++
++    private void onStable() {
++        mBoot.onTimer();
++        if (mBoot.stableAt() >= 0) mHandler.postAtTime(mStable, mBoot.stableAt());
++    }
++
++    @Override public int starts() {
++        try {
++            if (!mStarts.exists()) return 0;
++            return Integer.parseInt(new String(mStarts.readFully(), StandardCharsets.UTF_8).trim());
++        } catch (IOException | NumberFormatException e) {
++            Slog.w(TAG, "Bad " + STARTS_FILE + ", counted as 0", e);
++            return 0;
++        }
++    }
++
++    /** AtomicFile.finishWrite syncs the file, so the count is on disk before the mode goes on. */
++    @Override public void setStarts(int starts) {
++        if (starts == 0) {
++            mStarts.delete();
++            return;
++        }
++        FileOutputStream out = null;
++        try {
++            out = mStarts.startWrite();
++            out.write(Integer.toString(starts).getBytes(StandardCharsets.UTF_8));
++            mStarts.finishWrite(out);
++        } catch (IOException e) {
++            Slog.w(TAG, "Couldn't write " + STARTS_FILE, e);
++            mStarts.failWrite(out);
++        }
++    }
++
++    @Override public void disableBoot() {
++        Slog.w(TAG, "System server started again twice after the boot display mode, turning "
++                + DisplayModeBoot.SETTING + " off");
++        Settings.Global.putInt(mResolver, DisplayModeBoot.SETTING, 0);
++    }
++
++    private void settingsChanged() {
++        mSwitch.request(DisplayModes.resolve(
++                Settings.Global.getString(mResolver, DisplayModes.SETTING),
++                Settings.Global.getString(mResolver, DisplayModes.CUSTOM_SETTING)));
++        schedule();
++    }
++
++    private void schedule() {
++        mHandler.removeCallbacks(mTimer);
++        long at = mSwitch.deadline();
++        if (at >= 0) mHandler.postAtTime(mTimer, at);
++    }
++
++    private void onTimer() {
++        mSwitch.onTimer();
++        if (!mSwitch.pending()) Slog.i(TAG, "Display mode not kept, reverted");
++        schedule();
++    }
++
++    @Override public void apply(DisplayModes.Mode mode) {
++        if (mode == null) {
++            restore();
++        } else {
++            applyMode(mode);
++        }
++    }
++
++    /** Settings back to the mode; our own observer then finds nothing to change. */
++    @Override public void store(DisplayModes.Mode mode) {
++        if (mode != null && DisplayModes.CUSTOM.equals(mode.id)) {
++            putIfChanged(DisplayModes.CUSTOM_SETTING, DisplayModes.customValue(mode));
++        }
++        putIfChanged(DisplayModes.SETTING, mode != null ? mode.id : DisplayModes.NORMAL);
++    }
++
++    @Override public void revertStore(DisplayModes.Mode mode, DisplayModes.Mode asked) {
++        DisplayModes.Mode now = DisplayModes.resolve(
++                Settings.Global.getString(mResolver, DisplayModes.SETTING),
++                Settings.Global.getString(mResolver, DisplayModes.CUSTOM_SETTING));
++        boolean unchanged = asked == null ? now == null
++                : now != null && now.id.equals(asked.id) && DisplayModes.same(now, asked);
++        if (unchanged) {
++            store(mode);
++        } else {
++            Slog.i(TAG, "Display mode changed while reverting, left as " + now);
++        }
++    }
++
++    @Override public void remember(DisplayModes.Mode mode) {
++        putIfChanged(DisplayModes.KEPT_SETTING, DisplayModes.keptValue(mode));
++    }
++
++    private void putIfChanged(String key, String value) {
++        if (!value.equals(Settings.Global.getString(mResolver, key))) {
++            Settings.Global.putString(mResolver, key, value);
++        }
++    }
++
++    @Override public void showDialog() {
++        dismissDialog();
++        mShowTries = 0;
++        mHandler.post(mShow);
++    }
++
++    @Override public void hideDialog() {
++        dismissDialog();
++    }
++
++    /** Shows the dialog once the display has the new size and density, so it's laid out in it. */
++    private void showWhenReady() {
++        if (!mSwitch.pending()) return;
++        if (!displayReady() && ++mShowTries < SHOW_TRIES) {
++            mHandler.postDelayed(mShow, SHOW_POLL_MILLIS);
++            return;
++        }
++        try {
++            // A window context takes the display's configuration now, with the new density.
++            mDialogContext = mContext.createWindowContext(DIALOG_TYPE, null);
++            Context themed = new ContextThemeWrapper(mDialogContext,
++                    com.android.internal.R.style.Theme_DeviceDefault_Dialog_Alert_DayNight);
++            mDialog = new AlertDialog.Builder(themed)
++                    .setTitle("Keep this display mode?")
++                    .setMessage(countdown())
++                    .setPositiveButton("Keep", (d, which) -> {
++                        mSwitch.keep();
++                        schedule();
++                    })
++                    .setNegativeButton("Revert", (d, which) -> {
++                        mSwitch.revert();
++                        schedule();
++                    })
++                    .setOnCancelListener(d -> {
++                        mSwitch.revert();
++                        schedule();
++                    })
++                    .create();
++            mDialog.setCanceledOnTouchOutside(false);
++            Window window = mDialog.getWindow();
++            window.setType(DIALOG_TYPE);
++            window.setGravity(Gravity.CENTER);
++            window.addSystemFlags(WindowManager.LayoutParams.SYSTEM_FLAG_SHOW_FOR_ALL_USERS);
++            mDialog.show();
++            scheduleTick();
++        } catch (RuntimeException e) {
++            // The timer still reverts.
++            Slog.w(TAG, "Couldn't show the display mode dialog", e);
++            dismissDialog();
++        }
++    }
++
++    /** The display has the forced (or initial) size and density WindowManager now has. */
++    private boolean displayReady() {
++        try {
++            IWindowManager wm = WindowManagerGlobal.getWindowManagerService();
++            DisplayManager displays = mContext.getSystemService(DisplayManager.class);
++            Display display = displays != null ? displays.getDisplay(DISPLAY) : null;
++            if (wm == null || display == null) return true;
++            Point base = new Point();
++            wm.getBaseDisplaySize(DISPLAY, base);
++            DisplayInfo info = new DisplayInfo();
++            if (!display.getDisplayInfo(info)) return true;
++            return info.logicalWidth == base.x && info.logicalHeight == base.y
++                    && info.logicalDensityDpi == wm.getBaseDisplayDensity(DISPLAY);
++        } catch (RemoteException | RuntimeException e) {
++            return true;
++        }
++    }
++
++    private String countdown() {
++        return "Going back in " + mSwitch.secondsLeft() + " s.";
++    }
++
++    /** Updates the countdown on each whole second left. */
++    private void tick() {
++        if (mDialog == null || !mSwitch.pending()) return;
++        mDialog.setMessage(countdown());
++        scheduleTick();
++    }
++
++    private void scheduleTick() {
++        mHandler.removeCallbacks(mTick);
++        int left = mSwitch.secondsLeft();
++        if (left > 0) mHandler.postAtTime(mTick, mSwitch.deadline() - (left - 1) * 1000L);
++    }
++
++    private void dismissDialog() {
++        mHandler.removeCallbacks(mShow);
++        mHandler.removeCallbacks(mTick);
++        if (mDialog != null) {
++            try {
++                mDialog.dismiss();
++            } catch (RuntimeException e) {
++                Slog.w(TAG, "Couldn't dismiss the display mode dialog", e);
++            }
++            mDialog = null;
++        }
++        if (mDialogContext instanceof WindowContext) ((WindowContext) mDialogContext).release();
++        mDialogContext = null;
++    }
++
++    private void applyMode(DisplayModes.Mode mode) {
++        IWindowManager wm = WindowManagerGlobal.getWindowManagerService();
++        if (wm == null) return;
++        int user = ActivityManager.getCurrentUser();
++        int[] saved = saved();
++        if (saved != null && saved[0] != user) {
++            restore();
++            saved = null;
++        }
++        Settings.Global.putString(mResolver, RESTORE, user + " "
++                + (saved != null ? saved[1] : forcedDensity(user)) + " " + mode.density);
++        try {
++            Slog.i(TAG, "Display mode " + mode + " for user " + user);
++            wm.setForcedDisplaySize(DISPLAY, mode.width, mode.height);
++            wm.setForcedDisplayDensityForUser(DISPLAY, mode.density, user);
++        } catch (RemoteException | RuntimeException e) {
++            Slog.w(TAG, "Couldn't set display mode " + mode.id, e);
++        }
++    }
++
++    /** Clear the forced size, and put back the density of the user a mode was on for. */
++    private void restore() {
++        IWindowManager wm = WindowManagerGlobal.getWindowManagerService();
++        if (wm == null) return;
++        try {
++            Point base = new Point(), initial = new Point();
++            wm.getBaseDisplaySize(DISPLAY, base);
++            wm.getInitialDisplaySize(DISPLAY, initial);
++            if (!base.equals(initial)) wm.clearForcedDisplaySize(DISPLAY);
++            int[] saved = saved();
++            if (saved == null) return;
++            int user = saved[0];
++            // A Display size picked while the mode was on stays. WindowManager stores a forced
++            // density equal to the initial one as none, so 0 counts as the initial density.
++            int initialDensity = wm.getInitialDisplayDensity(DISPLAY);
++            int forced = forcedDensity(user);
++            if ((forced > 0 ? forced : initialDensity) == saved[2]) {
++                if (saved[1] > 0) {
++                    wm.setForcedDisplayDensityForUser(DISPLAY, saved[1], user);
++                } else {
++                    wm.clearForcedDisplayDensityForUser(DISPLAY, user);
++                }
++            }
++            Settings.Global.putString(mResolver, RESTORE, "");
++            Slog.i(TAG, "Normal display for user " + user);
++        } catch (RemoteException | RuntimeException e) {
++            Slog.w(TAG, "Couldn't restore the normal display", e);
++        }
++    }
++
++    /** {user, saved density, mode density} from RESTORE, or null when nothing is left to undo. */
++    private int[] saved() {
++        String value = Settings.Global.getString(mResolver, RESTORE);
++        if (value == null || value.isEmpty()) return null;
++        String[] parts = value.split(" ");
++        try {
++            if (parts.length == 3) {
++                return new int[] {Integer.parseInt(parts[0]), Integer.parseInt(parts[1]),
++                        Integer.parseInt(parts[2])};
++            }
++        } catch (NumberFormatException e) {
++            // Falls through.
++        }
++        Slog.w(TAG, "Bad " + RESTORE + " " + value + ", dropped");
++        Settings.Global.putString(mResolver, RESTORE, "");
++        return null;
++    }
++
++    /** The user's forced density (Display size in Settings), 0 for none. */
++    private int forcedDensity(int user) {
++        String value = Settings.Secure.getStringForUser(mResolver,
++                Settings.Secure.DISPLAY_DENSITY_FORCED, user);
++        try {
++            return value == null || value.isEmpty() ? 0 : Integer.parseInt(value);
++        } catch (NumberFormatException e) {
++            return 0;
++        }
++    }
++}

@@ -1,0 +1,147 @@
+--- a/lineage-sdk/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
++++ b/lineage-sdk/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
+@@ -21,7 +21,9 @@
+ import android.content.IntentFilter;
+ import android.net.Uri;
+ import android.os.BatteryManager;
++import android.os.DeadObjectException;
+ import android.os.Handler;
++import android.os.IBinder;
+ import android.os.RemoteException;
+ import android.os.ServiceManager;
+ import android.text.format.DateUtils;
+@@ -35,6 +37,7 @@
+ import org.lineageos.platform.internal.health.ccprovider.Limit;
+ import org.lineageos.platform.internal.health.ccprovider.Toggle;
+ 
++import vendor.lineage.health.ChargingLimitInfo;
+ import vendor.lineage.health.IChargingControl;
+ 
+ import java.io.PrintWriter;
+@@ -81,9 +84,10 @@
+         super(context, handler);
+ 
+         mContentResolver = mContext.getContentResolver();
+-        mChargingControl = IChargingControl.Stub.asInterface(
++        IChargingControl hal = IChargingControl.Stub.asInterface(
+                 ServiceManager.waitForDeclaredService(
+                         IChargingControl.DESCRIPTOR + "/default"));
++        mChargingControl = hal == null ? null : new ReconnectingChargingControl(hal);
+ 
+         if (mChargingControl == null) {
+             Log.i(TAG, "Lineage Health HAL not found");
+@@ -564,4 +568,114 @@
+             return mTargetTime;
+         }
+     }
++
++    /**
++     * Forwards to the charging control HAL. init restarts the HAL when it dies, so when
++     * the binder is dead the service is fetched again (without waiting, so the health
++     * thread doesn't block), and a call that hits a dead binder is retried once with a
++     * fresh, live service or fails. The providers apply the mode again on the next battery
++     * update.
++     */
++    private static final class ReconnectingChargingControl implements IChargingControl {
++        private static final String NAME = IChargingControl.DESCRIPTOR + "/default";
++
++        private interface Call<T> {
++            T run(IChargingControl hal) throws RemoteException;
++        }
++
++        private IChargingControl mHal;
++
++        ReconnectingChargingControl(IChargingControl hal) {
++            mHal = hal;
++        }
++
++        private synchronized IChargingControl hal() throws RemoteException {
++            if (mHal == null || !mHal.asBinder().isBinderAlive()) {
++                IChargingControl fresh =
++                        IChargingControl.Stub.asInterface(ServiceManager.checkService(NAME));
++                if (fresh == null || !fresh.asBinder().isBinderAlive()) {
++                    mHal = null;
++                    throw new DeadObjectException("Lineage Health HAL is not running");
++                }
++                mHal = fresh;
++                Log.i(TAG, "Reconnected to the Lineage Health HAL");
++            }
++            return mHal;
++        }
++
++        private synchronized void drop(IChargingControl dead) {
++            if (mHal == dead) {
++                mHal = null;
++            }
++        }
++
++        private <T> T call(Call<T> call) throws RemoteException {
++            IChargingControl hal = hal();
++            try {
++                return call.run(hal);
++            } catch (DeadObjectException e) {
++                drop(hal);
++                return call.run(hal());
++            }
++        }
++
++        @Override
++        public boolean getChargingEnabled() throws RemoteException {
++            return call(IChargingControl::getChargingEnabled);
++        }
++
++        @Override
++        public void setChargingEnabled(boolean enabled) throws RemoteException {
++            call(hal -> {
++                hal.setChargingEnabled(enabled);
++                return null;
++            });
++        }
++
++        @Override
++        public void setChargingDeadline(long deadline) throws RemoteException {
++            call(hal -> {
++                hal.setChargingDeadline(deadline);
++                return null;
++            });
++        }
++
++        @Override
++        public int getSupportedMode() throws RemoteException {
++            return call(IChargingControl::getSupportedMode);
++        }
++
++        @Override
++        public long getChargingDeadline() throws RemoteException {
++            return call(IChargingControl::getChargingDeadline);
++        }
++
++        @Override
++        public ChargingLimitInfo getChargingLimit() throws RemoteException {
++            return call(IChargingControl::getChargingLimit);
++        }
++
++        @Override
++        public void setChargingLimit(ChargingLimitInfo limit) throws RemoteException {
++            call(hal -> {
++                hal.setChargingLimit(limit);
++                return null;
++            });
++        }
++
++        @Override
++        public int getInterfaceVersion() throws RemoteException {
++            return call(IChargingControl::getInterfaceVersion);
++        }
++
++        @Override
++        public String getInterfaceHash() throws RemoteException {
++            return call(IChargingControl::getInterfaceHash);
++        }
++
++        @Override
++        public synchronized IBinder asBinder() {
++            return mHal == null ? null : mHal.asBinder();
++        }
++    }
+ }

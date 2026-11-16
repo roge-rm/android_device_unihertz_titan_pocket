@@ -1,0 +1,4236 @@
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/Kconfig
+@@ -0,0 +1,7 @@
++config MTK_CONN_MD
++	bool "Support mtk connsys modem config"
++	help
++	  The conn_md bridge that passes LTE and Wi-Fi coexistence (IDC)
++	  messages between the connsys WMT driver and the modem. It exports
++	  mtk_conn_md_bridge_reg, _unreg and _send_msg, which the connectivity
++	  stubs give instead when this is off.
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/Makefile
+@@ -0,0 +1,16 @@
++# SPDX-License-Identifier: GPL-2.0
++# conn_md, the LTE coex (IDC) message bridge between WMT and the modem, from
++# the 4.14 MediaTek tree. It only needs eccci's IPC
++# headers (struct ipc_ilm, the module IDs), not eccci itself.
++
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/eccci/$(MTK_PLATFORM)
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/eccci/
++ccflags-y += -I$(srctree)/$(src)/include/
++
++obj-y += conn_md_bridge.o
++conn_md_bridge-objs := conn_md.o
++conn_md_bridge-objs += conn_md_exp.o
++conn_md_bridge-objs += conn_md_log.o
++conn_md_bridge-objs += conn_md_dump.o
++conn_md_bridge-objs += conn_md_dbg.o
++conn_md_bridge-objs += conn_md_test.o
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/conn_md.c
+@@ -0,0 +1,679 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++
++#include "conn_md.h"
++#include "conn_md_dbg.h"
++#include <linux/sched/clock.h>
++
++/*global data structure defination*/
++struct conn_md_struct g_conn_md;
++static struct conn_md_log_msg_info g_log_msg_info;
++
++static int _conn_md_del_msg_by_uid(uint32 u_id);
++static int conn_md_dmp_msg(struct conn_md_queue *p_msg_list, uint32 src_id,
++		uint32 dst_id);
++
++static unsigned long conn_md_log_msg_interval_ms(
++	struct conn_md_time_struct *p_begin,
++	struct conn_md_time_struct *p_end)
++{
++	long long diff_sec;
++	long diff_msec;
++
++	diff_sec = p_end->sec - p_begin->sec;
++	diff_msec = (p_end->msec - p_begin->msec);
++	if (diff_msec < 0) {
++		diff_msec += 1000;
++		diff_sec -= 1;
++	}
++
++	return (diff_sec * 1000 + diff_msec);
++}
++
++static void conn_md_get_local_time(struct conn_md_time_struct *time)
++{
++	time->sec = local_clock();
++	time->msec = do_div(time->sec, 1000000000) / 1000000;
++}
++
++static void conn_md_log_add_msg(struct conn_md_time_struct *cur_time)
++{
++	char buf[CONN_MD_MSG_TIME_LENGTH];
++	int msg_buf_size, remain_size;
++
++	if (g_log_msg_info.msg_total == 0)
++		g_log_msg_info.msg_begin_time = *cur_time;
++
++	if (snprintf(buf, CONN_MD_MSG_TIME_LENGTH, " %llu.%03lu", cur_time->sec,
++		cur_time->msec) < 0)
++		return;
++
++	msg_buf_size = strlen(buf);
++	remain_size = CONN_MD_BUF_SIZE - strlen(g_log_msg_info.msg_buf) - 1;
++	if (remain_size >= msg_buf_size) {
++		strncat(g_log_msg_info.msg_buf, buf, msg_buf_size);
++		g_log_msg_info.msg_total++;
++	} else {
++		CONN_MD_ERR_FUNC("buff full, %s (remain %d), cant add %s (%d)",
++				 g_log_msg_info.msg_buf, remain_size, buf,
++				 msg_buf_size);
++	}
++}
++
++#define CONN_MD_LOG_MSG_HEAD_NAME "send message to Modem,"
++#define CONN_MD_LOG_MSG_MAX_INTERVAL_MS 1000
++static void conn_md_log_print_msg(struct conn_md_time_struct *cur_time)
++{
++	unsigned long interval;
++
++	if (g_log_msg_info.msg_total > 0) {
++		interval = conn_md_log_msg_interval_ms(
++			&g_log_msg_info.msg_begin_time, cur_time);
++		if ((g_log_msg_info.msg_total == CONN_MD_MSG_MAX_NUM ||
++		    interval > CONN_MD_LOG_MSG_MAX_INTERVAL_MS)) {
++			CONN_MD_INFO_FUNC("%s%s\n", CONN_MD_LOG_MSG_HEAD_NAME,
++					  g_log_msg_info.msg_buf);
++			g_log_msg_info.msg_buf[0] = '\0';
++			g_log_msg_info.msg_total = 0;
++		}
++	}
++}
++
++static void conn_md_log_msg_time(uint32 dest_id)
++{
++	struct conn_md_time_struct cur_time;
++
++	conn_md_get_local_time(&cur_time);
++
++	if (dest_id == MD_MOD_EL1)
++		conn_md_log_add_msg(&cur_time);
++
++	conn_md_log_print_msg(&cur_time);
++}
++
++int conn_md_add_user(uint32 u_id, struct conn_md_bridge_ops *p_ops)
++{
++	struct conn_md_user *p_user = NULL;
++	struct list_head *pos = NULL;
++	struct conn_md_struct *p_conn_md = &g_conn_md;
++	struct conn_md_user_list *p_user_list = &p_conn_md->user_list;
++
++	/*lock user_list_lock */
++	mutex_lock(&p_user_list->lock);
++
++	/*check if earlier uid reged or not */
++	list_for_each(pos, &p_user_list->list) {
++		p_user = container_of(pos, struct conn_md_user, entry);
++		if (p_user->u_id == u_id) {
++			/*if yes */
++			/*print warning information */
++			CONN_MD_WARN_FUNC("uid (0x%08x) registered, updating\n",
++					u_id);
++			break;
++		}
++		p_user = NULL;
++	}
++
++	if (p_user == NULL) {
++		/*memory allocation for user information */
++		p_user = kmalloc(sizeof(struct conn_md_user), GFP_ATOMIC);
++		if (p_user == NULL) {
++			CONN_MD_ERR_FUNC("kmalloc failed\n");
++			mutex_unlock(&p_user_list->lock);
++			return CONN_MD_ERR_OTHERS;
++		}
++		INIT_LIST_HEAD(&p_user->entry);
++		list_add_tail(&p_user->entry, &p_user_list->list);
++		p_user->u_id = u_id;
++		p_user->state = USER_REGED;
++	}
++
++	/*anyway, write user info to target uid */
++	memcpy(&p_user->ops, p_ops, sizeof(struct conn_md_bridge_ops));
++
++	p_user->state = USER_ENABLED;
++
++	CONN_MD_WARN_FUNC("uid (0x%08x) is added to user list successfully\n",
++			p_user->u_id);
++	/*unlock user_list lock */
++	mutex_unlock(&p_user_list->lock);
++
++	return 0;
++}
++
++int conn_md_del_user(uint32 u_id)
++{
++	int i_ret = -1;
++	struct conn_md_user *p_user = NULL;
++	struct list_head *pos = NULL;
++	struct conn_md_struct *p_conn_md = &g_conn_md;
++	struct conn_md_user_list *p_user_list = &p_conn_md->user_list;
++
++	/*lock user_list_lock */
++	mutex_lock(&p_user_list->lock);
++
++	/*check if earlier uid reged or not */
++	list_for_each(pos, &p_user_list->list) {
++		p_user = container_of(pos, struct conn_md_user, entry);
++		if (p_user->u_id == u_id) {
++			/*if yes */
++			/*print information */
++			CONN_MD_INFO_FUNC("uid(0x%08x) registered, delete it\n",
++					u_id);
++			break;
++		}
++		p_user = NULL;
++	}
++
++	if (p_user == NULL) {
++		i_ret = CONN_MD_ERR_INVALID_PARAM;
++		/*print warning information */
++		CONN_MD_WARN_FUNC("uid (0x%08x) not found in user list..\n",
++				u_id);
++	} else {
++		/*delete user info from user info list of target uid */
++		list_del(pos);
++		kfree(p_user);
++		p_user_list->counter--;
++		CONN_MD_INFO_FUNC("uid (0x%08x) is deleted\n", u_id);
++		i_ret = 0;
++	}
++
++	/*unlock user_list lock */
++	mutex_unlock(&p_user_list->lock);
++
++	/*search all message enquued in p_msg_list */
++	/* and delete them before delete user */
++	_conn_md_del_msg_by_uid(u_id);
++
++	return i_ret;
++}
++
++int conn_md_dmp_msg(struct conn_md_queue *p_msg_list, uint32 src_id,
++		uint32 dst_id)
++{
++#define MAX_LENGTH_PER_PACKAGE 8
++
++	struct list_head *pos = NULL;
++	struct conn_md_msg *p_msg = NULL;
++	int i = 0;
++	int counter = 0;
++
++	if (p_msg_list == NULL) {
++		CONN_MD_ERR_FUNC("invalid parameter, p_msg_list is NULL\n");
++		return CONN_MD_ERR_INVALID_PARAM;
++	}
++
++	mutex_lock(&p_msg_list->lock);
++
++	list_for_each(pos, &p_msg_list->list) {
++		p_msg = container_of(pos, struct conn_md_msg, entry);
++		if (((src_id == 0) || (src_id == p_msg->ilm.src_mod_id)) &&
++		    ((dst_id == 0) || (dst_id == p_msg->ilm.dest_mod_id))) {
++			counter++;
++			CONN_MD_INFO_FUNC
++			("p_msg:%p, src:0x%08x, dest:0x%08x, msg_len:%d\n",
++					p_msg, p_msg->ilm.src_mod_id,
++					p_msg->ilm.dest_mod_id,
++					p_msg->local_para.msg_len);
++			for (i = 0; (i < p_msg->local_para.msg_len) &&
++					(i < MAX_LENGTH_PER_PACKAGE); i++) {
++				CONN_MD_INFO_FUNC("%02x ",
++						p_msg->local_para.data[i]);
++				if (7 == (i % 8))
++					CONN_MD_INFO_FUNC("\n");
++			}
++			CONN_MD_INFO_FUNC("\n");
++		}
++	}
++
++	mutex_unlock(&p_msg_list->lock);
++
++	CONN_MD_INFO_FUNC("%d messages found in message list\n", counter);
++	return 0;
++}
++
++int _conn_md_del_msg_by_uid(uint32 u_id)
++{
++	struct conn_md_struct *p_conn_md = &g_conn_md;
++	struct conn_md_queue *p_msg_list = &p_conn_md->msg_queue;
++	struct list_head *pos = NULL;
++	struct conn_md_msg *p_msg = NULL;
++	int flag = 1;
++
++	CONN_MD_TRC_FUNC();
++	mutex_lock(&p_msg_list->lock);
++	while (flag) {
++		/*set flat to 0 before search message */
++		flag = 0;
++
++		list_for_each(pos, &p_msg_list->list) {
++			p_msg = container_of(pos, struct conn_md_msg, entry);
++			if ((p_msg->ilm.dest_mod_id == u_id) ||
++					(p_msg->ilm.src_mod_id == u_id)) {
++				flag = 1;
++				CONN_MD_DBG_FUNC
++				("uid(0x%08x)found,dest(0x%08x),src(0x%08x)\n",
++						u_id, p_msg->ilm.dest_mod_id,
++						p_msg->ilm.src_mod_id);
++				break;
++			}
++		}
++
++		if (flag == 1) {
++			p_msg_list->counter--;
++			list_del(pos);
++			kfree(p_msg);
++			CONN_MD_DBG_FUNC("dequeued in queue list_counter:%d\n",
++					p_msg_list->counter);
++		}
++
++	}
++	mutex_unlock(&p_msg_list->lock);
++	CONN_MD_TRC_FUNC();
++	return 0;
++}
++
++int conn_md_send_msg(struct ipc_ilm *ilm)
++{
++
++	struct conn_md_struct *p_conn_md = &g_conn_md;
++	struct conn_md_queue *p_msg_list = &p_conn_md->msg_queue;
++	uint32 msg_str_len = 0;
++	struct local_para *p_local_para = NULL;
++	struct conn_md_msg *p_new_msg = NULL;
++	uint32 msg_info_len = ilm->local_para_ptr->msg_len;
++
++	CONN_MD_DBG_FUNC("ilm:%p, msg_len:%d\n", ilm,
++			ilm->local_para_ptr->msg_len);
++
++	/*malloc message structure for this msg */
++	msg_str_len = sizeof(struct conn_md_msg) + msg_info_len;
++	p_new_msg = kmalloc(msg_str_len, GFP_ATOMIC);
++
++	if (p_new_msg != NULL) {
++		CONN_MD_DBG_FUNC("p_new_msg:%p\n", p_new_msg);
++		/*copy message from ilm */
++		memcpy(p_new_msg, ilm, sizeof(struct ipc_ilm));
++
++		p_local_para = &p_new_msg->local_para;
++		p_new_msg->ilm.local_para_ptr = p_local_para;
++		/*copy local_para_ptr structure */
++		memcpy(p_local_para, ilm->local_para_ptr,
++				sizeof(struct local_para));
++		/*copy data from local_para_ptr structure */
++		memcpy(p_local_para->data, ilm->local_para_ptr->data,
++				msg_info_len - sizeof(struct local_para));
++
++		CONN_MD_DBG_FUNC("p_local_para:%p, msg_len:%d\n",
++				 p_local_para, p_local_para->msg_len);
++
++		INIT_LIST_HEAD(&p_new_msg->entry);
++
++		/*lock tx queue lock */
++		mutex_lock(&p_msg_list->lock);
++		/*enqueue tx message */
++		list_add_tail(&p_new_msg->entry, &p_msg_list->list);
++
++		p_msg_list->counter++;
++
++		/*unlock queue lock */
++		mutex_unlock(&p_msg_list->lock);
++
++		CONN_MD_DBG_FUNC
++		    ("enqueue new message ist succeed, msg counter:%d\n",
++			p_msg_list->counter);
++
++		conn_md_dmp_in(ilm, MSG_ENQUEUE, p_conn_md->p_msg_dmp_sys);
++
++		CONN_MD_DBG_FUNC("begin to wake up conn-md-thread\n");
++
++		/*wakeup conn-md thread to handle tx message */
++		complete(&p_conn_md->tx_comp);
++
++		CONN_MD_DBG_FUNC("wake up conn-md-thread done\n");
++	} else {
++		CONN_MD_ERR_FUNC("kmalloc for new message structure failed\n");
++	}
++
++	return 0;
++}
++
++#define ACT_QUEUE_DBG 0
++
++static int conn_md_thread(void *p_data)
++{
++	struct conn_md_struct *p_conn_md = (struct conn_md_struct *) p_data;
++	struct conn_md_queue *p_act_queue = &p_conn_md->act_queue;
++	struct conn_md_queue *p_msg_queue = &p_conn_md->msg_queue;
++	struct list_head *pos = NULL;
++	struct conn_md_msg *p_msg = NULL;
++	struct conn_md_user *p_user = NULL;
++	struct list_head *p_user_pos = NULL;
++	struct conn_md_user_list *p_user_list = &p_conn_md->user_list;
++	struct ipc_ilm *p_cur_ilm = NULL;
++
++	while (1) {
++		wait_for_completion_interruptible(&p_conn_md->tx_comp);
++
++		if (kthread_should_stop()) {
++			CONN_MD_WARN_FUNC("conn-md-thread stoping ...\n");
++			break;
++		}
++
++		/*check if p_conn_md->msg_queue is empty or not */
++		mutex_lock(&p_msg_queue->lock);
++		if (!list_empty(&p_msg_queue->list)) {
++			mutex_lock(&p_act_queue->lock);
++			if (!list_empty(&p_act_queue->list)) {
++				/* warning message, this should never happen */
++				CONN_MD_ERR_FUNC
++				    ("this should never happen!!!--*-!!!\n");
++			}
++
++			/*ignore case of p_act_queue is not empty */
++			list_replace_init(&p_msg_queue->list,
++					&p_act_queue->list);
++
++			mutex_unlock(&p_act_queue->lock);
++
++		} else {
++			/*warning message */
++			CONN_MD_DBG_FUNC("no msg queued in msg queue...\n");
++		}
++		mutex_unlock(&p_msg_queue->lock);
++
++		mutex_lock(&p_act_queue->lock);
++		/*dequeue from p_act_queue */
++		list_for_each(pos, &p_act_queue->list) {
++			p_msg = container_of(pos, struct conn_md_msg, entry);
++			p_cur_ilm = &p_msg->ilm;
++			if (p_cur_ilm == NULL) {
++#if (ACT_QUEUE_DBG == 1)
++				/*free message structure */
++				list_del(pos);
++				kfree(p_msg);
++
++				p_act_queue->counter++;
++				CONN_MD_DBG_FUNC("dequeue act_q counter:%d\n",
++						p_act_queue->counter);
++#endif
++				continue;
++			}
++
++			conn_md_dmp_in(p_cur_ilm, MSG_DEQUEUE,
++					p_conn_md->p_msg_dmp_sys);
++
++			mutex_lock(&p_user_list->lock);
++
++			/*check if src module is enabled or not */
++			list_for_each(p_user_pos, &p_user_list->list) {
++				p_user = container_of(p_user_pos,
++						struct conn_md_user, entry);
++				if (p_user->u_id == p_cur_ilm->src_mod_id &&
++						p_user->state == USER_ENABLED) {
++					/*src module id is enabled already */
++					CONN_MD_DBG_FUNC
++					("source user id (0x%08x) found\n",
++							p_cur_ilm->src_mod_id);
++					break;
++				}
++				p_user = NULL;
++			}
++
++			if (p_user == NULL) {
++				mutex_unlock(&p_user_list->lock);
++				CONN_MD_WARN_FUNC
++				    ("user (0x%08x) is ready, drop ilm msg\n",
++				     p_cur_ilm->src_mod_id);
++#if (ACT_QUEUE_DBG == 1)
++				/*free message structure */
++				list_del(pos);
++				kfree(p_msg);
++				p_act_queue->counter++;
++				CONN_MD_DBG_FUNC("dequeued act_q counter:%d\n",
++						p_act_queue->counter);
++#endif
++
++				continue;
++			}
++
++			/*check if destination module is enabled or not */
++			list_for_each(p_user_pos, &p_user_list->list) {
++				p_user = container_of(p_user_pos,
++						struct conn_md_user, entry);
++				if (p_user->u_id == p_cur_ilm->dest_mod_id &&
++						p_user->state == USER_ENABLED) {
++					CONN_MD_DBG_FUNC
++					("target user id (0x%08x) found\n",
++							p_cur_ilm->dest_mod_id);
++					/*src module id is enabled already */
++					break;
++				}
++				p_user = NULL;
++			}
++
++			if (p_user == NULL) {
++				mutex_unlock(&p_user_list->lock);
++
++				CONN_MD_WARN_FUNC
++				    ("user (0x%08x) not ready, drop ilm msg\n",
++				     p_cur_ilm->dest_mod_id);
++#if (ACT_QUEUE_DBG == 1)
++				/*free message structure */
++				list_del(pos);
++				kfree(p_msg);
++				p_act_queue->counter++;
++				CONN_MD_DBG_FUNC("dequeue act_que counter:%d\n",
++						p_act_queue->counter);
++#endif
++				continue;
++			}
++			CONN_MD_DBG_FUNC(
++			"p_cur_ilm:%p, local_para_ptr:%p, msg_len:%d\n",
++					 p_cur_ilm, &p_cur_ilm->local_para_ptr,
++					 p_cur_ilm->local_para_ptr->msg_len);
++			CONN_MD_DBG_FUNC("send message to user id(0x%08x)\n",
++					p_cur_ilm->dest_mod_id);
++			conn_md_log_msg_time(p_cur_ilm->dest_mod_id);
++			(*(p_user->ops.rx_cb)) (p_cur_ilm);
++			CONN_MD_DBG_FUNC("message sent user id(0x%08x)done\n",
++					p_cur_ilm->dest_mod_id);
++			mutex_unlock(&p_user_list->lock);
++
++#if (ACT_QUEUE_DBG == 1)
++			/*free message structure */
++			list_del(pos);
++			kfree(p_msg);
++			CONN_MD_DBG_FUNC("message structure freed\n");
++
++			p_act_queue->counter++;
++			CONN_MD_DBG_FUNC("dequeued in act queue counter:%d\n",
++					p_act_queue->counter);
++#endif
++		}
++		p_msg = NULL;
++
++		while (!list_empty(&p_act_queue->list)) {
++			list_for_each(pos, &p_act_queue->list) {
++				p_msg = container_of(pos,
++						struct conn_md_msg, entry);
++				/*free message structure */
++				list_del(pos);
++				kfree(p_msg);
++				p_msg = NULL;
++				CONN_MD_DBG_FUNC("message structure freed\n");
++
++				p_act_queue->counter++;
++				CONN_MD_DBG_FUNC("dequeue act_que counter:%d\n",
++						p_act_queue->counter);
++				break;
++			}
++
++		}
++
++		mutex_unlock(&p_act_queue->lock);
++
++	}
++	CONN_MD_WARN_FUNC("conn-md-thread stopped.\n");
++	return 0;
++}
++
++int conn_md_dmp_msg_queued(uint32 src_id, uint32 dst_id)
++{
++	return conn_md_dmp_msg(&g_conn_md.msg_queue, src_id, dst_id);
++}
++
++int conn_md_dmp_msg_active(uint32 src_id, uint32 dst_id)
++{
++	return conn_md_dmp_msg(&g_conn_md.act_queue, src_id, dst_id);
++}
++
++int conn_md_dmp_msg_logged(uint32 src_id, uint32 dst_id)
++{
++	return conn_md_dmp_out(g_conn_md.p_msg_dmp_sys, src_id, dst_id);
++}
++
++static int __init conn_md_init(void)
++{
++	int i_ret = 0;
++	struct conn_md_queue *p_queue = NULL;
++	struct conn_md_user_list *p_user_list = NULL;
++
++	CONN_MD_TRC_FUNC();
++
++	/*init message queue structure */
++	p_queue = &g_conn_md.msg_queue;
++	INIT_LIST_HEAD(&(p_queue->list));
++	mutex_init(&(p_queue->lock));
++	p_queue->counter = 0;
++	CONN_MD_INFO_FUNC("init message queue list succeed\n");
++
++	/*init active queue structure */
++	p_queue = &g_conn_md.act_queue;
++	INIT_LIST_HEAD(&(p_queue->list));
++	mutex_init(&(p_queue->lock));
++	p_queue->counter = 0;
++	CONN_MD_INFO_FUNC("init active queue list succeed\n");
++
++	/*init user_list structure */
++	p_user_list = &g_conn_md.user_list;
++	INIT_LIST_HEAD(&(p_user_list->list));
++	mutex_init(&(p_user_list->lock));
++	p_user_list->counter = 0;
++	CONN_MD_INFO_FUNC("init user information list succeed\n");
++
++	g_conn_md.p_msg_dmp_sys = conn_md_dmp_init();
++	if (g_conn_md.p_msg_dmp_sys == NULL)
++		CONN_MD_WARN_FUNC("conn_md_dmp_init failed\n");
++	else
++		CONN_MD_INFO_FUNC("conn_md_dmp_init succeed\n");
++	/*init proc interface */
++	conn_md_dbg_init();
++
++	/*create conn-md thread */
++
++	init_completion(&g_conn_md.tx_comp);
++	g_conn_md.p_task = kthread_create(conn_md_thread, &g_conn_md,
++					 "conn-md-thread");
++	if (g_conn_md.p_task == NULL) {
++		CONN_MD_ERR_FUNC("create conn_md_thread fail\n");
++		i_ret = -ENOMEM;
++		conn_md_dmp_deinit(g_conn_md.p_msg_dmp_sys);
++		goto conn_md_err;
++	}
++	CONN_MD_INFO_FUNC("create conn_md_thread succeed, wakeup it\n");
++	/*wakeup conn_md_thread */
++	wake_up_process(g_conn_md.p_task);
++
++conn_md_err:
++
++	CONN_MD_TRC_FUNC();
++	return i_ret;
++}
++
++static void conn_md_exit(void)
++{
++
++	struct conn_md_struct *p_conn_md = &g_conn_md;
++	struct conn_md_queue *p_queue = NULL;
++	struct conn_md_user_list *p_user_list = &p_conn_md->user_list;
++	struct list_head *pos = NULL;
++	struct conn_md_user *p_user = NULL;
++	struct conn_md_msg *p_msg = NULL;
++
++	CONN_MD_TRC_FUNC();
++
++	/*terminate conn-md thread */
++	if (p_conn_md->p_task != NULL) {
++		CONN_MD_INFO_FUNC("signaling conn-md-thread to stop ...\n");
++		kthread_stop(p_conn_md->p_task);
++	}
++
++	/*delete user_list structure if user list is not empty */
++	mutex_lock(&p_user_list->lock);
++	list_for_each(pos, &p_user_list->list) {
++		p_user = container_of(pos, struct conn_md_user, entry);
++		list_del(pos);
++		kfree(p_user);
++	}
++	p_user_list->counter = 0;
++	mutex_unlock(&p_user_list->lock);
++	mutex_destroy(&p_user_list->lock);
++
++	/*delete queue structure if message queue list is empty */
++	p_queue = &p_conn_md->msg_queue;
++	mutex_lock(&p_queue->lock);
++	list_for_each(pos, &p_queue->list) {
++		p_msg = container_of(pos, struct conn_md_msg, entry);
++		list_del(pos);
++		kfree(p_msg);
++	}
++	p_queue->counter = 0;
++	mutex_unlock(&p_queue->lock);
++	mutex_destroy(&p_queue->lock);
++
++	/*delete queue structure if active queue list is empty */
++	p_queue = &p_conn_md->act_queue;
++	mutex_lock(&p_queue->lock);
++	list_for_each(pos, &p_queue->list) {
++		p_msg = container_of(pos, struct conn_md_msg, entry);
++		list_del(pos);
++		kfree(p_msg);
++	}
++	p_queue->counter = 0;
++	mutex_unlock(&p_queue->lock);
++	mutex_destroy(&p_queue->lock);
++
++	if (p_conn_md->p_msg_dmp_sys != NULL)
++		conn_md_dmp_deinit(p_conn_md->p_msg_dmp_sys);
++
++	CONN_MD_TRC_FUNC();
++}
++
++/*---------------------------------------------------------------------------*/
++
++/*
++ * module_init(conn_md_init);
++ * module_exit(conn_md_exit);
++ */
++subsys_initcall(conn_md_init);
++module_exit(conn_md_exit);
++/*---------------------------------------------------------------------------*/
++
++MODULE_AUTHOR("MBJ/WCN/SE/SS1/Chaozhong.Liang");
++MODULE_DESCRIPTION("MTK CONN-MD Bridge Driver$1.0$");
++MODULE_LICENSE("GPL");
++
++/*---------------------------------------------------------------------------*/
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/conn_md_exp.c
+@@ -0,0 +1,66 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++
++#define DFT_TAG "[CONN_MD_EXP]"
++
++#include "conn_md_exp.h"
++#include "conn_md_log.h"
++
++#include "conn_md.h"
++
++int mtk_conn_md_bridge_reg(uint32 u_id, struct conn_md_bridge_ops *p_ops)
++{
++
++	int i_ret = -1;
++	/*sanity check */
++	if (NULL != p_ops && NULL != p_ops->rx_cb) {
++		/*add user */
++		i_ret = conn_md_add_user(u_id, p_ops);
++	} else {
++		CONN_MD_ERR_FUNC("ERROR, u_id(0x%08x)\n", u_id);
++		CONN_MD_ERR_FUNC("ERROR, p_ops(%p), rx_cb(%p)\n",
++				p_ops, NULL == p_ops ? NULL : p_ops->rx_cb);
++		i_ret = CONN_MD_ERR_INVALID_PARAM;
++	}
++
++	return i_ret;
++}
++EXPORT_SYMBOL(mtk_conn_md_bridge_reg);
++
++int mtk_conn_md_bridge_unreg(uint32 u_id)
++{
++
++	int i_ret = -1;
++
++	/*delete user */
++	i_ret = conn_md_del_user(u_id);
++	return 0;
++}
++EXPORT_SYMBOL(mtk_conn_md_bridge_unreg);
++int mtk_conn_md_bridge_send_msg(struct ipc_ilm *ilm)
++{
++	int i_ret = -1;
++	/*sanity check */
++	if (NULL != ilm && NULL != ilm->local_para_ptr) {
++		/*send data */
++		i_ret = conn_md_send_msg(ilm);
++	} else {
++		CONN_MD_ERR_FUNC("ERROR, ilm(%p),local_para_ptr(%p)\n",
++				ilm, ilm == NULL ? NULL : ilm->local_para_ptr);
++		i_ret = CONN_MD_ERR_INVALID_PARAM;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL(mtk_conn_md_bridge_send_msg);
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/conn_md_log.c
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include "conn_md_log.h"
++
++int g_conn_md_dbg_lvl = CONN_MD_LOG_INFO;
++
++/*Log defination*/
++int __conn_md_log_print(const char *str, ...)
++{
++	va_list args;
++	char temp_sring[DBG_LOG_STR_SIZE];
++	int ret;
++
++	va_start(args, str);
++	ret = vsnprintf(temp_sring, DBG_LOG_STR_SIZE, str, args);
++	va_end(args);
++
++	if (ret > 0)
++		pr_info("%s", temp_sring);
++
++	return ret;
++}
++
++int __conn_md_get_log_lvl(void)
++{
++	/* return CONN_MD_LOG_INFO; */
++	return g_conn_md_dbg_lvl;
++
++}
++
++#define CONN_MD_LOG_LOUD    4
++#define CONN_MD_LOG_DBG     3
++#define CONN_MD_LOG_INFO    2
++#define CONN_MD_LOG_WARN    1
++#define CONN_MD_LOG_ERR     0
++
++int conn_md_log_set_lvl(int log_lvl)
++{
++	/* return CONN_MD_LOG_INFO; */
++	g_conn_md_dbg_lvl = log_lvl;
++
++	if (g_conn_md_dbg_lvl > CONN_MD_LOG_LOUD) {
++		CONN_MD_ERR_FUNC("log_lvl(%d) is too big, round to %d\n",
++				log_lvl, CONN_MD_LOG_LOUD);
++		g_conn_md_dbg_lvl = CONN_MD_LOG_LOUD;
++	}
++
++	if (g_conn_md_dbg_lvl < CONN_MD_LOG_ERR) {
++		CONN_MD_ERR_FUNC("log_lvl(%d) is too small, round to %d\n",
++				log_lvl, CONN_MD_LOG_ERR);
++		g_conn_md_dbg_lvl = CONN_MD_LOG_ERR;
++	}
++
++	return g_conn_md_dbg_lvl;
++
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/conn_md_dump.c
+@@ -0,0 +1,180 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++
++#define DFT_TAG "[CONN_MD_DMP]"
++
++#include "conn_md_log.h"
++#include "conn_md_dump.h"
++
++struct conn_md_dmp_msg_log *conn_md_dmp_init(void)
++{
++	uint32 msg_log_size = sizeof(struct conn_md_dmp_msg_log);
++	struct conn_md_dmp_msg_log *p_msg_log = vmalloc(msg_log_size);
++
++	if (p_msg_log != NULL) {
++		CONN_MD_INFO_FUNC("alloc msg_log memory done, size:0x%08x\n",
++				msg_log_size);
++		memset(p_msg_log, 0, msg_log_size);
++
++		mutex_init(&p_msg_log->lock);
++
++	} else {
++		CONN_MD_ERR_FUNC("alloc memory for msg log system failed\n");
++	}
++	return p_msg_log;
++}
++
++int conn_md_dmp_deinit(struct conn_md_dmp_msg_log *p_log)
++{
++	int i_ret = -1;
++
++	if (p_log != NULL) {
++		CONN_MD_INFO_FUNC("valid buffer pointer:%p.\n", p_log);
++		mutex_destroy(&p_log->lock);
++		vfree(p_log);
++		i_ret = 0;
++	} else {
++		CONN_MD_WARN_FUNC("invalid log buffer pointer\n");
++		i_ret = CONN_MD_ERR_INVALID_PARAM;
++	}
++	return i_ret;
++}
++
++int __conn_md_dmp_in(struct ipc_ilm *p_ilm, enum conn_md_msg_type msg_type,
++		     struct conn_md_dmp_msg_log *p_msg_log)
++{
++	struct timespec64 now;
++	struct conn_md_dmp_msg_str *p_msg = NULL;
++
++	/*get current time */
++	ktime_get_real_ts64(&now);
++
++	mutex_lock(&p_msg_log->lock);
++
++	p_msg = &p_msg_log->msg[p_msg_log->in];
++
++	/*Log timestamp */
++	p_msg->sec = now.tv_sec;
++	p_msg->usec = now.tv_nsec / NSEC_PER_USEC;
++	p_msg->type = msg_type;
++
++	/*Log p_ilm */
++	memcpy(&p_msg->ilm, p_ilm, sizeof(struct ipc_ilm));
++
++	/*Log msg length */
++	p_msg->msg_len = p_ilm->local_para_ptr->msg_len
++				- sizeof(struct local_para);
++
++	/*Log msg content */
++	memcpy(&p_msg->data, p_ilm->local_para_ptr->data,
++	       p_msg->msg_len > LENGTH_PER_PACKAGE ? LENGTH_PER_PACKAGE :
++	       p_msg->msg_len);
++
++	/*update in size and index */
++
++	if (p_msg_log->size >= NUMBER_OF_MSG_LOGGED)
++		p_msg_log->size = NUMBER_OF_MSG_LOGGED;
++	else
++		p_msg_log->size++;
++
++	p_msg_log->in++;
++	p_msg_log->in %= NUMBER_OF_MSG_LOGGED;
++
++	mutex_unlock(&p_msg_log->lock);
++	CONN_MD_DBG_FUNC("msg type:%d enqueued succeed\n", msg_type);
++	return 0;
++}
++
++int conn_md_dmp_in(struct ipc_ilm *p_ilm, enum conn_md_msg_type msg_type,
++		   struct conn_md_dmp_msg_log *p_msg_log)
++{
++	int i_ret = -1;
++
++	if (p_ilm == NULL ||
++	    p_ilm->local_para_ptr == NULL ||
++	    p_ilm->local_para_ptr->msg_len == 0 ||
++	    (msg_type != MSG_ENQUEUE && msg_type != MSG_DEQUEUE)) {
++		CONN_MD_WARN_FUNC("invalid parameter\n");
++		i_ret = CONN_MD_ERR_INVALID_PARAM;
++	} else {
++		i_ret = __conn_md_dmp_in(p_ilm, msg_type, p_msg_log);
++	}
++	return i_ret;
++}
++
++int __conn_md_dmp_msg_filter(struct conn_md_dmp_msg_str *p_msg,
++				uint32 src_id, uint32 dst_id)
++{
++	struct ipc_ilm *p_ilm = &p_msg->ilm;
++	int i = 0;
++
++	if (((src_id == 0) || (src_id == p_ilm->src_mod_id)) &&
++	    ((dst_id == 0) || (dst_id == p_ilm->dest_mod_id))) {
++		__conn_md_log_print(DFT_TAG
++		"%d.%ds,<%s>src:0x%08x,dst:0x%08x,msg_len:%d,dump_len:%d:\n",
++		p_msg->sec, p_msg->usec,
++		(p_msg->type == MSG_ENQUEUE ? "enqueue" : "dequeue"),
++		p_msg->ilm.src_mod_id, p_msg->ilm.dest_mod_id, p_msg->msg_len,
++		(p_msg->msg_len <= LENGTH_PER_PACKAGE ? p_msg->msg_len :
++				LENGTH_PER_PACKAGE));
++
++		for (i = 0; (i < p_msg->msg_len) && (i < LENGTH_PER_PACKAGE);
++				i++) {
++			__conn_md_log_print("%02x ", p_msg->data[i]);
++			if (7 == (i % 8))
++				__conn_md_log_print("\n");
++		}
++		__conn_md_log_print("\n");
++	}
++	return 0;
++}
++
++int conn_md_dmp_out(struct conn_md_dmp_msg_log *p_msg_log,
++			uint32 src_id, uint32 dst_id)
++{
++	int i_ret = 0;
++	int size = 0;
++	int in = 0;
++	int out = 0;
++	struct conn_md_dmp_msg_str *p_msg = NULL;
++
++
++	if (p_msg_log == NULL) {
++		CONN_MD_WARN_FUNC("invalid parameter, p_msg_log is NULL\n");
++		return CONN_MD_ERR_INVALID_PARAM;
++	}
++	/* The lock is held for the whole walk; out starts at the oldest entry. */
++	mutex_lock(&p_msg_log->lock);
++	size = p_msg_log->size;
++	in = p_msg_log->in;
++	CONN_MD_INFO_FUNC("dump msg <src_id:0x%08x, dst_id:0x%08x> start\n",
++			src_id, dst_id);
++	if (size == NUMBER_OF_MSG_LOGGED)
++		out = in;
++	else
++		out = 0;
++
++	while (size--) {
++		p_msg = &p_msg_log->msg[out];
++
++		__conn_md_dmp_msg_filter(p_msg, src_id, dst_id);
++
++		out++;
++		out %= NUMBER_OF_MSG_LOGGED;
++	}
++	mutex_unlock(&p_msg_log->lock);
++	CONN_MD_INFO_FUNC("dump msg <src_id:0x%08x, dst_id:0x%08x> finished\n",
++			src_id, dst_id);
++	return i_ret;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/conn_md_dbg.c
+@@ -0,0 +1,175 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++
++#define DFT_TAG "[CONN_MD_DMP]"
++#include "conn_md_log.h"
++
++#include "conn_md_dbg.h"
++#include "conn_md.h"
++#include <linux/version.h>
++
++
++#define USE_NEW_PROC_FS_FLAG 1
++#define CONN_MD_DBG_PROCNAME "driver/conn_md_dbg"
++
++static struct proc_dir_entry *gConnMdDbgEntry;
++
++#if USE_NEW_PROC_FS_FLAG
++static const struct proc_ops conn_md_dbg_fops = {
++	.proc_read = conn_md_dbg_read,
++	.proc_write = conn_md_dbg_write,
++};
++#endif
++
++static int conn_md_test_dbg(int par1, int par2, int par3);
++static int conn_md_dbg_set_log_lvl(int par1, int par2, int par3);
++static int conn_md_dbg_dmp_msg_log(int par1, int par2, int par3);
++
++static const  conn_md_dev_dbg_func conn_md_dbg_func[] = {
++	conn_md_test_dbg,
++	conn_md_dbg_set_log_lvl,
++	conn_md_dbg_dmp_msg_log,
++	NULL,
++};
++
++int conn_md_dbg_dmp_msg_log(int par1, int par2, int par3)
++{
++	return conn_md_dmp_msg_logged(par2, par3);
++}
++
++int conn_md_dbg_set_log_lvl(int par1, int par2, int par3)
++{
++	return conn_md_log_set_lvl(par2);
++}
++
++#if USE_NEW_PROC_FS_FLAG
++ssize_t conn_md_dbg_read(struct file *filp, char __user *buf,
++		size_t count, loff_t *f_pos)
++{
++	return 0;
++}
++#else
++static int conn_md_dbg_read(char *page, char **start, off_t off,
++		int count, int *eof, void *data)
++{
++	int len = 0;
++
++	return len;
++}
++#endif
++
++#if USE_NEW_PROC_FS_FLAG
++ssize_t conn_md_dbg_write(struct file *filp, const char __user *buffer,
++		size_t count, loff_t *f_pos)
++#else
++static int conn_md_dbg_write(struct file *file, const char *buffer,
++		unsigned long count, void *data)
++#endif
++{
++
++	char buf[256];
++	char *pBuf;
++	unsigned long len = count;
++	unsigned long x = 0;
++	long y = 0;
++	long z = 0;
++	long i;
++	char *pToken = NULL;
++	char *pDelimiter = " \t";
++
++	CONN_MD_INFO_FUNC("write parameter len = %d\n\r", (int)len);
++	if (len >= sizeof(buf)) {
++		CONN_MD_ERR_FUNC("input handling fail!\n");
++		len = sizeof(buf) - 1;
++		return -1;
++	}
++
++	if (copy_from_user(buf, buffer, len))
++		return -EFAULT;
++	buf[len] = '\0';
++	CONN_MD_INFO_FUNC("write parameter data = %s\n\r", buf);
++
++	pBuf = buf;
++	pToken = strsep(&pBuf, pDelimiter);
++	if (pToken != NULL)
++		i = kstrtol(pToken, 16, &x);
++	else
++		x = 0;
++
++	pToken = strsep(&pBuf, "\t\n ");
++	if (pToken != NULL)
++		i = kstrtol(pToken, 16, &y);
++	else
++		y = 0;
++
++	pToken = strsep(&pBuf, "\t\n ");
++	if (pToken != NULL)
++		i = kstrtol(pToken, 16, &z);
++	else
++		z = 0;
++
++	CONN_MD_INFO_FUNC("x(0x%08lx), y(0x%08lx), z(0x%08lx)\n\r", x, y, z);
++
++	if (ARRAY_SIZE(conn_md_dbg_func) > x && NULL != conn_md_dbg_func[x])
++		(*conn_md_dbg_func[x]) (x, y, z);
++	else
++		CONN_MD_WARN_FUNC("no handler for command id(0x%08lx)\n\r", x);
++	return len;
++}
++
++int conn_md_test_dbg(int par1, int par2, int par3)
++{
++	return conn_md_test();
++}
++
++int conn_md_dbg_init(void)
++{
++#if USE_NEW_PROC_FS_FLAG
++	gConnMdDbgEntry = proc_create(CONN_MD_DBG_PROCNAME, 0664,
++				      NULL, &conn_md_dbg_fops);
++	if (gConnMdDbgEntry == NULL) {
++		CONN_MD_ERR_FUNC("Unable to create /proc entry\n\r");
++		return -1;
++	}
++#else
++	gConnMdDbgEntry = create_proc_entry(CONN_MD_DBG_PROCNAME, 0664, NULL);
++	if (gConnMdDbgEntry == NULL) {
++		CONN_MD_ERR_FUNC("Unable to create /proc entry\n\r");
++		return -1;
++	}
++
++	gConnMdDbgEntry->read_proc = conn_md_dbg_read;
++	gConnMdDbgEntry->write_proc = conn_md_dbg_write;
++#endif
++	return 0;
++
++}
++
++int conn_md_dbg_deinit(void)
++{
++
++#if USE_NEW_PROC_FS_FLAG
++	if (gConnMdDbgEntry != NULL)
++		proc_remove(gConnMdDbgEntry);
++#else
++
++	if (gConnMdDbgEntry != NULL) {
++		remove_proc_entry(CONN_MD_DBG_PROCNAME, NULL);
++		return -1;
++	}
++#endif
++
++	return 0;
++
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/conn_md_test.c
+@@ -0,0 +1,156 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++
++#define DFT_TAG "[CONN_MD_EXP]"
++#include "conn_md_log.h"
++
++#include "conn_md_exp.h"
++
++#include "conn_md.h"
++
++struct conn_md_bridge_ops g_ops;
++
++static int conn_md_test_rx_cb(struct ipc_ilm *ilm);
++
++int conn_md_test(void)
++{
++#define PACKAGE_SIZE 100
++
++	struct ipc_ilm ilm;
++	struct local_para *p_buf_str;
++	int i = 0;
++	int msg_len = 0;
++
++	p_buf_str = kmalloc(sizeof(struct local_para) + PACKAGE_SIZE,
++				GFP_ATOMIC);
++	if (p_buf_str == NULL) {
++		CONN_MD_ERR_FUNC("kmalloc for local para structure failed.\n");
++		return -1;
++	}
++	p_buf_str->msg_len = PACKAGE_SIZE;
++	for (i = 0; i < PACKAGE_SIZE; i++)
++		p_buf_str->data[i] = i;
++
++	ilm.local_para_ptr = p_buf_str;
++
++	g_ops.rx_cb = conn_md_test_rx_cb;
++
++	mtk_conn_md_bridge_reg(0x800001, &g_ops);
++	mtk_conn_md_bridge_reg(0x800005, &g_ops);
++	mtk_conn_md_bridge_reg(0x800009, &g_ops);
++
++	ilm.dest_mod_id = 0x800005;
++	ilm.src_mod_id = 0x800001;
++	ilm.msg_id = 0;
++
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	ilm.dest_mod_id = 0x800005;
++	ilm.src_mod_id = 0x800009;
++	ilm.msg_id++;
++	msg_len += 10;
++	msg_len = ((msg_len >= PACKAGE_SIZE) ? PACKAGE_SIZE : msg_len);
++	ilm.local_para_ptr->msg_len = msg_len;
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	ilm.dest_mod_id = 0x800001;
++	ilm.src_mod_id = 0x800009;
++	ilm.msg_id++;
++	msg_len += 10;
++	msg_len = ((msg_len >= PACKAGE_SIZE) ? PACKAGE_SIZE : msg_len);
++	ilm.local_para_ptr->msg_len = msg_len;
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	ilm.dest_mod_id = 0x80000a;
++	ilm.src_mod_id = 0x800009;
++	ilm.msg_id++;
++	msg_len += 10;
++	msg_len = ((msg_len >= PACKAGE_SIZE) ? PACKAGE_SIZE : msg_len);
++	ilm.local_para_ptr->msg_len = msg_len;
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	ilm.dest_mod_id = 0x800009;
++	ilm.src_mod_id = 0x80000a;
++	ilm.msg_id++;
++	msg_len += 10;
++	msg_len = ((msg_len >= PACKAGE_SIZE) ? PACKAGE_SIZE : msg_len);
++	ilm.local_para_ptr->msg_len = msg_len;
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	ilm.dest_mod_id = 0x800005;
++	ilm.src_mod_id = 0x800001;
++	ilm.msg_id++;
++	msg_len += 10;
++	msg_len = ((msg_len >= PACKAGE_SIZE) ? PACKAGE_SIZE : msg_len);
++	ilm.local_para_ptr->msg_len = msg_len;
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	ilm.dest_mod_id = 0x800001;
++	ilm.src_mod_id = 0x800005;
++	ilm.msg_id++;
++	msg_len += 10;
++	msg_len = ((msg_len >= PACKAGE_SIZE) ? PACKAGE_SIZE : msg_len);
++	ilm.local_para_ptr->msg_len = msg_len;
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	ilm.dest_mod_id = 0x800001;
++	ilm.src_mod_id = 0x80000a;
++	ilm.msg_id++;
++	msg_len += 10;
++	msg_len = ((msg_len >= PACKAGE_SIZE) ? PACKAGE_SIZE : msg_len);
++	ilm.local_para_ptr->msg_len = msg_len;
++	mtk_conn_md_bridge_send_msg(&ilm);
++
++	kfree(p_buf_str);
++	p_buf_str = NULL;
++
++	conn_md_dmp_msg_queued(0, 0x80000a);
++
++	mtk_conn_md_bridge_unreg(0x800001);
++	conn_md_dmp_msg_queued(0, 0);
++	conn_md_dmp_msg_active(0, 0);
++
++	mtk_conn_md_bridge_unreg(0x800009);
++
++	mtk_conn_md_bridge_unreg(0x80000a);
++	conn_md_dmp_msg_queued(0, 0);
++	conn_md_dmp_msg_active(0, 0);
++
++	conn_md_dmp_msg_logged(0x800009, 0x800001);
++	conn_md_dmp_msg_logged(0x800009, 0);
++	conn_md_dmp_msg_logged(0, 0);
++	conn_md_dmp_msg_logged(0x80000a, 0);
++
++	return 0;
++}
++
++static int conn_md_test_rx_cb(struct ipc_ilm *ilm)
++{
++	int i = 0;
++
++	pr_info("%s, ilm:0x%p\n", __func__, ilm);
++	pr_info("%s, ilm:src_id(%d), dst_id(%d), msg_id(%d)\n", __func__,
++		ilm->src_mod_id, ilm->dest_mod_id, ilm->msg_id);
++
++	pr_info("%s, local_para_ptr:0x%p, msg_len:%d\n",
++		__func__, ilm->local_para_ptr,
++		ilm->local_para_ptr->msg_len);
++
++	for (i = 0; i < ilm->local_para_ptr->msg_len; i++) {
++		pr_info("%d ", ilm->local_para_ptr->data[i]);
++		if ((i != 0) && (((1 + i) % 8) == 0))
++			pr_info("\n");
++	}
++	return 0;
++}
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/include/conn_md.h
+@@ -0,0 +1,88 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CONN_MD_H_
++#define __CONN_MD_H_
++
++#include "conn_md_exp.h"
++#include "conn_md_dump.h"
++
++/*-----------------------Data Structure Definition-----------------------*/
++
++enum user_state {
++	USER_MIN,
++	USER_REGED,
++	USER_ENABLED,
++	USER_DISABLED,
++	USER_UNREGED,
++	USER_MAX,
++};
++
++struct conn_md_user {
++	uint32 u_id;
++	enum user_state state;
++	struct conn_md_bridge_ops ops;
++	struct list_head entry;
++};
++
++struct conn_md_msg {
++	struct ipc_ilm ilm;
++	struct list_head entry;
++	struct local_para local_para;
++};
++
++struct conn_md_queue {
++	struct list_head list;
++	struct mutex lock;
++	uint32 counter;
++};
++
++struct conn_md_user_list {
++	uint32 counter;
++	struct list_head list;
++	struct mutex lock;	/*lock for user add/delete/check */
++};
++
++struct conn_md_struct {
++	/*con-md-thread used for tx queue handle */
++	struct task_struct *p_task;
++	struct completion tx_comp;
++
++	struct conn_md_user_list user_list;
++	struct conn_md_queue act_queue;
++	struct conn_md_queue msg_queue;
++	struct conn_md_dmp_msg_log *p_msg_dmp_sys;
++};
++
++struct conn_md_time_struct {
++	unsigned long long sec;
++	unsigned long msec;
++};
++
++#define CONN_MD_MSG_MAX_NUM 5
++#define CONN_MD_MSG_TIME_LENGTH 16
++#define CONN_MD_BUF_SIZE (CONN_MD_MSG_MAX_NUM * CONN_MD_MSG_TIME_LENGTH)
++struct conn_md_log_msg_info {
++	struct conn_md_time_struct msg_begin_time;
++	int msg_total;
++	char msg_buf[CONN_MD_BUF_SIZE];
++};
++
++extern int conn_md_send_msg(struct ipc_ilm *ilm);
++extern int conn_md_del_user(uint32 u_id);
++extern int conn_md_add_user(uint32 u_id, struct conn_md_bridge_ops *p_ops);
++extern int conn_md_dmp_msg_logged(uint32 src_id, uint32 dst_id);
++extern int conn_md_dmp_msg_active(uint32 src_id, uint32 dst_id);
++extern int conn_md_dmp_msg_queued(uint32 src_id, uint32 dst_id);
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/include/conn_md_dbg.h
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CONN_MD_DBG_H_
++#define __CONN_MD_DBG_H_
++
++typedef int (*conn_md_dev_dbg_func) (int par1, int par2, int par3);
++
++extern int conn_md_dbg_init(void);
++extern int conn_md_test(void);
++ssize_t conn_md_dbg_read(struct file *filp, char __user *buf,
++			size_t count, loff_t *f_pos);
++ssize_t conn_md_dbg_write(struct file *filp, const char __user *buf,
++			size_t count, loff_t *f_pos);
++
++#endif/*__CONN_MD_DBG_H_*/
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/include/conn_md_dump.h
+@@ -0,0 +1,55 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CONN_MD_DUMP_H_
++#define __CONN_MD_DUMP_H_
++
++#include "conn_md_log.h"
++#include "conn_md_exp.h"
++
++#define LENGTH_PER_PACKAGE 8
++#define NUMBER_OF_MSG_LOGGED 16
++
++enum conn_md_msg_type {
++	MSG_ENQUEUE = 1,
++	MSG_DEQUEUE = 2,
++	MSG_EN_DE_QUEUE = 3,
++};
++
++struct conn_md_dmp_msg_str {
++	unsigned int sec;
++	unsigned int usec;
++	enum conn_md_msg_type type;
++	struct ipc_ilm ilm;
++	uint16 msg_len;
++	uint8 data[LENGTH_PER_PACKAGE];
++};
++
++struct conn_md_dmp_msg_log {
++	struct conn_md_dmp_msg_str msg[NUMBER_OF_MSG_LOGGED];
++	uint16 in;
++	uint16 out;
++	uint32 size;
++	struct mutex lock;
++};
++
++extern struct conn_md_dmp_msg_log *conn_md_dmp_init(void);
++extern int conn_md_dmp_deinit(struct conn_md_dmp_msg_log *p_log);
++
++extern int conn_md_dmp_in(struct ipc_ilm *p_ilm,
++			enum conn_md_msg_type msg_type,
++			struct conn_md_dmp_msg_log *p_msg_log);
++extern int conn_md_dmp_out(struct conn_md_dmp_msg_log *p_msg_log,
++			uint32 src_id, uint32 dst_id);
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/include/conn_md_exp.h
+@@ -0,0 +1,56 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CONN_MD_EXP_H_
++#define __CONN_MD_EXP_H_
++
++#include "port_ipc.h"		/*mediatek/kernel/drivers/eccci */
++#include "ccci_ipc_task_ID.h"	/*mediatek/kernel/drivers/eccci */
++#define uint32 unsigned int
++#define uint8 unsigned char
++#define uint16 unsigned short
++#ifdef CHAR
++#undef CHAR
++#endif
++
++/*
++ * Provide a common conn_md_ipc_ilm_t definition for wmt_drv.ko to reference,
++ * this decouples wmt_drv.ko away from ECCCI's ipc_ilm definition, as its
++ * naming varies between different Kernel versions currently.
++ * If in future the fields in this struct varies as well, we could either:
++ * 1. Redefine entire struct from conn_md, or
++ * 2. Let wmt_drv.ko handles the difference via:
++ *      #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0))
++ */
++#define conn_md_ipc_ilm_t struct ipc_ilm
++
++enum CONN_MD_ERR_CODE {
++	CONN_MD_ERR_NO_ERR = 0,
++	CONN_MD_ERR_DEF_ERR = -1,
++	CONN_MD_ERR_INVALID_PARAM = -2,
++	CONN_MD_ERR_OTHERS = -4,
++};
++
++/*For IDC test*/
++typedef int (*conn_md_msg_rx_cb) (struct ipc_ilm *ilm);
++
++struct conn_md_bridge_ops {
++	conn_md_msg_rx_cb rx_cb;
++};
++
++extern int mtk_conn_md_bridge_reg(uint32 u_id,
++				struct conn_md_bridge_ops *p_ops);
++extern int mtk_conn_md_bridge_unreg(uint32 u_id);
++extern int mtk_conn_md_bridge_send_msg(struct ipc_ilm *ilm);
++
++#endif /*__CONN_MD_EXP_H_*/
+--- /dev/null
++++ b/drivers/misc/mediatek/conn_md/include/conn_md_log.h
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CONN_MD_LOG_H_
++#define __CONN_MD_LOG_H_
++
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/mutex.h>
++#include <linux/spinlock.h>
++#include <linux/atomic.h>
++#include <linux/list.h>
++#include <linux/dma-mapping.h>
++#include <linux/vmalloc.h>
++#include <linux/sched.h>
++#include <linux/kthread.h>
++#include <linux/workqueue.h>
++#include <linux/interrupt.h>
++#include <linux/fs.h>
++#include <linux/uaccess.h>
++#include <linux/string.h>
++#include <linux/time.h>		/* gettimeofday */
++#include <linux/vmalloc.h>
++#include <linux/mm.h>
++#include <linux/device.h>
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <linux/completion.h>
++#include <linux/slab.h>
++#include <linux/proc_fs.h>
++#include <linux/kernel.h>
++
++#define DBG_LOG_STR_SIZE 256
++
++extern int g_conn_md_dbg_lvl;
++
++extern int __conn_md_get_log_lvl(void);
++extern int conn_md_log_set_lvl(int log_lvl);
++extern int __conn_md_log_print(const char *str, ...);
++
++#define CONN_MD_LOG_LOUD    4
++#define CONN_MD_LOG_DBG     3
++#define CONN_MD_LOG_INFO    2
++#define CONN_MD_LOG_WARN    1
++#define CONN_MD_LOG_ERR     0
++
++#ifndef DFT_TAG
++#define DFT_TAG         "[CONN-MD-DFT]"
++#endif
++
++#define CONN_MD_LOUD_FUNC(fmt, arg ...) \
++do { \
++	if (__conn_md_get_log_lvl() >= CONN_MD_LOG_LOUD) \
++		__conn_md_log_print(DFT_TAG "[L]%s:"  fmt, \
++		__func__, ## arg); \
++} while (0)
++
++#define CONN_MD_INFO_FUNC(fmt, arg ...) \
++do { \
++	if (__conn_md_get_log_lvl() >= CONN_MD_LOG_INFO)\
++		__conn_md_log_print(DFT_TAG "[I]%s:"  fmt, \
++		__func__, ## arg); \
++} while (0)
++
++#define CONN_MD_WARN_FUNC(fmt, arg ...) \
++do { \
++	if (__conn_md_get_log_lvl() >= CONN_MD_LOG_WARN)\
++		__conn_md_log_print(DFT_TAG "[W]%s:"  fmt, \
++		__func__, ## arg); \
++} while (0)
++
++#define CONN_MD_ERR_FUNC(fmt, arg ...)\
++do {\
++	if (__conn_md_get_log_lvl() >= CONN_MD_LOG_ERR)\
++		__conn_md_log_print(DFT_TAG "[E]%s(%d):"  fmt,\
++		__func__, __LINE__, ## arg);\
++} while (0)
++
++#define CONN_MD_DBG_FUNC(fmt, arg ...) \
++do { \
++	if (__conn_md_get_log_lvl() >= CONN_MD_LOG_DBG) \
++		__conn_md_log_print(DFT_TAG "[D]%s:"  fmt, \
++		__func__, ## arg); \
++} while (0)
++
++#define CONN_MD_TRC_FUNC(f) \
++do { \
++	if (__conn_md_get_log_lvl() >= CONN_MD_LOG_DBG) \
++		__conn_md_log_print(DFT_TAG "<%s> <%d>\n", \
++		__func__, __LINE__); \
++} while (0)
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/eccci/port_ipc.h
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef __PORT_IPC_H__
++#define __PORT_IPC_H__
++
++#include <asm/types.h>
++#include <linux/compiler.h>
++#include "ccci_config.h" /* for platform override */
++
++/* MD <-> AP Msg_id mapping enum */
++enum CCCI_IPC_MSG_ID_RANGE {
++	IPC_L4C_MSG_ID_BEGIN = 0x80000000,
++#if defined(IPC_L4C_MSG_ID_LEN)
++	IPC_L4C_MSG_ID_RANGE = IPC_L4C_MSG_ID_LEN,
++#else
++	IPC_L4C_MSG_ID_RANGE = 0x80,
++#endif
++	IPC_EL1_MSG_ID_BEGIN = IPC_L4C_MSG_ID_BEGIN + IPC_L4C_MSG_ID_RANGE,
++	IPC_EL1_MSG_ID_RANGE = 0x20,
++	IPC_CCCIIPC_MSG_ID_BEGIN = IPC_EL1_MSG_ID_BEGIN + IPC_EL1_MSG_ID_RANGE,
++	IPC_CCCIIPC_MSG_ID_RANGE = 0x10,
++	IPC_IPCORE_MSG_ID_BEGIN =
++		IPC_CCCIIPC_MSG_ID_BEGIN + IPC_CCCIIPC_MSG_ID_RANGE,
++	IPC_IPCORE_MSG_ID_RANGE = 0x8,
++	IPC_MDT_MSG_ID_BEGIN =
++		IPC_IPCORE_MSG_ID_BEGIN + IPC_IPCORE_MSG_ID_RANGE,
++	IPC_MDT_MSG_ID_RANGE = 0x8,
++	IPC_UFPM_MSG_ID_BEGIN =
++		IPC_MDT_MSG_ID_BEGIN + IPC_MDT_MSG_ID_RANGE,
++	IPC_UFPM_MSG_ID_RANGE = 0x18,
++};
++
++struct local_para {
++	u8 ref_count;
++	u8 _stub; /* MD complier will align ref_count to 16bit */
++	u16 msg_len;
++	u8 data[0];
++} __packed;
++
++struct peer_buff {
++	u16 pdu_len;
++	u8 ref_count;
++	u8 pb_resvered;
++	u16 free_header_space;
++	u16 free_tail_space;
++	u8 data[0];
++} __packed;
++
++struct ipc_ilm {
++	u32 src_mod_id;
++	u32 dest_mod_id;
++	u32 sap_id;
++	u32 msg_id;
++	struct local_para *local_para_ptr;
++	struct peer_buff *peer_buff_ptr;
++}; /* for conn_md */
++
++struct ccci_emi_info {
++	u8 ap_domain_id;
++	u8 md_domain_id;
++	u8 reserve[6];
++	u64 ap_view_bank0_base;
++	u64 bank0_size;
++	u64 ap_view_bank4_base;
++	u64 bank4_size;
++} __packed; /* for USB direct tethering */
++
++/* export API */
++int ccci_ipc_send_ilm(int md_id, struct ipc_ilm *in_ilm);
++int ccci_get_emi_info(int md_id, struct ccci_emi_info *emi_info);
++
++/* external API */
++#if defined(CONFIG_MTK_MD_DIRECT_TETHERING_SUPPORT) || \
++	defined(CONFIG_MTK_MD_DIRECT_LOGGING_SUPPORT)
++extern int rndis_md_msg_hdlr(struct ipc_ilm *ilm);
++#endif
++#if defined(CONFIG_MTK_MD_DIRECT_TETHERING_SUPPORT)
++extern int pkt_track_md_msg_hdlr(struct ipc_ilm *ilm);
++#endif
++
++#endif				/* __PORT_IPC_H__ */
+--- /dev/null
++++ b/drivers/misc/mediatek/eccci/ccci_ipc_task_ID.h
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __CCCI_IPC_TASK_ID_H__
++#define __CCCI_IPC_TASK_ID_H__
++/* Priority --> Local module ID --> External ID --> Max sent message */
++/* X_IPC_MODULE_CONF(1,M_SSDBG1,0,1)     //TASK_ID_1 */
++/* X_IPC_MODULE_CONF(1,AP_SSDBG2,1,1)     //TASK_ID_2 */
++#ifdef __IPC_ID_TABLE
++#define X_IPC_MODULE_CONF(a, b, c, d) {c, b},
++#else
++#define X_IPC_MODULE_CONF(a, b, c, d)
++#endif
++
++#define AP_UNIFY_ID_FLAG (1<<31)
++#define MD_UNIFY_ID_FLAG (0<<31)
++
++/* ---------------------------------------------------------- */
++#define    MD_MOD_L4C    0
++#define    MD_MOD_L4C_1  1
++#define    MD_MOD_L4C_2  2
++#define    MD_MOD_L4C_3  3
++#define    MD_MOD_AOMGR  4
++#define    MD_MOD_EL1    5
++#define    MD_MOD_MISCTA 6
++#define    MD_MOD_CCCIIPC 7
++#define    MD_MOD_IPCORE  8
++#define    MD_MOD_MDT     9
++#define    MD_MOD_UFPM    10
++#define    MD_MOD_USBCLASS 11
++#define    MD_MOD_WAAL     12
++/* mp1 1, mp2 0, ro 1 */
++#define    MD_MOD_GMMGR    13
++
++#define    AP_IPC_AGPS   0
++#define    AP_IPC_DHCP   1
++#define    AP_IPC_GPS    2
++#define    AP_IPC_WMT    3
++#define    AP_IPC_MISCTA 4
++#define    AP_IPC_CCCIIPC 5
++#define    AP_IPC_GF      6
++#define    AP_IPC_PKTTRC  7
++#define    AP_IPC_USB     8
++#define    AP_IPC_LWAPROXY 9
++
++#define    AP_MOD_AGPS   (AP_IPC_AGPS | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_DHCP   (AP_IPC_DHCP | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_GPS    (AP_IPC_GPS | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_WMT    (AP_IPC_WMT | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_MISCTA (AP_IPC_MISCTA | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_CCCIIPC (AP_IPC_CCCIIPC | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_GF      (AP_IPC_GF | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_PKTTRC  (AP_IPC_PKTTRC | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_USB     (AP_IPC_USB | AP_UNIFY_ID_FLAG)
++#define    AP_MOD_LWAPROXY  (AP_IPC_LWAPROXY | AP_UNIFY_ID_FLAG)
++
++/* -------------------------------------------------------------------------- */
++X_IPC_MODULE_CONF(1, MD_MOD_L4C, MD_UNIFY_ID_FLAG | MD_MOD_L4C, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_L4C_1, MD_UNIFY_ID_FLAG | MD_MOD_L4C_1, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_L4C_2, MD_UNIFY_ID_FLAG | MD_MOD_L4C_2, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_L4C_3, MD_UNIFY_ID_FLAG | MD_MOD_L4C_3, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_AOMGR, MD_UNIFY_ID_FLAG | MD_MOD_AOMGR, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_EL1, MD_UNIFY_ID_FLAG | MD_MOD_EL1, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_MISCTA, MD_UNIFY_ID_FLAG | MD_MOD_MISCTA, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_CCCIIPC, MD_UNIFY_ID_FLAG | MD_MOD_CCCIIPC, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_IPCORE, MD_UNIFY_ID_FLAG | MD_MOD_IPCORE, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_MDT, MD_UNIFY_ID_FLAG | MD_MOD_MDT, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_UFPM, MD_UNIFY_ID_FLAG | MD_MOD_UFPM, 1)
++X_IPC_MODULE_CONF(1, MD_MOD_WAAL, MD_UNIFY_ID_FLAG | MD_MOD_WAAL, 1)
++/* mp1 1, mp2 0, ro 1 */
++X_IPC_MODULE_CONF(1, MD_MOD_GMMGR, MD_UNIFY_ID_FLAG | MD_MOD_GMMGR, 1)
++
++/* -------------------------------------------------------------------------- */
++X_IPC_MODULE_CONF(1, AP_IPC_AGPS, AP_UNIFY_ID_FLAG | AP_IPC_AGPS, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_DHCP, AP_UNIFY_ID_FLAG | AP_IPC_DHCP, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_GPS, AP_UNIFY_ID_FLAG | AP_IPC_GPS, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_WMT, AP_UNIFY_ID_FLAG | AP_IPC_WMT, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_MISCTA, AP_UNIFY_ID_FLAG | AP_IPC_MISCTA, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_CCCIIPC, AP_UNIFY_ID_FLAG | AP_IPC_CCCIIPC, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_GF, AP_UNIFY_ID_FLAG | AP_IPC_GF, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_PKTTRC, AP_UNIFY_ID_FLAG | AP_IPC_PKTTRC, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_USB, AP_UNIFY_ID_FLAG | AP_IPC_USB, 1)
++X_IPC_MODULE_CONF(1, AP_IPC_LWAPROXY, AP_UNIFY_ID_FLAG | AP_IPC_LWAPROXY, 1)
++/* ------------------------------------------------------------------------- */
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/eccci/mt6771/ccci_config.h
+@@ -0,0 +1,59 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef __ECCCI_INTERNAL_OPTION__
++#define __ECCCI_INTERNAL_OPTION__
++
++/* platform info */
++#define MD_GENERATION       (6293)
++#define MD_PLATFORM_INFO    "6293"
++#define AP_PLATFORM_INFO    "MT6771"
++#define CCCI_DRIVER_VER     0x20110118
++
++/* buffer management customization */
++#define CCCI_MTU            (3584-128)
++#define CCCI_NET_MTU        (1500)
++#define SKB_POOL_SIZE_4K    (256)
++#define SKB_POOL_SIZE_1_5K  (256)
++#define SKB_POOL_SIZE_16    (64)
++#define BM_POOL_SIZE  \
++(SKB_POOL_SIZE_4K+SKB_POOL_SIZE_1_5K+SKB_POOL_SIZE_16)
++/*reload pool if pool size dropped below 1/RELOAD_TH */
++#define RELOAD_TH           (3)
++
++/* EE dump cunstomization */
++#define CCCI_EE_SIZE_CCIF_SRAM (72) /* SRAM size we dump into smem */
++/* CCIF dump offset in MD SS debug region */
++#define CCCI_EE_OFFSET_CCIF_SRAM (1024 - CCCI_EE_SIZE_CCIF_SRAM)
++/* flag to tell WDT is triggered by EPON or not, in MD SS debug region */
++#define CCCI_EE_OFFSET_EPON_MD1 (0x1C24)
++#define CCCI_EE_OFFSET_EPON_MD3 (0x464)
++/* flag to enable MD power off checking or not, in MD SS debug region */
++#define CCCI_EE_OFFSET_EPOF_MD1 (7*1024+0x234)
++#define CCCI_EE_SMEM_TOTAL_SIZE (64*1024)
++#define CCCI_SMEM_SIZE_RUNTIME_AP (0x800) /* AP runtime data size */
++#define CCCI_SMEM_SIZE_RUNTIME_MD (0x800) /* MD runtime data size */
++#define CCCI_SMEM_OFFSET_SEQERR (0x34) /* in MD CCCI debug region */
++#define CCCI_SMEM_SIZE_DBM (160)
++#define CCCI_SMEM_SIZE_DBM_GUARD (8)
++
++#define IPC_L4C_MSG_ID_LEN   (0x40)
++
++/* feature option, always try using platform info first! */
++#define FEATURE_SCP_CCCI_SUPPORT
++/*#define ENABLE_EMI_PROTECTION*/
++#define ENABLE_32K_CLK_LESS
++#define FEATURE_CLK_BUF
++/*#define CCCI_LOG_LEVEL     1*/
++
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/thermal/Kconfig
+@@ -0,0 +1,19 @@
++# Modem thermal: the PA thermistor zone and the modem coolers stock binds
++# to it
++
++config MTK_THERMAL_BTSMDPA
++	bool "MediaTek modem PA thermistor"
++	depends on THERMAL_OF && IIO
++	help
++	  The mtktsbtsmdpa thermal sensor: the NTC on SoC AUXADC channel 1
++	  near the modem PA, read as stock's mtk_ts_btsmdpa does. The zone,
++	  its trips and cooling maps come from the board DT.
++
++config MTK_COOLER_MUTT
++	bool "MediaTek modem throughput coolers"
++	depends on THERMAL_OF
++	help
++	  The modem uplink throttling coolers mtk-cl-adp-mutt, mtk-cl-noIMS,
++	  mtk-cl-mdoff and mtk-cl-mutt00 to 03, with stock's
++	  /proc/driver/thermal/clmutt controls. They pass limits to the modem
++	  through eccci.
+--- /dev/null
++++ b/drivers/misc/mediatek/thermal/mt6771/inc/mtk_cooler_setting.h
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (C) 2017 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef _MTK_COOLER_SETTING_H
++#define _MTK_COOLER_SETTING_H
++
++/*=============================================================
++ * CONFIG (SW related)
++ *=============================================================
++ */
++ /* mtk_cooler_mutt.c */
++/* 1: turn on MD throttle V2 cooler; 0: turn off */
++#define FEATURE_MUTT_V2				(1)
++
++/* mtk_cooler_mutt.c */
++/* 1: turn on MD Thermal Warning Notification; 0: turn off */
++#define FEATURE_THERMAL_DIAG		(1)
++
++/* mtk_cooler_mutt.c */
++/* 1: turn on adaptive MD throttle cooler; 0: turn off  */
++#define FEATURE_ADAPTIVE_MUTT		(1)
++
++/* mtk_ta.c */
++/* 1: turn on SPA; 0: turn off  */
++#define FEATURE_SPA		(0)
++
++#endif				/* _MTK_COOLER_SETTING_H */
+--- /dev/null
++++ b/drivers/misc/mediatek/thermal/common/thermal_zones/Makefile
+@@ -0,0 +1,4 @@
++# SPDX-License-Identifier: GPL-2.0
++# Modem PA thermistor zone sensor
++
++obj-y += mtk_ts_btsmdpa.o
+--- /dev/null
++++ b/drivers/misc/mediatek/thermal/common/thermal_zones/mtk_ts_btsmdpa.c
+@@ -0,0 +1,200 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Modem PA thermistor (mtktsbtsmdpa) as a 5.10 OF thermal sensor.
++ *
++ * Stock's mtk_ts_btsmdpa reads an NTC on SoC AUXADC channel 1 (AUX_IN1_NTC)
++ * with a 390 kOhm pull-up to 1.8 V and the NCP15WF104F03RC 100 k table 7
++ * (T thermal/mt6771/inc/tmp_bts.h, and thermal.conf's tzbtspa_param sets the
++ * same). This keeps its conversion: calibrated mV, R = 390000 * mV /
++ * (1800 - mV), clamped to the -40 C resistance, then linear between table
++ * rows in whole degrees, times 1000. The calibration and table are the same
++ * as the board NTC in mtk_charger_glue.c.
++ *
++ * The zone itself, its trips and the modem coolers bound to them are in the
++ * board DT (/thermal-zones/mtktsbtsmdpa), in place of stock's
++ * /proc/driver/thermal/tzbtspa written by thermal_manager.
++ */
++
++#define pr_fmt(fmt) "mtktsbtsmdpa: " fmt
++
++#include <linux/iio/consumer.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/thermal.h>
++#include <asm/unaligned.h>
++
++#define BTSMDPA_PULL_UP_R	390000	/* Ohm */
++#define BTSMDPA_PULL_UP_MV	1800
++#define BTSMDPA_OVER_CRITICAL_LOW	4397119	/* Ohm, -40 C */
++/* AUXADC efuse calibration, devinfo word 113, as stock's mtk_auxadc */
++#define AUXADC_DEVINFO_INDEX	113
++#define AUXADC_CALI_EN		BIT(20)
++
++struct btsmdpa_ntc {
++	int temp;	/* C */
++	int r;		/* Ohm */
++};
++
++/* Table 7 with APPLY_PRECISE_NTC_TABLE, which tmp_bts.h sets for mt6771 */
++static const struct btsmdpa_ntc btsmdpa_table7[] = {
++	{-40, 4397119}, {-35, 3088599}, {-30, 2197225}, {-25, 1581881},
++	{-20, 1151037}, {-15, 846579}, {-10, 628988}, {-5, 471632},
++	{0, 357012}, {5, 272500}, {10, 209710}, {15, 162651},
++	{20, 127080}, {25, 100000}, {30, 79222}, {35, 63167},
++	{40, 50677}, {41, 48528}, {42, 46482}, {43, 44533},
++	{44, 42675}, {45, 40904}, {46, 39213}, {47, 37601},
++	{48, 36063}, {49, 34595}, {50, 33195}, {51, 31859},
++	{52, 30584}, {53, 29366}, {54, 28203}, {55, 27091},
++	{56, 26028}, {57, 25013}, {58, 24042}, {59, 23113},
++	{60, 22224}, {61, 21374}, {62, 20560}, {63, 19782},
++	{64, 19036}, {65, 18322}, {66, 17640}, {67, 16986},
++	{68, 16360}, {69, 15759}, {70, 15184}, {71, 14631},
++	{72, 14100}, {73, 13591}, {74, 13103}, {75, 12635},
++	{76, 12187}, {77, 11756}, {78, 11343}, {79, 10946},
++	{80, 10565}, {81, 10199}, {82, 9847}, {83, 9509},
++	{84, 9184}, {85, 8872}, {86, 8572}, {87, 8283},
++	{88, 8005}, {89, 7738}, {90, 7481}, {95, 6337},
++	{100, 5384}, {105, 4594}, {110, 3934}, {115, 3380},
++	{120, 2916}, {125, 2522},
++};
++
++struct btsmdpa {
++	struct device *dev;
++	struct iio_channel *chan;
++	struct mutex lock;
++	int cali_oe, cali_ge;	/* ADC counts, 0 when not fused */
++};
++
++/* mtkts_btsmdpa_thermistor_conver_temp: linear between rows, whole degrees */
++static int btsmdpa_r_to_temp(int r)
++{
++	int i, n = ARRAY_SIZE(btsmdpa_table7);
++	int r1, t1, r2, t2;
++
++	if (r >= btsmdpa_table7[0].r)
++		return -40;
++	if (r <= btsmdpa_table7[n - 1].r)
++		return 125;
++	r1 = btsmdpa_table7[0].r;
++	t1 = btsmdpa_table7[0].temp;
++	for (i = 0; i < n; i++) {
++		if (r >= btsmdpa_table7[i].r)
++			break;
++		r1 = btsmdpa_table7[i].r;
++		t1 = btsmdpa_table7[i].temp;
++	}
++	r2 = btsmdpa_table7[i].r;
++	t2 = btsmdpa_table7[i].temp;
++	return ((r - r2) * t1 + (r1 - r) * t2) / (r1 - r2);
++}
++
++/* mtk_ts_btsmdpa_volt_to_temp; a negative calibrated mV reads -40 C */
++static int btsmdpa_mv_to_temp(int mv)
++{
++	u64 v_cri = (u64)BTSMDPA_OVER_CRITICAL_LOW * BTSMDPA_PULL_UP_MV;
++	int r;
++
++	do_div(v_cri, BTSMDPA_OVER_CRITICAL_LOW + BTSMDPA_PULL_UP_R);
++	if (mv < 0 || mv > (int)v_cri)
++		r = BTSMDPA_OVER_CRITICAL_LOW;
++	else
++		r = BTSMDPA_PULL_UP_R * mv / (BTSMDPA_PULL_UP_MV - mv);
++	return btsmdpa_r_to_temp(r);
++}
++
++/* Stock's mt_auxadc_update_cali from LK's atag,devinfo (word 0 is the count). */
++static void btsmdpa_read_cali(struct btsmdpa *b)
++{
++	struct device_node *chosen = of_find_node_by_path("/chosen");
++	const u8 *tag;
++	int length;
++	u32 w;
++
++	if (!chosen)
++		return;
++	tag = of_get_property(chosen, "atag,devinfo", &length);
++	if (tag && length >= sizeof(u32) * (AUXADC_DEVINFO_INDEX + 2) &&
++	    get_unaligned_le32(tag) > AUXADC_DEVINFO_INDEX) {
++		w = get_unaligned_le32(tag + sizeof(u32) * (AUXADC_DEVINFO_INDEX + 1));
++		if (w & AUXADC_CALI_EN) {
++			b->cali_oe = (int)(w & 0x3ff) - 512;
++			b->cali_ge = (int)((w >> 10) & 0x3ff) - 512;
++		}
++	}
++	of_node_put(chosen);
++}
++
++/* Called by the thermal core in process context; may sleep. */
++static int btsmdpa_get_temp(void *data, int *temp)
++{
++	struct btsmdpa *b = data;
++	int mv, raw, ret, t;
++
++	mutex_lock(&b->lock);
++	ret = iio_read_channel_processed(b->chan, &mv);
++	mutex_unlock(&b->lock);
++	if (ret < 0) {
++		dev_warn_ratelimited(b->dev, "AUXADC read failed (%d)\n", ret);
++		return ret;
++	}
++	/* mt6577_auxadc gives raw * 1500 / 4096; redo it with stock's calibration. */
++	if (b->cali_oe || b->cali_ge) {
++		raw = DIV_ROUND_CLOSEST(mv * 4096, 1500);
++		mv = (raw - b->cali_oe) * 1500 / (4096 + b->cali_ge);
++	}
++	t = btsmdpa_mv_to_temp(mv);
++	dev_info_once(b->dev, "first reading on AUXADC channel 1: %d mV, %d C\n",
++		      mv, t);
++	*temp = t * 1000;
++	return 0;
++}
++
++static const struct thermal_zone_of_device_ops btsmdpa_ops = {
++	.get_temp = btsmdpa_get_temp,
++};
++
++static int btsmdpa_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct thermal_zone_device *tz;
++	struct btsmdpa *b;
++
++	b = devm_kzalloc(dev, sizeof(*b), GFP_KERNEL);
++	if (!b)
++		return -ENOMEM;
++	b->dev = dev;
++	mutex_init(&b->lock);
++
++	/* the channel name stock's driver asks for */
++	b->chan = devm_iio_channel_get(dev, "thermistor-ch1");
++	if (IS_ERR(b->chan))
++		return dev_err_probe(dev, PTR_ERR(b->chan), "no thermistor-ch1 channel\n");
++	btsmdpa_read_cali(b);
++	dev_info(dev, "AUXADC calibration offset %d, gain %d\n", b->cali_oe, b->cali_ge);
++
++	tz = devm_thermal_zone_of_sensor_register(dev, 0, b, &btsmdpa_ops);
++	if (IS_ERR(tz))
++		return dev_err_probe(dev, PTR_ERR(tz), "zone register failed\n");
++	return 0;
++}
++
++static const struct of_device_id btsmdpa_of_match[] = {
++	{ .compatible = "mediatek,mtboard-thermistor2" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, btsmdpa_of_match);
++
++static struct platform_driver btsmdpa_driver = {
++	.probe = btsmdpa_probe,
++	.driver = {
++		.name = "mtktsbtsmdpa",
++		.of_match_table = btsmdpa_of_match,
++	},
++};
++module_platform_driver(btsmdpa_driver);
++
++MODULE_DESCRIPTION("MediaTek modem PA thermistor");
++MODULE_LICENSE("GPL v2");
+--- /dev/null
++++ b/drivers/misc/mediatek/thermal/common/coolers/Makefile
+@@ -0,0 +1,7 @@
++# SPDX-License-Identifier: GPL-2.0
++# Modem throughput coolers from the 4.14 MediaTek tree
++
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/thermal/$(MTK_PLATFORM)/inc
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat/
++
++obj-y += mtk_cooler_mutt.o
+--- /dev/null
++++ b/drivers/misc/mediatek/thermal/common/coolers/mtk_cooler_mutt.c
+@@ -0,0 +1,1957 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2017 MediaTek Inc.
++ *
++ * Modem uplink throttling (MUTT) coolers, from the 4.14 MediaTek tree, on
++ * the 5.10 thermal core. mtk-cl-adp-mutt, mtk-cl-noIMS
++ * and mtk-cl-mdoff register on their DT nodes under /modem-coolers, which
++ * the mtktsbtsmdpa zone's cooling maps point at, as stock's thermal.conf
++ * binds them on tzbtspa. mtk-cl-mutt00 to 03 register without a node, as
++ * stock leaves them unbound. The modem calls (exec_ccci_kern_func_by_md_id,
++ * ccci_get_md_boot_count) are eccci's; until eccci is built the weak ones
++ * in ccci_util_dummy.c answer.
++ *
++ * 5.10 differences: the thermal core only calls set_cur_state when a
++ * state changes, where stock's governor called it on every poll, so the
++ * adaptive cooler re-runs its loop from its own work every second while it
++ * is on. All cooler state is under cl_mutt_lock. The thermal core calls
++ * set_cur_state holding the zone lock, so the work reads the zone
++ * temperature before it takes cl_mutt_lock, never under it.
++ */
++
++#include <linux/version.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/kobject.h>
++#include <linux/proc_fs.h>
++#include <linux/uaccess.h>
++#include <linux/err.h>
++#include <linux/syscalls.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/rcupdate.h>
++#include <linux/sched/signal.h>
++#include <linux/seq_file.h>
++#include <linux/thermal.h>
++#include <linux/workqueue.h>
++#include <mtk_ccci_common.h>
++#include <linux/uidgid.h>
++#include <mtk_cooler_setting.h>
++#include <linux/debugfs.h>
++
++/* extern unsigned long ccci_get_md_boot_count(int md_id); */
++
++#if !defined(FEATURE_MUTT_INTERFACE_VER)
++
++#define MUTT_ACTIVATED_OFFSET		8
++#define MUTT_SUSPEND_OFFSET		16
++
++#define MUTT_ACTIVATED_FILTER		0x0000FF00
++#define MUTT_SUSPEND_FILTER		0x00FF0000
++
++
++#if FEATURE_MUTT_V2
++/*
++ * No UL data(except IMS): active = 1; suspend = 255; bit0 in reserved =0;
++ * No UL data(no IMS): active = 1; suspend = 255; bit0 in reserved =1;
++ */
++#define BIT_MD_CL_NO_IMS	0x01000000
++#define MD_CL_NO_UL_DATA	0x00FF0101
++#endif
++
++
++
++
++#define MUTT_ENABLE_IMS_ENABLE		0x00000001
++
++#else /*FEATURE_MUTT_INTERFACE_VER*/
++
++/*enum mapping must be align with MD site*/
++enum tmc_ctrl_cmd_enum {
++	TMC_CTRL_CMD_THROTTLING = 0,
++	TMC_CTRL_CMD_CA_CTRL,
++	TMC_CTRL_CMD_PA_CTRL,
++	TMC_CTRL_CMD_COOLER_LV,
++};
++
++enum tmc_throt_ctrl_enum {
++	TMC_THROT_ENABLE_IMS_ENABLE = 0,
++	TMC_THROT_ENABLE_IMS_DISABLE,
++	TMC_THROT_DISABLE,
++};
++
++enum tmc_ca_ctrl_enum {
++	TMC_CA_ON = 0, /* leave thermal control*/
++	TMC_CA_OFF,
++};
++
++enum tmc_pa_ctrl_enum {
++	TMC_PA_ALL_ON = 0, /* leave thermal control*/
++	TMC_PA_OFF_1PA,
++};
++
++enum tmc_cooler_lv_ctrl_enum {
++	TMC_COOLER_LV_ENABLE = 0,
++	TMC_COOLER_LV_DISABLE
++};
++
++
++enum tmc_cooler_lv_enum {
++	TMC_COOLER_LV0 = 0,
++	TMC_COOLER_LV1,
++	TMC_COOLER_LV2,
++	TMC_COOLER_LV3,
++	TMC_COOLER_LV4,
++	TMC_COOLER_LV5,
++	TMC_COOLER_LV6,
++	TMC_COOLER_LV7,
++	TMC_COOLER_LV8,
++};
++
++
++#define MUTT_ACTIVATED_OFFSET		16
++#define MUTT_SUSPEND_OFFSET		24
++
++#define MUTT_ACTIVATED_FILTER		0x00FF0000
++#define MUTT_SUSPEND_FILTER		0xFF000000
++
++
++
++#define MUTT_ENABLE_IMS_ENABLE	\
++	(TMC_CTRL_CMD_THROTTLING | TMC_THROT_ENABLE_IMS_ENABLE << 8)
++#define MUTT_ENABLE_IMS_DISABLE	\
++	(TMC_CTRL_CMD_THROTTLING | TMC_THROT_ENABLE_IMS_DISABLE << 8)
++#define TMC_CA_CTRL_CA_ON \
++	(TMC_CTRL_CMD_CA_CTRL | TMC_CA_ON << 8)
++#define TMC_CA_CTRL_CA_OFF \
++	(TMC_CTRL_CMD_CA_CTRL | TMC_CA_OFF << 8)
++#define TMC_PA_CTRL_PA_ALL_ON \
++	(TMC_CTRL_CMD_PA_CTRL | TMC_PA_ALL_ON << 8)
++#define TMC_PA_CTRL_PA_OFF_1PA \
++	(TMC_CTRL_CMD_PA_CTRL | TMC_PA_OFF_1PA << 8)
++#define TMC_THROTTLING_THROT_DISABLE \
++	(TMC_CTRL_CMD_THROTTLING | TMC_THROT_DISABLE << 8)
++#define TMC_LEVEL_CTRL_COOLER_LV_ENABLE \
++	(TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV_ENABLE << 8)
++#define TMC_LEVEL_CTRL_COOLER_LV_DISABLE \
++	(TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV_DISABLE << 8)
++
++
++#define TMC_COOLER_LV_CTRL00 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV0 << 16)
++#define TMC_COOLER_LV_CTRL01 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV1 << 16)
++#define TMC_COOLER_LV_CTRL02 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV2 << 16)
++#define TMC_COOLER_LV_CTRL03 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV3 << 16)
++#define TMC_COOLER_LV_CTRL04 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV4 << 16)
++#define TMC_COOLER_LV_CTRL05 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV5 << 16)
++#define TMC_COOLER_LV_CTRL06 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV6 << 16)
++#define TMC_COOLER_LV_CTRL07 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV7 << 16)
++#define TMC_COOLER_LV_CTRL08 (TMC_CTRL_CMD_COOLER_LV | TMC_COOLER_LV8 << 16)
++
++#if FEATURE_MUTT_V2
++/*
++ * No UL data(except IMS): active = 1; suspend = 255; bit0 in reserved =0;
++ * No UL data(no IMS): active = 1; suspend = 255; bit0 in reserved =1;
++ */
++#define BIT_MD_CL_NO_IMS MUTT_ENABLE_IMS_DISABLE /*IMS disable*/
++#define MD_CL_NO_UL_DATA (0xFF010000 | MUTT_ENABLE_IMS_ENABLE) /*IMS only*/
++#endif
++#endif/*FEATURE_MUTT_INTERFACE_VER*/
++
++
++
++#if FEATURE_THERMAL_DIAG
++/* signal */
++/* #define MAX_LEN	256 */
++static unsigned int tmd_pid;
++static unsigned int tmd_input_pid;
++static struct task_struct *ptmd_task;
++#endif
++
++#if FEATURE_MUTT_V2
++/* signal */
++#define MAX_LEN	128
++static unsigned int tm_pid;
++static unsigned int tm_input_pid;
++static struct task_struct *pg_task;
++
++
++/* mdoff cooler */
++static struct thermal_cooling_device *cl_dev_mdoff;
++static unsigned int cl_dev_mdoff_state;
++
++/* noIMS cooler */
++static struct thermal_cooling_device *cl_dev_noIMS;
++static unsigned int cl_dev_noIMS_state;
++#endif
++
++#if FEATURE_ADAPTIVE_MUTT
++/* adp mutt cooler */
++static struct thermal_cooling_device *cl_dev_adp_mutt;
++static unsigned int cl_dev_adp_mutt_state;
++/* last state asked for, applied once noIMS and mdoff are clear */
++static unsigned int cl_dev_adp_mutt_req;
++static void mtk_cl_adp_mutt_work_fn(struct work_struct *work);
++static DECLARE_DELAYED_WORK(adp_mutt_work, mtk_cl_adp_mutt_work_fn);
++static unsigned int cl_dev_adp_mutt_limit;
++
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++static unsigned int cl_dev_adp_mutt_pa_limit;
++static unsigned int cl_dev_adp_mutt_ca_limit;
++#endif
++
++static int curr_adp_mutt_level = -1;
++
++#define init_MD_tput_limit 0
++
++/* Interal usage */
++/* parameter from adb shell */
++/* this is in milli degree C */
++static int MD_target_t = 58000;
++static int MD_TARGET_T_HIGH;
++static int MD_TARGET_T_LOW;
++static int t_stable_range = 1000;
++
++/* initial value: assume 1 degreeC for temp. <=> 20% for MD_tput_limit(0~100) */
++static int tt_MD_high = 50;
++static int tt_MD_low = 50;
++static int triggered;
++#endif
++
++/*
++ * ccci_get_md_boot_count and exec_ccci_kern_func_by_md_id: 4.14 had weak
++ * copies here. The tree already has weak ones in ccci_util_dummy.c, and two
++ * weak definitions would leave the choice to link order, so this file only
++ * calls them. eccci's strong ones replace both.
++ */
++
++/* Serialises the cooler state, the limits and the modem calls below. */
++static DEFINE_MUTEX(cl_mutt_lock);
++
++#define mtk_cooler_mutt_dprintk_always(fmt, args...) \
++pr_debug("[Thermal/TC/mutt]" fmt, ##args)
++
++#define mtk_cooler_mutt_dprintk(fmt, args...) \
++do { \
++	if (cl_mutt_klog_on == 1) \
++		pr_debug("[Thermal/TC/mutt]" fmt, ##args); \
++} while (0)
++
++/* State of "MD off & noIMS" are not included. */
++#define MAX_NUM_INSTANCE_MTK_COOLER_MUTT  4
++
++#define MTK_CL_MUTT_GET_LIMIT(limit, state) \
++{ (limit) = (short) (((unsigned long) (state))>>16); }
++
++#define MTK_CL_MUTT_SET_LIMIT(limit, state) \
++{ state = ((((unsigned long) (state))&0xFFFF) | ((short) limit<<16)); }
++
++#define MTK_CL_MUTT_GET_CURR_STATE(curr_state, state) \
++{ curr_state = (((unsigned long) (state))&0xFFFF); }
++
++#define MTK_CL_MUTT_SET_CURR_STATE(curr_state, state) \
++do { \
++	if (curr_state == 0) \
++		state &= ~0x1; \
++	else \
++		state |= 0x1; \
++} while (0)
++
++
++static kuid_t uid = KUIDT_INIT(0);
++static kgid_t gid = KGIDT_INIT(1000);
++
++static int cl_mutt_klog_on;
++static struct thermal_cooling_device
++			*cl_mutt_dev[MAX_NUM_INSTANCE_MTK_COOLER_MUTT] = { 0 };
++
++static unsigned int cl_mutt_param[MAX_NUM_INSTANCE_MTK_COOLER_MUTT] = { 0 };
++
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++/*default setting*/
++static unsigned int cl_mutt_ca_param[MAX_NUM_INSTANCE_MTK_COOLER_MUTT] = {
++					TMC_CA_CTRL_CA_ON,
++					TMC_CA_CTRL_CA_ON,
++					TMC_CA_CTRL_CA_ON,
++					TMC_CA_CTRL_CA_OFF};
++
++static unsigned int cl_mutt_pa_param[MAX_NUM_INSTANCE_MTK_COOLER_MUTT] = {
++					TMC_PA_CTRL_PA_ALL_ON,
++					TMC_PA_CTRL_PA_ALL_ON,
++					TMC_PA_CTRL_PA_ALL_ON,
++					TMC_PA_CTRL_PA_OFF_1PA};
++
++/*No IMS cooler, parameter order in array: [CA PA]*/
++static unsigned int cl_mutt_No_IMS_ca_pa_param[2] = {
++					TMC_CA_CTRL_CA_OFF,
++					TMC_PA_CTRL_PA_OFF_1PA};
++
++
++static unsigned int cl_mutt_cur_pa_limit;
++static unsigned int cl_mutt_cur_ca_limit;
++#endif
++
++static unsigned long cl_mutt_state[MAX_NUM_INSTANCE_MTK_COOLER_MUTT] = { 0 };
++
++static unsigned int cl_mutt_cur_limit;
++
++static unsigned long last_md_boot_cnt;
++
++#if FEATURE_THERMAL_DIAG
++/*
++ * use "si_code" for Action identify
++ * for tmd_pid (/system/bin/thermald)
++ */
++enum {
++/*	TMD_Alert_ShutDown = 1, */
++	TMD_Alert_ULdataBack = 2,
++	TMD_Alert_NOULdata = 3
++};
++
++static int clmutt_send_tmd_signal(int level)
++{
++	int ret = 0;
++	static int warning_state = TMD_Alert_ULdataBack;
++
++	if (warning_state == level)
++		return ret;
++
++	if (tmd_input_pid == 0) {
++		mtk_cooler_mutt_dprintk("%s pid is empty\n", __func__);
++		ret = -1;
++	}
++
++	mtk_cooler_mutt_dprintk_always(" %s pid is %d, %d; MD_Alert: %d\n",
++				__func__, tmd_pid, tmd_input_pid, level);
++
++	if (ret == 0 && tmd_input_pid != tmd_pid) {
++		tmd_pid = tmd_input_pid;
++
++		if (ptmd_task != NULL)
++			put_task_struct(ptmd_task);
++		rcu_read_lock();
++		ptmd_task = get_pid_task(find_vpid(tmd_pid), PIDTYPE_PID);
++		rcu_read_unlock();
++	}
++
++	if (ret == 0 && ptmd_task) {
++		struct kernel_siginfo info;
++
++		clear_siginfo(&info);
++		info.si_signo = SIGIO;
++		info.si_errno = 0;
++		info.si_code = level;
++		info.si_addr = NULL;
++		ret = send_sig_info(SIGIO, &info, ptmd_task);
++	}
++
++	if (ret != 0)
++		mtk_cooler_mutt_dprintk_always(" %s ret=%d\n", __func__, ret);
++	else {
++		if (TMD_Alert_ULdataBack == level)
++			warning_state = TMD_Alert_ULdataBack;
++		else if (TMD_Alert_NOULdata == level)
++			warning_state = TMD_Alert_NOULdata;
++	}
++
++	return ret;
++}
++
++static ssize_t clmutt_tmd_pid_write(
++struct file *filp, const char __user *buf, size_t count, loff_t *data)
++{
++	int ret = 0;
++	char tmp[MAX_LEN] = { 0 };
++	int len = 0;
++
++	len = (count < (MAX_LEN - 1)) ? count : (MAX_LEN - 1);
++	/* write data to the buffer */
++	if (copy_from_user(tmp, buf, len))
++		return -EFAULT;
++
++	ret = kstrtouint(tmp, 10, &tmd_input_pid);
++	if (ret)
++		WARN_ON_ONCE(1);
++
++	mtk_cooler_mutt_dprintk("%s %s = %d\n", __func__, tmp, tmd_input_pid);
++
++	return len;
++}
++
++static int clmutt_tmd_pid_read(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%d\n", tmd_input_pid);
++	mtk_cooler_mutt_dprintk("%s %d\n", __func__, tmd_input_pid);
++
++	return 0;
++}
++
++static int clmutt_tmd_pid_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, clmutt_tmd_pid_read, PDE_DATA(inode));
++}
++
++static const struct proc_ops clmutt_tmd_pid_fops = {
++	.proc_open = clmutt_tmd_pid_open,
++	.proc_read = seq_read,
++	.proc_lseek = seq_lseek,
++	.proc_write = clmutt_tmd_pid_write,
++	.proc_release = single_release,
++};
++#endif
++
++#if FEATURE_MUTT_V2
++/*
++ * use "si_errno" for client identify
++ * for tm_pid (/system/bin/thermal)
++ */
++enum {
++	/*	TM_CLIENT_clwmt = 0,
++	 *	TM_CLIENT_mdulthro =1,
++	 *	TM_CLIENT_mddlthro =2,
++	 */
++	TM_CLIENT_clmutt = 3
++};
++static int clmutt_send_tm_signal(int level)
++{
++	int ret = 0, j = 0;
++
++	if (cl_dev_mdoff_state == level)
++		return ret;
++
++	if (tm_input_pid == 0) {
++		mtk_cooler_mutt_dprintk("[%s] pid is empty\n", __func__);
++		ret = -1;
++	}
++
++	mtk_cooler_mutt_dprintk_always("[%s] pid is %d, %d; MD off: %d\n",
++					__func__, tm_pid, tm_input_pid, level);
++
++	if (ret == 0 && tm_input_pid != tm_pid) {
++		tm_pid = tm_input_pid;
++
++		if (pg_task != NULL)
++			put_task_struct(pg_task);
++		rcu_read_lock();
++		pg_task = get_pid_task(find_vpid(tm_pid), PIDTYPE_PID);
++		rcu_read_unlock();
++	}
++
++	if (ret == 0 && pg_task) {
++		struct kernel_siginfo info;
++
++		clear_siginfo(&info);
++		info.si_signo = SIGIO;
++		info.si_errno = TM_CLIENT_clmutt;
++		info.si_code = level; /* Toggle MD ON: 0 OFF: 1*/
++		info.si_addr = NULL;
++		ret = send_sig_info(SIGIO, &info, pg_task);
++	}
++
++	if (ret != 0)
++		mtk_cooler_mutt_dprintk_always("[%s] ret=%d\n", __func__, ret);
++	else {
++		if (level == 1) {
++			cl_dev_mdoff_state = level;
++			cl_dev_noIMS_state = 0;
++			cl_mutt_cur_limit = 0;
++
++			for (; j < MAX_NUM_INSTANCE_MTK_COOLER_MUTT; j++)
++				MTK_CL_MUTT_SET_CURR_STATE(0, cl_mutt_state[j]);
++		} else
++			cl_dev_mdoff_state = 0;
++	}
++	return ret;
++}
++
++static ssize_t clmutt_tm_pid_write(
++struct file *filp, const char __user *buf, size_t count, loff_t *data)
++{
++	int ret = 0;
++	char tmp[MAX_LEN] = {0};
++	int len = 0;
++
++	len = (count < (MAX_LEN - 1)) ? count : (MAX_LEN - 1);
++	/* write data to the buffer */
++	if (copy_from_user(tmp, buf, len))
++		return -EFAULT;
++
++	ret = kstrtouint(tmp, 10, &tm_input_pid);
++	if (ret)
++		WARN_ON_ONCE(1);
++
++	mtk_cooler_mutt_dprintk("[%s] %s = %d\n", __func__, tmp, tm_input_pid);
++
++	return len;
++}
++
++static int clmutt_tm_pid_read(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%d\n", tm_input_pid);
++
++	mtk_cooler_mutt_dprintk("[%s] %d\n", __func__, tm_input_pid);
++
++	return 0;
++}
++
++static int clmutt_tm_pid_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, clmutt_tm_pid_read, PDE_DATA(inode));
++}
++
++static const struct proc_ops clmutt_tm_pid_fops = {
++	.proc_open = clmutt_tm_pid_open,
++	.proc_read = seq_read,
++	.proc_lseek = seq_lseek,
++	.proc_write = clmutt_tm_pid_write,
++	.proc_release = single_release,
++};
++
++/*
++ * cooling device callback functions (mtk_cl_mdoff_ops)
++ * 1 : True and 0 : False
++ */
++static int mtk_cl_mdoff_get_max_state(struct thermal_cooling_device *cdev,
++				unsigned long *state)
++{
++	*state = 1;
++	mtk_cooler_mutt_dprintk("%s() %s %lu\n", __func__,
++							cdev->type, *state);
++
++	return 0;
++}
++
++static int mtk_cl_mdoff_get_cur_state(struct thermal_cooling_device *cdev,
++				unsigned long *state)
++{
++	*state = cl_dev_mdoff_state;
++	mtk_cooler_mutt_dprintk(
++			"[%s] %s %lu (0: md on;  1: md off)\n", __func__,
++			cdev->type, *state);
++	return 0;
++}
++
++static int mtk_cl_mdoff_set_cur_state_locked(struct thermal_cooling_device *cdev,
++				unsigned long state)
++{
++	if ((state >= 0) && (state <= 1))
++		mtk_cooler_mutt_dprintk(
++			"[%s] %s %lu (0: md on;  1: md off)\n", __func__,
++			cdev->type, state);
++	else {
++		mtk_cooler_mutt_dprintk(
++		"[%s]: Invalid input (0:md on;	 1: md off)\n", __func__);
++
++		return 0;
++	}
++
++	clmutt_send_tm_signal(state);
++
++	return 0;
++}
++
++/* the thermal core calls this with the zone lock held */
++static int mtk_cl_mdoff_set_cur_state(struct thermal_cooling_device *cdev,
++				unsigned long state)
++{
++	int ret;
++
++	mutex_lock(&cl_mutt_lock);
++	ret = mtk_cl_mdoff_set_cur_state_locked(cdev, state);
++	mutex_unlock(&cl_mutt_lock);
++	/* a state kept while blocked is applied in the work */
++	mod_delayed_work(system_wq, &adp_mutt_work, 0);
++	return ret;
++}
++
++static struct thermal_cooling_device_ops mtk_cl_mdoff_ops = {
++	.get_max_state = mtk_cl_mdoff_get_max_state,
++	.get_cur_state = mtk_cl_mdoff_get_cur_state,
++	.set_cur_state = mtk_cl_mdoff_set_cur_state,
++};
++
++static void mtk_cl_mutt_set_onIMS(int level)
++{
++	int ret = 0;
++	unsigned int cl_mutt_param_noIMS = 0;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	unsigned int cl_mutt_param_noIMS_pa = 0;
++	unsigned int cl_mutt_param_noIMS_ca = 0;
++	int ret_pa = 0, ret_ca = 0;
++#endif
++
++
++	if (cl_dev_noIMS_state == level)
++		return;
++
++	if (level) {
++		/*level=1 => No IMS*/
++		cl_mutt_param_noIMS = (MD_CL_NO_UL_DATA | BIT_MD_CL_NO_IMS);
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		cl_mutt_param_noIMS_pa = cl_mutt_No_IMS_ca_pa_param[1];
++		cl_mutt_param_noIMS_ca = cl_mutt_No_IMS_ca_pa_param[0];
++#endif
++	} else {
++		/*level=0 => IMS Only*/
++		cl_mutt_param_noIMS = MD_CL_NO_UL_DATA;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		/*Restore to last PA status*/
++		cl_mutt_param_noIMS_pa =
++			cl_mutt_pa_param[MAX_NUM_INSTANCE_MTK_COOLER_MUTT - 1];
++		cl_mutt_param_noIMS_ca =
++			cl_mutt_ca_param[MAX_NUM_INSTANCE_MTK_COOLER_MUTT - 1];
++#endif
++	}
++	if (cl_mutt_param_noIMS != cl_mutt_cur_limit) {
++		cl_mutt_cur_limit = cl_mutt_param_noIMS;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		cl_mutt_cur_ca_limit = cl_mutt_param_noIMS_ca;
++		cl_mutt_cur_pa_limit = cl_mutt_param_noIMS_pa;
++#endif
++		last_md_boot_cnt = ccci_get_md_boot_count(MD_SYS1);
++		ret = exec_ccci_kern_func_by_md_id(MD_SYS1,
++			ID_THROTTLING_CFG,
++			(char *) &cl_mutt_cur_limit, 4);
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		ret_pa = exec_ccci_kern_func_by_md_id(MD_SYS1,
++			ID_THROTTLING_CFG,
++			(char *) &cl_mutt_cur_pa_limit, 4);
++		ret_ca = exec_ccci_kern_func_by_md_id(MD_SYS1,
++			ID_THROTTLING_CFG,
++			(char *) &cl_mutt_cur_ca_limit, 4);
++#endif
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		mtk_cooler_mutt_dprintk_always(
++		"[%s]r %d, rpa %d, rca %d,p %x, p_pa %x, p_ca %x, bcnt %lul\n",
++		__func__, ret, ret_pa, ret_ca,
++		cl_mutt_cur_limit,
++		cl_mutt_cur_pa_limit,
++		cl_mutt_cur_ca_limit,
++		last_md_boot_cnt);
++#else
++		mtk_cooler_mutt_dprintk_always(
++			"[%s] ret %d param %x bcnt %lul\n",
++			__func__, ret, cl_mutt_cur_limit,
++			last_md_boot_cnt);
++#endif
++	} else if (cl_mutt_param_noIMS != 0) {
++		unsigned long cur_md_bcnt = ccci_get_md_boot_count(MD_SYS1);
++
++		if (last_md_boot_cnt != cur_md_bcnt) {
++			last_md_boot_cnt = cur_md_bcnt;
++			ret = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *) &cl_mutt_cur_limit, 4);
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++			ret_pa = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *) &cl_mutt_cur_pa_limit, 4);
++			ret_ca = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *) &cl_mutt_cur_ca_limit, 4);
++#endif
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		mtk_cooler_mutt_dprintk_always(
++		"[%s]mdrb r %d,rpa %d,rca %d,p %x,p_pa %x,p_ca %x, bcnt %lul\n",
++		__func__, ret, ret_pa, ret_ca,
++		cl_mutt_cur_limit,
++		cl_mutt_cur_pa_limit,
++		cl_mutt_cur_ca_limit,
++		last_md_boot_cnt);
++#else
++		mtk_cooler_mutt_dprintk_always(
++				"[%s] mdrb ret %d param %x bcnt %lul\n",
++				__func__, ret, cl_mutt_cur_limit,
++				last_md_boot_cnt);
++#endif
++		}
++	}
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	if ((ret != 0) || (ret_pa != 0) || (ret_ca != 0))
++		mtk_cooler_mutt_dprintk_always(
++			"[%s] ret=%d ret_pa=%d ret_ca=%d\n", __func__,
++			ret, ret_pa, ret_ca);
++#else
++	if (ret != 0)
++		mtk_cooler_mutt_dprintk_always("[%s] ret=%d\n", __func__, ret);
++#endif
++	else {
++		if (level == 1)
++			cl_dev_noIMS_state = level;
++		else
++			cl_dev_noIMS_state = 0;
++	}
++
++}
++
++/*
++ * cooling device callback functions (mtk_cl_noIMS_ops)
++ * 1 : True and 0 : False
++ */
++static int mtk_cl_noIMS_get_max_state(struct thermal_cooling_device *cdev,
++				unsigned long *state)
++{
++	*state = 1;
++	mtk_cooler_mutt_dprintk("%s() %s %lu\n", __func__,
++							cdev->type, *state);
++
++	return 0;
++}
++
++static int mtk_cl_noIMS_get_cur_state(struct thermal_cooling_device *cdev,
++				unsigned long *state)
++{
++	*state = cl_dev_noIMS_state;
++	mtk_cooler_mutt_dprintk(
++			"%s() %s %lu (0: md IMS OK;  1: md no IMS)\n", __func__,
++			cdev->type, *state);
++
++	return 0;
++}
++
++static int mtk_cl_noIMS_set_cur_state_locked(struct thermal_cooling_device *cdev,
++				unsigned long state)
++{
++
++	if (cl_dev_mdoff_state == 1) {
++		mtk_cooler_mutt_dprintk(
++			"%s():  MD STILL OFF!!\n", __func__);
++
++		return 0;
++	}
++
++	if ((state >= 0) && (state <= 1))
++		mtk_cooler_mutt_dprintk(
++			"%s() %s %lu (0: md IMS OK;	1: md no IMS)\n",
++			__func__,
++			cdev->type, state);
++	else {
++		mtk_cooler_mutt_dprintk(
++			"%s(): Invalid input(0: md IMS OK; 1: md no IMS)\n",
++			__func__);
++		return 0;
++	}
++
++	mtk_cl_mutt_set_onIMS(state);
++
++	return 0;
++}
++
++/* the thermal core calls this with the zone lock held */
++static int mtk_cl_noIMS_set_cur_state(struct thermal_cooling_device *cdev,
++				unsigned long state)
++{
++	int ret;
++
++	mutex_lock(&cl_mutt_lock);
++	ret = mtk_cl_noIMS_set_cur_state_locked(cdev, state);
++	mutex_unlock(&cl_mutt_lock);
++	/* a state kept while blocked is applied in the work */
++	mod_delayed_work(system_wq, &adp_mutt_work, 0);
++	return ret;
++}
++
++static struct thermal_cooling_device_ops mtk_cl_noIMS_ops = {
++	.get_max_state = mtk_cl_noIMS_get_max_state,
++	.get_cur_state = mtk_cl_noIMS_get_cur_state,
++	.set_cur_state = mtk_cl_noIMS_set_cur_state,
++};
++#endif
++
++
++static void mtk_cl_mutt_set_mutt_limit(void)
++{
++	/* TODO: optimize */
++	int i = 0, j = 0, ret = 0;
++	int min_limit = 255;
++	unsigned int min_param = 0;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	unsigned int min_pa_param = 0, min_ca_param = 0;
++	int ret_ca = 0, ret_pa = 0;
++	/*initial value for unlimit*/
++	min_param = TMC_THROTTLING_THROT_DISABLE;
++	min_pa_param = TMC_PA_CTRL_PA_ALL_ON;
++	min_ca_param = TMC_CA_CTRL_CA_ON;
++#endif
++
++	for (; i < MAX_NUM_INSTANCE_MTK_COOLER_MUTT; i++) {
++		unsigned long curr_state;
++
++		MTK_CL_MUTT_GET_CURR_STATE(curr_state, cl_mutt_state[i]);
++
++		if (curr_state == 1) {
++			unsigned int active;
++			unsigned int suspend;
++			int limit = 0;
++
++			active =
++				(cl_mutt_param[i] & MUTT_ACTIVATED_FILTER) >>
++					MUTT_ACTIVATED_OFFSET;
++			suspend =
++				(cl_mutt_param[i] & MUTT_SUSPEND_FILTER) >>
++					MUTT_SUSPEND_OFFSET;
++
++			mtk_cooler_mutt_dprintk_always(
++			"[%s]active %d, suspend %d\n", __func__,
++			active, suspend);
++
++			/* a cooler with 0 active or 0 suspend is not allowed */
++			if (active == 0 || suspend == 0)
++				goto err_unreg;
++
++			/* compare the active/suspend ratio */
++			if (active >= suspend)
++				limit = active / suspend;
++			else
++				limit = (0 - suspend) / active;
++
++			if (limit <= min_limit) {
++				min_limit = limit;
++				min_param = cl_mutt_param[i];
++			}
++		}
++	}
++
++#if FEATURE_ADAPTIVE_MUTT
++		if (cl_dev_adp_mutt_limit > min_param) {
++			min_param = cl_dev_adp_mutt_limit;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++			min_pa_param = cl_dev_adp_mutt_pa_limit;
++			min_ca_param = cl_dev_adp_mutt_ca_limit;
++#endif
++		}
++#endif
++
++
++	if (min_param != cl_mutt_cur_limit) {
++		cl_mutt_cur_limit = min_param;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		cl_mutt_cur_pa_limit = min_pa_param;
++		cl_mutt_cur_ca_limit = min_ca_param;
++#endif
++
++
++		last_md_boot_cnt = ccci_get_md_boot_count(MD_SYS1);
++
++		ret = exec_ccci_kern_func_by_md_id(MD_SYS1,
++			ID_THROTTLING_CFG,
++			(char *)&cl_mutt_cur_limit, 4);
++
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		ret_pa = exec_ccci_kern_func_by_md_id(MD_SYS1,
++			ID_THROTTLING_CFG,
++			(char *)&cl_mutt_cur_pa_limit, 4);
++
++		ret_ca = exec_ccci_kern_func_by_md_id(MD_SYS1,
++			ID_THROTTLING_CFG,
++			(char *)&cl_mutt_cur_ca_limit, 4);
++#endif
++
++		mtk_cooler_mutt_dprintk_always(
++			"[%s] ret %d param 0x%08x bcnt %lul\n", __func__,
++			ret, cl_mutt_cur_limit, last_md_boot_cnt);
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		mtk_cooler_mutt_dprintk_always(
++			"[%s] ret_pa %d param 0x%08x bcnt %lul\n", __func__,
++			ret_pa, cl_mutt_cur_pa_limit, last_md_boot_cnt);
++		mtk_cooler_mutt_dprintk_always(
++			"[%s] ret_ca %d param 0x%08x bcnt %lul\n", __func__,
++			ret_ca, cl_mutt_cur_ca_limit, last_md_boot_cnt);
++#endif
++
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	} else if (min_param != TMC_THROTTLING_THROT_DISABLE) {
++#else
++	} else if (min_param != 0) {
++#endif
++		unsigned long cur_md_bcnt = ccci_get_md_boot_count(MD_SYS1);
++
++		if (last_md_boot_cnt != cur_md_bcnt) {
++			last_md_boot_cnt = cur_md_bcnt;
++			ret =
++			exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_cur_limit, 4);
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++			ret_pa =
++			exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_cur_pa_limit, 4);
++			ret_ca =
++			exec_ccci_kern_func_by_md_id(MD_SYS1,
++			ID_THROTTLING_CFG,
++			(char *)&cl_mutt_cur_ca_limit, 4);
++#endif
++			mtk_cooler_mutt_dprintk_always(
++				"[%s] mdrb ret %d param 0x%08x bcnt %lul\n",
++				__func__, ret, cl_mutt_cur_limit,
++				last_md_boot_cnt);
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++			mtk_cooler_mutt_dprintk_always(
++				"[%s] mdrb ret_pa %d param 0x%08x bcnt %lul\n",
++				__func__, ret_pa, cl_mutt_cur_pa_limit,
++				last_md_boot_cnt);
++			mtk_cooler_mutt_dprintk_always(
++				"[%s] mdrb ret_ca %d param 0x%08x bcnt %lul\n",
++				__func__, ret_ca, cl_mutt_cur_ca_limit,
++				last_md_boot_cnt);
++#endif
++		}
++	} else
++		return;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	if ((ret != 0) || (ret_pa != 0) || (ret_ca != 0)) {
++		cl_mutt_cur_limit = TMC_THROTTLING_THROT_DISABLE;
++#else
++	if (ret != 0) {
++		cl_mutt_cur_limit = 0;
++#endif
++		for (; j < MAX_NUM_INSTANCE_MTK_COOLER_MUTT; j++) {
++			MTK_CL_MUTT_SET_CURR_STATE(0, cl_mutt_state[j]);
++			mtk_cooler_mutt_dprintk_always(
++			"[%s]cl_mutt_state[%d] %ld\n",
++			__func__, j, cl_mutt_state[j]);
++
++		}
++		mtk_cooler_mutt_dprintk_always("[%s] ret=%d\n", __func__, ret);
++	}
++#if FEATURE_THERMAL_DIAG
++	else {/*IMS only*/
++		if (cl_mutt_cur_limit == MD_CL_NO_UL_DATA)
++			clmutt_send_tmd_signal(TMD_Alert_NOULdata);
++		else
++			clmutt_send_tmd_signal(TMD_Alert_ULdataBack);
++	}
++#endif
++
++err_unreg:
++	return;
++
++}
++
++static int mtk_cl_mutt_get_max_state(
++struct thermal_cooling_device *cdev, unsigned long *state)
++{
++	*state = 1;
++	mtk_cooler_mutt_dprintk("%s() %s %lu\n", __func__,
++							cdev->type, *state);
++
++	return 0;
++}
++
++static int mtk_cl_mutt_get_cur_state(
++struct thermal_cooling_device *cdev, unsigned long *state)
++{
++	MTK_CL_MUTT_GET_CURR_STATE(*state, *((unsigned long *)cdev->devdata));
++	mtk_cooler_mutt_dprintk("%s() %s %lu\n", __func__,
++							cdev->type, *state);
++	return 0;
++}
++
++static int mtk_cl_mutt_set_cur_state_locked(
++struct thermal_cooling_device *cdev, unsigned long state)
++{
++#if FEATURE_MUTT_V2
++
++	if ((cl_dev_mdoff_state == 1) || (cl_dev_noIMS_state == 1)) {
++		mtk_cooler_mutt_dprintk(
++		"[%s]: MD OFF or noIMS or 1PA OFF!!\n", __func__);
++		return 0;
++	}
++#endif
++
++	mtk_cooler_mutt_dprintk("[%s] %s %lu\n", __func__, cdev->type, state);
++
++	MTK_CL_MUTT_SET_CURR_STATE(state, *((unsigned long *)cdev->devdata));
++	mtk_cl_mutt_set_mutt_limit();
++
++	return 0;
++}
++
++/* bind fan callbacks to fan device */
++/* the thermal core calls this with the zone lock held */
++static int mtk_cl_mutt_set_cur_state(struct thermal_cooling_device *cdev,
++				unsigned long state)
++{
++	int ret;
++
++	mutex_lock(&cl_mutt_lock);
++	ret = mtk_cl_mutt_set_cur_state_locked(cdev, state);
++	mutex_unlock(&cl_mutt_lock);
++	return ret;
++}
++
++static struct thermal_cooling_device_ops mtk_cl_mutt_ops = {
++	.get_max_state = mtk_cl_mutt_get_max_state,
++	.get_cur_state = mtk_cl_mutt_get_cur_state,
++	.set_cur_state = mtk_cl_mutt_set_cur_state,
++};
++
++#if FEATURE_ADAPTIVE_MUTT
++/* decrease by one level */
++static void decrease_mutt_limit(void)
++{
++	if (curr_adp_mutt_level >= 0)
++		curr_adp_mutt_level--;
++
++	if (curr_adp_mutt_level < 0) {
++		cl_dev_adp_mutt_limit = 0;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		cl_dev_adp_mutt_pa_limit = TMC_PA_CTRL_PA_ALL_ON;
++		cl_dev_adp_mutt_ca_limit = TMC_CA_CTRL_CA_ON;
++#endif
++	} else if (cl_mutt_param[curr_adp_mutt_level] != 0) {
++		cl_dev_adp_mutt_limit = cl_mutt_param[curr_adp_mutt_level];
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		cl_dev_adp_mutt_pa_limit =
++			cl_mutt_pa_param[curr_adp_mutt_level];
++		cl_dev_adp_mutt_ca_limit =
++			cl_mutt_ca_param[curr_adp_mutt_level];
++#endif
++	}
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	if (curr_adp_mutt_level >= 0) {
++		mtk_cooler_mutt_dprintk("%s : cl_mutt_param[%d]= 0x%x,",
++			__func__, curr_adp_mutt_level,
++			cl_mutt_param[curr_adp_mutt_level]);
++		mtk_cooler_mutt_dprintk("cl_mutt_pa_param[%d]= 0x%x,",
++			curr_adp_mutt_level,
++			cl_mutt_pa_param[curr_adp_mutt_level]);
++		mtk_cooler_mutt_dprintk("cl_mutt_ca_param[%d]= 0x%x\n",
++			curr_adp_mutt_level,
++			cl_mutt_ca_param[curr_adp_mutt_level]);
++	}
++#else
++	if (curr_adp_mutt_level >= 0) {
++		mtk_cooler_mutt_dprintk("%s : cl_mutt_param[%d]= 0x%x\n",
++			__func__, curr_adp_mutt_level,
++			cl_mutt_param[curr_adp_mutt_level]);
++	}
++#endif
++}
++
++/* increase by one level */
++static void increase_mutt_limit(void)
++{
++	if (curr_adp_mutt_level < (MAX_NUM_INSTANCE_MTK_COOLER_MUTT - 1))
++		curr_adp_mutt_level++;
++
++	if (cl_mutt_param[curr_adp_mutt_level] != 0) {
++		cl_dev_adp_mutt_limit = cl_mutt_param[curr_adp_mutt_level];
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		cl_dev_adp_mutt_pa_limit =
++			cl_mutt_pa_param[curr_adp_mutt_level];
++		cl_dev_adp_mutt_ca_limit =
++			cl_mutt_ca_param[curr_adp_mutt_level];
++#endif
++	}
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	mtk_cooler_mutt_dprintk("%s : cl_mutt_param[%d]= 0x%x\n", __func__,
++		curr_adp_mutt_level, cl_mutt_param[curr_adp_mutt_level]);
++	mtk_cooler_mutt_dprintk("cl_mutt_pa_param[%d]= 0x%x\n",
++		curr_adp_mutt_level, cl_mutt_pa_param[curr_adp_mutt_level]);
++	mtk_cooler_mutt_dprintk("cl_mutt_ca_param[%d]= 0x%x\n",
++		curr_adp_mutt_level, cl_mutt_ca_param[curr_adp_mutt_level]);
++#else
++	mtk_cooler_mutt_dprintk("%s : cl_mutt_param[%d]= 0x%x\n", __func__,
++		curr_adp_mutt_level, cl_mutt_param[curr_adp_mutt_level]);
++#endif
++}
++
++static void unlimit_mutt_limit(void)
++{
++	curr_adp_mutt_level = -1;
++	cl_dev_adp_mutt_limit = 0;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	cl_dev_adp_mutt_pa_limit = TMC_PA_CTRL_PA_ALL_ON;
++	cl_dev_adp_mutt_ca_limit = TMC_CA_CTRL_CA_ON;
++#endif
++	mtk_cooler_mutt_dprintk("%s\n", __func__);
++}
++
++static int adaptive_tput_limit(long curr_temp)
++{
++	static int MD_tput_limit = init_MD_tput_limit;
++
++	MD_TARGET_T_HIGH = MD_target_t + t_stable_range;
++	MD_TARGET_T_LOW = MD_target_t - t_stable_range;
++
++	/* mtk_cooler_mutt_dprintk(
++	 *	"%s : active= %d tirgger= %d curr_temp= %ld\n", __func__,
++	 *	cl_dev_adp_mutt_state, triggered, curr_temp);
++	 */
++
++	if (cl_dev_adp_mutt_state == 1) {
++		int tt_MD = MD_target_t - curr_temp;	/* unit: mC */
++
++		/* Check if it is triggered */
++		if (!triggered) {
++			if (curr_temp < MD_target_t)
++				return 0;
++
++			triggered = 1;
++		}
++
++		/* Adjust total power budget if necessary */
++		if (curr_temp >= MD_TARGET_T_HIGH)
++			MD_tput_limit += (tt_MD / tt_MD_high);
++		else if (curr_temp <= MD_TARGET_T_LOW)
++			MD_tput_limit += (tt_MD / tt_MD_low);
++
++		/* mtk_cooler_mutt_dprintk(
++		 * "%s MD T %d Tc %ld, MD_tput_limit %d\n",
++		 *	       __func__, MD_target_t, curr_temp, MD_tput_limit);
++		 */
++
++		/* Adjust MUTT level  */
++		{
++			if (MD_tput_limit >= 100) {
++				decrease_mutt_limit();
++				MD_tput_limit = 0;
++			} else if (MD_tput_limit <= -100) {
++				increase_mutt_limit();
++				MD_tput_limit = 0;
++			}
++		}
++	} else {
++		if (triggered) {
++			triggered = 0;
++			MD_tput_limit = 0;
++			unlimit_mutt_limit();
++		}
++	}
++
++	return 0;
++}
++
++/*
++ * cooling device callback functions (mtk_cl_adp_mutt_ops)
++ * 1 : True and 0 : False
++ */
++static int mtk_cl_adp_mutt_get_max_state(struct thermal_cooling_device *cdev,
++				unsigned long *state)
++{
++	*state = 1;
++	mtk_cooler_mutt_dprintk("[%s] %s %lu\n", __func__, cdev->type, *state);
++	return 0;
++}
++
++static int mtk_cl_adp_mutt_get_cur_state(struct thermal_cooling_device *cdev,
++				unsigned long *state)
++{
++	*state = cl_dev_adp_mutt_state;
++	mtk_cooler_mutt_dprintk("[%s] %s %lu (0:adp mutt off; 1:adp mutt on)\n",
++						__func__, cdev->type, *state);
++	return 0;
++}
++
++static int mtk_cl_adp_mutt_set_cur_state_locked(struct thermal_cooling_device *cdev,
++				unsigned long state)
++{
++	if ((state != 0) && (state != 1)) {
++		mtk_cooler_mutt_dprintk(
++			"[%s] Invalid input(0:adp mutt off; 1:adp mutt on)\n",
++			__func__);
++
++		return 0;
++	}
++
++	/* step_wise doesn't re-send a state, so keep it while blocked */
++	cl_dev_adp_mutt_req = state;
++#if FEATURE_MUTT_V2
++		if ((cl_dev_mdoff_state == 1) || (cl_dev_noIMS_state == 1)) {
++			mtk_cooler_mutt_dprintk("[%s]  MD OFF or noIMS!!\n",
++								__func__);
++
++			return 0;
++		}
++#endif
++
++	mtk_cooler_mutt_dprintk("[%s] %s %lu (0:adp mutt off; 1:adp mutt on)\n",
++						__func__, cdev->type, state);
++	cl_dev_adp_mutt_state = state;
++
++	return 0;
++}
++
++/* the zone stock binds mtk-cl-adp-mutt to; its temperature drives the loop */
++#define ADP_MUTT_ZONE		"mtktsbtsmdpa"
++/* stock's tzbtspa polling interval from thermal.conf */
++#define ADP_MUTT_PERIOD_MS	1000
++
++
++/*
++ * One step of stock's per-poll adp-mutt call: adaptive_tput_limit on the
++ * zone temperature, then the combined limit to the modem. Repeats every
++ * ADP_MUTT_PERIOD_MS while the cooler is on or still has a limit set.
++ */
++static void mtk_cl_adp_mutt_work_fn(struct work_struct *work)
++{
++	struct thermal_zone_device *tz;
++	int temp = 0, ret;
++	bool again;
++
++	/* Not under cl_mutt_lock: the zone lock is taken before it elsewhere. */
++	tz = thermal_zone_get_zone_by_name(ADP_MUTT_ZONE);
++	ret = IS_ERR(tz) ? PTR_ERR(tz) : thermal_zone_get_temp(tz, &temp);
++
++	mutex_lock(&cl_mutt_lock);
++	if (ret) {
++		pr_warn_ratelimited("[Thermal/TC/mutt] %s temperature: %d\n",
++				    ADP_MUTT_ZONE, ret);
++	} else if (cl_dev_mdoff_state != 1 && cl_dev_noIMS_state != 1) {
++		cl_dev_adp_mutt_state = cl_dev_adp_mutt_req;
++		adaptive_tput_limit(temp);
++		mtk_cl_mutt_set_mutt_limit();
++	}
++	again = cl_dev_adp_mutt_state == 1 || triggered;
++	mutex_unlock(&cl_mutt_lock);
++
++	if (again)
++		schedule_delayed_work(&adp_mutt_work,
++				      msecs_to_jiffies(ADP_MUTT_PERIOD_MS));
++}
++
++/* the thermal core calls this with the zone lock held */
++static int mtk_cl_adp_mutt_set_cur_state(struct thermal_cooling_device *cdev,
++				unsigned long state)
++{
++	int ret;
++
++	mutex_lock(&cl_mutt_lock);
++	ret = mtk_cl_adp_mutt_set_cur_state_locked(cdev, state);
++	mutex_unlock(&cl_mutt_lock);
++	/* adaptive_tput_limit runs in the work, which reads the zone */
++	mod_delayed_work(system_wq, &adp_mutt_work, 0);
++	return ret;
++}
++
++static struct thermal_cooling_device_ops mtk_cl_adp_mutt_ops = {
++	.get_max_state = mtk_cl_adp_mutt_get_max_state,
++	.get_cur_state = mtk_cl_adp_mutt_get_cur_state,
++	.set_cur_state = mtk_cl_adp_mutt_set_cur_state,
++};
++
++/* =======================
++ *#define debugfs_entry(name) \
++ *do { \
++ *	dentry_f = debugfs_create_u32(#name, S_IWUSR | S_IRUGO, _d, &name); \
++ *	if (IS_ERR_OR_NULL(dentry_f)) {	\
++ *		pr_notice("Unable to create debugfsfile: " #name "\n"); \
++ *		return; \
++ *	} \
++ *} while (0)
++ *
++ *static void create_debugfs_entries(void)
++ *{
++ *	struct dentry *dentry_f;
++ *	struct dentry *_d;
++ *
++ *	_d = debugfs_create_dir("cl_adp_mutt", NULL);
++ *	if (IS_ERR_OR_NULL(_d)) {
++ *		pr_info("unable to create debugfs directory\n");
++ *		return;
++ *	}
++ *
++ *	debugfs_entry(MD_target_t);
++ *	debugfs_entry(t_stable_range);
++ *	debugfs_entry(tt_MD_high);
++ *	debugfs_entry(tt_MD_low);
++ *}
++ *
++ *#undef debugfs_entry
++ *==========================
++ */
++#endif
++
++/*
++ * mtk_thermal_cooling_device_register on 5.10: on its node under
++ * /modem-coolers when the board DT has one, so the zone's cooling maps bind
++ * it, otherwise with no node (not bound, as stock leaves it).
++ */
++static struct thermal_cooling_device *mutt_cdev_register(const char *name,
++	void *devdata, const struct thermal_cooling_device_ops *ops)
++{
++	char path[48];
++	struct device_node *np;
++	struct thermal_cooling_device *cdev;
++
++	snprintf(path, sizeof(path), "/modem-coolers/%s", name);
++	np = of_find_node_by_path(path);
++	/* the cooling device keeps np, so the reference is kept too */
++	cdev = thermal_of_cooling_device_register(np, (char *)name, devdata,
++						  ops);
++	if (IS_ERR(cdev)) {
++		pr_err("[Thermal/TC/mutt] %s register failed: %ld\n", name,
++		       PTR_ERR(cdev));
++		of_node_put(np);
++		return NULL;
++	}
++	pr_info("[Thermal/TC/mutt] %s registered%s\n", name,
++		np ? " on its DT node" : "");
++	return cdev;
++}
++
++static int mtk_cooler_mutt_register_ltf(void)
++{
++	int i;
++
++	mtk_cooler_mutt_dprintk("register ltf\n");
++
++	for (i = MAX_NUM_INSTANCE_MTK_COOLER_MUTT; i-- > 0;) {
++		char temp[20] = { 0 };
++
++		sprintf(temp, "mtk-cl-mutt%02d", i);
++		/* put mutt state to cooler devdata */
++		cl_mutt_dev[i] =
++			mutt_cdev_register(temp,
++						(void *)&cl_mutt_state[i],
++						&mtk_cl_mutt_ops);
++	}
++
++#if FEATURE_MUTT_V2
++	cl_dev_noIMS = mutt_cdev_register("mtk-cl-noIMS", NULL,
++							&mtk_cl_noIMS_ops);
++
++	cl_dev_mdoff = mutt_cdev_register("mtk-cl-mdoff", NULL,
++							&mtk_cl_mdoff_ops);
++#endif
++
++
++#if FEATURE_ADAPTIVE_MUTT
++	cl_dev_adp_mutt =
++		mutt_cdev_register("mtk-cl-adp-mutt",
++						NULL, &mtk_cl_adp_mutt_ops);
++#endif
++
++	return 0;
++}
++
++static void mtk_cooler_mutt_unregister_ltf(void)
++{
++	int i;
++
++	mtk_cooler_mutt_dprintk("unregister ltf\n");
++
++	for (i = MAX_NUM_INSTANCE_MTK_COOLER_MUTT; i-- > 0;) {
++		if (cl_mutt_dev[i]) {
++			thermal_cooling_device_unregister(cl_mutt_dev[i]);
++			cl_mutt_dev[i] = NULL;
++			cl_mutt_state[i] = 0;
++		}
++	}
++#if FEATURE_MUTT_V2
++	if (cl_dev_noIMS) {
++		thermal_cooling_device_unregister(cl_dev_noIMS);
++		cl_dev_noIMS = NULL;
++	}
++
++	if (cl_dev_mdoff) {
++		thermal_cooling_device_unregister(cl_dev_mdoff);
++		cl_dev_mdoff = NULL;
++	}
++#endif
++
++
++#if FEATURE_ADAPTIVE_MUTT
++	if (cl_dev_adp_mutt) {
++		thermal_cooling_device_unregister(cl_dev_adp_mutt);
++		cl_dev_adp_mutt = NULL;
++	}
++#endif
++
++}
++
++static int _mtk_cl_mutt_proc_read(struct seq_file *m, void *v)
++{
++    /**
++     * The format to print out:
++     *  kernel_log <0 or 1>
++     *  <mtk-cl-mutt<ID>> <active (ms)> <suspend (ms)> <param> <state>
++     *  ..
++     */
++	int i = 0;
++
++	seq_printf(m, "klog %d\n", cl_mutt_klog_on);
++#if FEATURE_MUTT_V2
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	seq_printf(m, "curr_limit:mutt 0x%08x, pa 0x%08x, ca 0x%08x, noIMS: %d, mdoff: %d\n",
++			cl_mutt_cur_limit,
++			cl_mutt_cur_pa_limit,
++			cl_mutt_cur_ca_limit,
++			cl_dev_noIMS_state,
++			cl_dev_mdoff_state);
++#else
++	seq_printf(m, "curr_limit %x, noIMS: %d, mdoff: %d\n",
++			cl_mutt_cur_limit,
++			cl_dev_noIMS_state,
++			cl_dev_mdoff_state);
++#endif
++#else
++		seq_printf(m, "curr_limit %x\n", cl_mutt_cur_limit);
++#endif
++
++		for (; i < MAX_NUM_INSTANCE_MTK_COOLER_MUTT; i++) {
++			unsigned int active;
++			unsigned int suspend;
++			unsigned long curr_state;
++
++		active = (cl_mutt_param[i] & MUTT_ACTIVATED_FILTER) >>
++				MUTT_ACTIVATED_OFFSET;
++		suspend = (cl_mutt_param[i] & MUTT_SUSPEND_FILTER) >>
++				MUTT_SUSPEND_OFFSET;
++
++			MTK_CL_MUTT_GET_CURR_STATE(curr_state,
++						cl_mutt_state[i]);
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++		seq_printf(m, "mtk-cl-mutt%02d %03u : %03u => 0x%08x,pa:0x%08x, ca:0x%08x state %lu\n",
++					i, active, suspend,
++					cl_mutt_param[i], cl_mutt_pa_param[i],
++					cl_mutt_ca_param[i], curr_state);
++
++#else
++		seq_printf(m, "mtk-cl-mutt%02d %u %u %x, state %lu\n",
++					i, active, suspend,
++					cl_mutt_param[i], curr_state);
++#endif
++		}
++
++#if FEATURE_ADAPTIVE_MUTT
++		seq_printf(m, "amutt_target_temp %d\n", MD_target_t);
++#endif
++
++
++	return 0;
++}
++
++static ssize_t _mtk_cl_mutt_proc_write(
++struct file *filp, const char __user *buffer, size_t count, loff_t *data)
++{
++	int len = 0;
++	char desc[128];
++	int klog_on, mutt0_a, mutt0_s, mutt1_a, mutt1_s, mutt2_a,
++		mutt2_s, mutt3_a, mutt3_s, amutt_target_temp;
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	int mutt0_off1pa = 0, mutt0_off1ca = 0,
++		mutt1_off1pa = 0, mutt1_off1ca = 0,
++		mutt2_off1pa = 0, mutt2_off1ca = 0,
++		mutt3_off1pa = 0, mutt3_off1ca = 0;
++#endif
++
++	int scan_count = 0;
++
++	len = (count < (sizeof(desc) - 1)) ? count : (sizeof(desc) - 1);
++
++	if (copy_from_user(desc, buffer, len))
++		return 0;
++
++	desc[len] = '\0';
++
++    /**
++     * sscanf format <klog_on> <mtk-cl-mutt00 active (ms)>
++     *<mtk-cl-mutt00 suspended (ms)> <mtk-cl-mutt01 active (ms)>
++     *<mtk-cl-mutt01 suspended (ms)> <mtk-cl-mutt02 active (ms)>
++     *<mtk-cl-mutt02 suspended (ms)>...
++     * <klog_on> can only be 0 or 1
++     * <mtk-cl-mutt* active/suspended (ms) > can only be positive
++     *integer or 0 to denote no limit
++     */
++
++	if (data == NULL) {
++		mtk_cooler_mutt_dprintk("[%s] null data\n", __func__);
++		return -EINVAL;
++	}
++	/* WARNING: Modify here if
++	 * MTK_THERMAL_MONITOR_COOLER_MAX_EXTRA_CONDITIONS
++	 * is changed to other than 4
++	 */
++#if (MAX_NUM_INSTANCE_MTK_COOLER_MUTT == 4)
++	/* cl_mutt_param[0] = 0; */
++	/* cl_mutt_param[1] = 0; */
++	/* cl_mutt_param[2] = 0; */
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	scan_count =
++	sscanf(desc, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
++			&klog_on, &mutt0_a, &mutt0_s,
++			&mutt1_a, &mutt1_s, &mutt2_a, &mutt2_s,
++			&mutt3_a, &mutt3_s, &amutt_target_temp,
++			&mutt0_off1pa, &mutt0_off1ca,
++			&mutt1_off1pa, &mutt1_off1ca,
++			&mutt2_off1pa, &mutt2_off1ca,
++			&mutt3_off1pa, &mutt3_off1ca);
++#else
++	scan_count = sscanf(desc, "%d %d %d %d %d %d %d %d %d %d",
++					&klog_on, &mutt0_a, &mutt0_s,
++					&mutt1_a, &mutt1_s, &mutt2_a, &mutt2_s,
++					&mutt3_a, &mutt3_s, &amutt_target_temp);
++
++#endif
++	if (scan_count >= 1) {
++		if (klog_on == 0 || klog_on == 1)
++			cl_mutt_klog_on = klog_on;
++
++		if (mutt0_a == 0)
++			cl_mutt_param[0] = 0;
++		else if (mutt0_a >= 100 && mutt0_a <= 25500
++		&& mutt0_s >= 100 && mutt0_s <= 25500)
++			cl_mutt_param[0] =
++			((mutt0_s / 100) << MUTT_SUSPEND_OFFSET) |
++			((mutt0_a / 100) << MUTT_ACTIVATED_OFFSET) |
++			MUTT_ENABLE_IMS_ENABLE;
++
++		if (mutt1_a == 0)
++			cl_mutt_param[1] = 0;
++		else if (mutt1_a >= 100 && mutt1_a <= 25500
++		&& mutt1_s >= 100 && mutt1_s <= 25500)
++			cl_mutt_param[1] =
++			((mutt1_s / 100) << MUTT_SUSPEND_OFFSET) |
++			((mutt1_a / 100) << MUTT_ACTIVATED_OFFSET) |
++			MUTT_ENABLE_IMS_ENABLE;
++
++		if (mutt2_a == 0)
++			cl_mutt_param[2] = 0;
++		else if (mutt2_a >= 100 && mutt2_a <= 25500
++		&& mutt2_s >= 100 && mutt2_s <= 25500)
++			cl_mutt_param[2] =
++			((mutt2_s / 100) << MUTT_SUSPEND_OFFSET) |
++			((mutt2_a / 100) << MUTT_ACTIVATED_OFFSET) |
++			MUTT_ENABLE_IMS_ENABLE;
++
++		if (mutt3_a == 0)
++			cl_mutt_param[3] = 0;
++		else if (mutt3_a >= 100 && mutt3_a <= 25500
++		&& mutt3_s >= 100 && mutt3_s <= 25500)
++			cl_mutt_param[3] =
++			((mutt3_s / 100) << MUTT_SUSPEND_OFFSET) |
++			((mutt3_a / 100) << MUTT_ACTIVATED_OFFSET) |
++			MUTT_ENABLE_IMS_ENABLE;
++
++
++#if FEATURE_ADAPTIVE_MUTT
++		if (scan_count > 1+MAX_NUM_INSTANCE_MTK_COOLER_MUTT*2)
++			MD_target_t = amutt_target_temp;
++#endif
++
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	if (scan_count > (2 + MAX_NUM_INSTANCE_MTK_COOLER_MUTT * 2)) {
++		if (mutt0_off1pa == 0)
++			cl_mutt_pa_param[0] = TMC_PA_CTRL_PA_ALL_ON;
++		else
++			cl_mutt_pa_param[0] = TMC_PA_CTRL_PA_OFF_1PA;
++
++		if (mutt0_off1ca == 0)
++			cl_mutt_ca_param[0] = TMC_CA_CTRL_CA_ON;
++		else
++			cl_mutt_ca_param[0] = TMC_CA_CTRL_CA_OFF;
++
++		if (mutt1_off1pa == 0)
++			cl_mutt_pa_param[1] = TMC_PA_CTRL_PA_ALL_ON;
++		else
++			cl_mutt_pa_param[1] = TMC_PA_CTRL_PA_OFF_1PA;
++
++		if (mutt1_off1ca == 0)
++			cl_mutt_ca_param[1] = TMC_CA_CTRL_CA_ON;
++		else
++			cl_mutt_ca_param[1] = TMC_CA_CTRL_CA_OFF;
++
++		if (mutt2_off1pa == 0)
++			cl_mutt_pa_param[2] = TMC_PA_CTRL_PA_ALL_ON;
++		else
++			cl_mutt_pa_param[2] = TMC_PA_CTRL_PA_OFF_1PA;
++
++		if (mutt2_off1ca == 0)
++			cl_mutt_ca_param[2] = TMC_CA_CTRL_CA_ON;
++		else
++			cl_mutt_ca_param[2] = TMC_CA_CTRL_CA_OFF;
++
++		if (mutt3_off1pa == 0)
++			cl_mutt_pa_param[3] = TMC_PA_CTRL_PA_ALL_ON;
++		else
++			cl_mutt_pa_param[3] = TMC_PA_CTRL_PA_OFF_1PA;
++
++		if (mutt3_off1ca == 0)
++			cl_mutt_ca_param[3] = TMC_CA_CTRL_CA_ON;
++		else
++			cl_mutt_ca_param[3] = TMC_CA_CTRL_CA_OFF;
++	}
++#endif
++
++		return count;
++	}
++#else
++#error	\
++"Change correspondent part when changing MAX_NUM_INSTANCE_MTK_COOLER_MUTT!"
++#endif
++	mtk_cooler_mutt_dprintk("[%s] bad arg\n", __func__);
++	return -EINVAL;
++}
++
++static int _mtk_cl_mutt_proc_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, _mtk_cl_mutt_proc_read, NULL);
++}
++
++static const struct proc_ops cl_mutt_fops = {
++	.proc_open = _mtk_cl_mutt_proc_open,
++	.proc_read = seq_read,
++	.proc_lseek = seq_lseek,
++	.proc_write = _mtk_cl_mutt_proc_write,
++	.proc_release = single_release,
++};
++
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++static unsigned int cl_mutt_tuning_param;
++static unsigned int cl_mutt_tuning_param_pa;
++static unsigned int cl_mutt_tuning_param_ca;
++static unsigned int cl_mutt_tuning_param_lv;
++static unsigned long last_md_tuning_boot_cnt;
++
++static int _mtk_cl_mutt_tuning_read(struct seq_file *m, void *v)
++{
++	seq_printf(m,
++	"klog_on, mutt_a, mutt_s, mutt_noIMS, mutt_off1pa, mutt_off1ca\n");
++
++	seq_printf(m,
++	"klog %d\n", cl_mutt_klog_on);
++	seq_printf(m,
++	"curr_limit %x, pa %x, ca %x, boot_cnt: %lul, mdoff: %d, level: %d\n",
++		cl_mutt_tuning_param,
++		cl_mutt_tuning_param_pa,
++		cl_mutt_tuning_param_ca,
++		last_md_tuning_boot_cnt,
++		cl_mutt_tuning_param_lv,
++		cl_dev_mdoff_state);
++
++	return 0;
++}
++
++unsigned int level_selection(int lv)
++{
++	unsigned int ctrl_lv = 0;
++
++	switch (lv) {
++	case 0:
++		ctrl_lv = TMC_COOLER_LV_CTRL00;
++		break;
++	case 1:
++		ctrl_lv = TMC_COOLER_LV_CTRL01;
++		break;
++	case 2:
++		ctrl_lv = TMC_COOLER_LV_CTRL02;
++		break;
++	case 3:
++		ctrl_lv = TMC_COOLER_LV_CTRL03;
++		break;
++	case 4:
++		ctrl_lv = TMC_COOLER_LV_CTRL04;
++		break;
++	case 5:
++		ctrl_lv = TMC_COOLER_LV_CTRL05;
++		break;
++	case 6:
++		ctrl_lv = TMC_COOLER_LV_CTRL06;
++		break;
++	case 7:
++		ctrl_lv = TMC_COOLER_LV_CTRL07;
++		break;
++	case 8:
++		ctrl_lv = TMC_COOLER_LV_CTRL08;
++		break;
++	default:
++		ctrl_lv = TMC_COOLER_LV_CTRL00;
++		break;
++	}
++
++	mtk_cooler_mutt_dprintk_always(
++		"[%s]lv(%d):ctrl_lv: 0x%08x\n", __func__, lv, ctrl_lv);
++
++	return ctrl_lv;
++}
++
++static ssize_t _mtk_cl_mutt_tuning_write(
++struct file *filp, const char __user *buffer, size_t count, loff_t *data)
++{
++	int len = 0;
++	char desc[128];
++	int klog_on = 0, mutt_a = 0, mutt_s = 0;
++	int mutt_off1pa = 0, mutt_off1ca = 0, mutt_noIMS = 0, mutt_level = 0;
++	//int ret_pa = 0;
++	int ret = 0, ret_ca = 0, ret_pa = 0, ret_lv = 0;
++	int scan_count = 0;
++	char arg_name[32] = { 0 };
++
++	len = (count < (sizeof(desc) - 1)) ? count : (sizeof(desc) - 1);
++	if (copy_from_user(desc, buffer, len))
++		return 0;
++
++	desc[len] = '\0';
++
++    /**
++     * sscanf format <klog_on> <mtk-cl-mutt00 active (ms)>
++     *<mtk-cl-mutt00 suspended (ms)> <mtk-cl-mutt01 active (ms)>
++     *<mtk-cl-mutt01 suspended (ms)> <mtk-cl-mutt02 active (ms)>
++     *<mtk-cl-mutt02 suspended (ms)>...
++     * <klog_on> can only be 0 or 1
++     * <mtk-cl-mutt* active/suspended (ms) > can only be positive
++     *integer or 0 to denote no limit
++     */
++
++	if (data == NULL) {
++		mtk_cooler_mutt_dprintk("[%s] null data\n", __func__);
++		return -EINVAL;
++	}
++
++#if (MAX_NUM_INSTANCE_MTK_COOLER_MUTT == 4)
++	/* cl_mutt_param[0] = 0; */
++	/* cl_mutt_param[1] = 0; */
++	/* cl_mutt_param[2] = 0; */
++	/* cl_mutt_param[3] = 0; */
++
++	scan_count =
++	sscanf(desc, "%d %31s %d %d %d %d %d %d", &klog_on, arg_name,
++		&mutt_level, &mutt_a, &mutt_s, &mutt_noIMS, &mutt_off1pa,
++		&mutt_off1ca);
++
++	if (scan_count >= 1) {
++
++		mtk_cooler_mutt_dprintk_always(
++			"[%s] log:%d A:%d,S:%d,noIMS:%d,off1pa:%x,off1ca:%x\n",
++			__func__, klog_on, mutt_a, mutt_s, mutt_noIMS,
++			mutt_off1pa, mutt_off1ca);
++
++		if (klog_on == 0 || klog_on == 1)
++			cl_mutt_klog_on = klog_on;
++
++
++		if ((strncmp(arg_name, "mutt_level", 10) == 0)
++				&& (mutt_level >= 0) && (mutt_level <= 8)) {
++
++			last_md_tuning_boot_cnt =
++				ccci_get_md_boot_count(MD_SYS1);
++
++			cl_mutt_tuning_param_lv =
++				level_selection(mutt_level);
++			cl_mutt_tuning_param_lv =
++				cl_mutt_tuning_param_lv |
++				(TMC_COOLER_LV_ENABLE << 8);
++			ret_lv = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_tuning_param_lv, 4);
++
++
++			mtk_cooler_mutt_dprintk_always(
++			"[%s]mutt_level:%d, lv: %d param: 0x%08x bcnt: %lul\n",
++			__func__, mutt_level, ret_lv, cl_mutt_tuning_param_lv,
++			last_md_tuning_boot_cnt);
++
++			return len;
++		}
++
++		if ((strncmp(arg_name, "disable_level", 13) == 0)) {
++
++			last_md_tuning_boot_cnt =
++				ccci_get_md_boot_count(MD_SYS1);
++
++			cl_mutt_tuning_param_lv =
++				level_selection(mutt_level);
++			cl_mutt_tuning_param_lv =
++				TMC_LEVEL_CTRL_COOLER_LV_DISABLE;
++			ret_lv = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_tuning_param_lv, 4);
++
++
++			mtk_cooler_mutt_dprintk_always(
++			"[%s]disable_lv:%d, lv: %d param: 0x%08x bcnt: %lul\n",
++			__func__, mutt_level, ret_lv, cl_mutt_tuning_param_lv,
++			last_md_tuning_boot_cnt);
++
++			return len;
++		}
++
++
++		if (mutt_a == 0)
++			cl_mutt_tuning_param = 0;
++		else if (mutt_a >= 100 && mutt_a <= 25500
++		&& mutt_s >= 100 && mutt_s <= 25500)
++			cl_mutt_tuning_param =
++			((mutt_s / 100) << MUTT_SUSPEND_OFFSET) |
++			((mutt_a / 100) << MUTT_ACTIVATED_OFFSET);
++
++
++		if (mutt_noIMS != 0xFF) {
++			if (mutt_noIMS == 0)/*IMS enable*/
++				cl_mutt_tuning_param = cl_mutt_tuning_param |
++					MUTT_ENABLE_IMS_ENABLE;
++			else/*IMS disable*/
++				cl_mutt_tuning_param = cl_mutt_tuning_param |
++					MUTT_ENABLE_IMS_DISABLE;
++		}
++
++		if (mutt_off1pa != 0xFF) {
++			if (mutt_off1pa == 0)/*enable*/
++				cl_mutt_tuning_param_pa =
++					TMC_PA_CTRL_PA_ALL_ON;
++			else/*disable*/
++				cl_mutt_tuning_param_pa =
++					TMC_PA_CTRL_PA_OFF_1PA;
++		}
++
++		if (mutt_off1ca != 0xFF) {
++			if (mutt_off1ca == 0)/*enable*/
++				cl_mutt_tuning_param_ca = TMC_CA_CTRL_CA_ON;
++			else/*disable*/
++				cl_mutt_tuning_param_ca = TMC_CA_CTRL_CA_OFF;
++		}
++
++
++
++		last_md_tuning_boot_cnt = ccci_get_md_boot_count(MD_SYS1);
++
++		if (mutt_noIMS == 0xFF) {
++			cl_mutt_tuning_param = TMC_THROTTLING_THROT_DISABLE;
++
++			ret = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_tuning_param, 4);
++			mtk_cooler_mutt_dprintk_always(
++				"[%s]2 ret %d param %x bcnt %lul\n", __func__,
++				ret,
++				cl_mutt_tuning_param,
++				last_md_tuning_boot_cnt);
++		} else {/*Throttle disable*/
++			ret = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_tuning_param, 4);
++			mtk_cooler_mutt_dprintk_always(
++			"[%s]Throttle disable: ret %d param %x bcnt %lul\n",
++				__func__, ret, cl_mutt_tuning_param,
++				last_md_tuning_boot_cnt);
++		}
++
++
++		if (mutt_off1pa != 0xFF) {
++			ret_pa = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_tuning_param_pa, 4);
++
++			mtk_cooler_mutt_dprintk_always(
++				"[%s]3 ret_pa %d param %x bcnt %lul\n",
++				__func__,
++				ret_pa, cl_mutt_tuning_param_pa,
++				last_md_tuning_boot_cnt);
++		}
++
++
++		if (mutt_off1ca != 0xFF) {
++			ret_pa = exec_ccci_kern_func_by_md_id(MD_SYS1,
++				ID_THROTTLING_CFG,
++				(char *)&cl_mutt_tuning_param_ca, 4);
++			mtk_cooler_mutt_dprintk_always(
++			"[%s]4 ret_ca %d param %x bcnt %lul\n", __func__,
++			ret_ca, cl_mutt_tuning_param_ca,
++			last_md_tuning_boot_cnt);
++		}
++
++		return len;
++	}
++#else
++#error	\
++"Change correspondent part when changing MAX_NUM_INSTANCE_MTK_COOLER_MUTT!"
++#endif
++	mtk_cooler_mutt_dprintk("[%s] bad arg\n", __func__);
++	return -EINVAL;
++}
++
++static int _mtk_cl_mutt_tuning_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, _mtk_cl_mutt_tuning_read, NULL);
++}
++
++static const struct proc_ops clmutt_tuning_fops = {
++	.proc_open = _mtk_cl_mutt_tuning_open,
++	.proc_read = seq_read,
++	.proc_lseek = seq_lseek,
++	.proc_write = _mtk_cl_mutt_tuning_write,
++	.proc_release = single_release,
++};
++#endif
++
++static int __init mtk_cooler_mutt_init(void)
++{
++	int err = 0;
++	int i;
++
++	for (i = MAX_NUM_INSTANCE_MTK_COOLER_MUTT; i-- > 0;) {
++		cl_mutt_dev[i] = NULL;
++		cl_mutt_state[i] = 0;
++	}
++
++	mtk_cooler_mutt_dprintk("init\n");
++
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++	cl_mutt_cur_limit = TMC_THROTTLING_THROT_DISABLE;
++#endif
++	err = mtk_cooler_mutt_register_ltf();
++	if (err)
++		goto err_unreg;
++
++	/* create a proc file */
++	{
++		struct proc_dir_entry *entry = NULL;
++		struct proc_dir_entry *dir_entry = NULL;
++
++		/* stock's mtk_thermal_monitor made this; nothing else here does */
++		dir_entry = proc_mkdir("driver/thermal", NULL);
++		if (!dir_entry) {
++			mtk_cooler_mutt_dprintk_always(
++				"[%s]: mkdir /proc/driver/thermal failed\n",
++				__func__);
++		} else {
++			entry = proc_create("clmutt", 0664, dir_entry,
++					&cl_mutt_fops);
++			if (entry)
++				proc_set_user(entry, uid, gid);
++#if FEATURE_MUTT_V2
++			entry = proc_create("clmutt_tm_pid", 0664, dir_entry,
++							&clmutt_tm_pid_fops);
++			if (entry)
++				proc_set_user(entry, uid, gid);
++#endif
++#if FEATURE_THERMAL_DIAG
++			entry = proc_create("clmutt_tmd_pid", 0664, dir_entry,
++							&clmutt_tmd_pid_fops);
++			if (entry)
++				proc_set_user(entry, uid, gid);
++#endif
++#if defined(FEATURE_MUTT_INTERFACE_VER)
++			entry = proc_create("clmutt_tuning", 0664, dir_entry,
++							&clmutt_tuning_fops);
++			if (entry)
++				proc_set_user(entry, uid, gid);
++#endif
++		}
++	}
++
++#if FEATURE_ADAPTIVE_MUTT
++	/* create_debugfs_entries(); */
++#endif
++
++	return 0;
++
++err_unreg:
++	mtk_cooler_mutt_unregister_ltf();
++	return err;
++}
++
++static void __exit mtk_cooler_mutt_exit(void)
++{
++	mtk_cooler_mutt_dprintk("exit\n");
++
++	/* remove the proc file */
++	remove_proc_entry("clmutt", NULL);
++
++	mtk_cooler_mutt_unregister_ltf();
++}
++module_init(mtk_cooler_mutt_init);
++module_exit(mtk_cooler_mutt_exit);
+--- a/drivers/misc/mediatek/Kconfig
++++ b/drivers/misc/mediatek/Kconfig
+@@ -91,6 +91,10 @@
+ # ccmni network interfaces for eccci
+ source "drivers/misc/mediatek/ccmni/Kconfig"
+ 
++# conn_md LTE coex bridge, the modem PA thermistor and the modem coolers
++source "drivers/misc/mediatek/conn_md/Kconfig"
++source "drivers/misc/mediatek/thermal/Kconfig"
++
+ # Sensor hub stack, stock's Sensors menu
+ menu "Sensors"
+ 
+--- a/drivers/misc/mediatek/Makefile
++++ b/drivers/misc/mediatek/Makefile
+@@ -59,6 +59,10 @@
+ obj-$(CONFIG_MTK_CCCI_PLATFORM_DEPS) += ccci_platform/
+ # ccmni network interfaces for eccci and the set_rps_map they use
+ obj-$(CONFIG_MTK_NET_CCMNI) += ccmni/ rps/
++# conn_md LTE coex bridge, the modem PA thermistor and the modem coolers
++obj-$(CONFIG_MTK_CONN_MD) += conn_md/
++obj-$(CONFIG_MTK_THERMAL_BTSMDPA) += thermal/common/thermal_zones/
++obj-$(CONFIG_MTK_COOLER_MUTT) += thermal/common/coolers/
+ # Sensor hub stack: hwmon misc devices and the hub sensors over the SCP
+ ifeq ($(subst ",,$(CONFIG_MTK_SENSOR_ARCHITECTURE)),1.0)
+ obj-y += sensors-1.0/

@@ -1,0 +1,146 @@
+--- a/drivers/soc/mediatek/mtk-pmic-wrap.c
++++ b/drivers/soc/mediatek/mtk-pmic-wrap.c
+@@ -12,6 +12,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
+ #include <linux/reset.h>
++#include <linux/sched/clock.h>
+ 
+ #define PWRAP_MT8135_BRIDGE_IORD_ARB_EN		0x4
+ #define PWRAP_MT8135_BRIDGE_WACS3_EN		0x10
+@@ -1043,6 +1044,7 @@
+ enum pwrap_type {
+ 	PWRAP_MT2701,
+ 	PWRAP_MT6765,
++	PWRAP_MT6771,
+ 	PWRAP_MT6779,
+ 	PWRAP_MT6797,
+ 	PWRAP_MT7622,
+@@ -1092,6 +1094,8 @@
+ 	u32 wdt_src;
+ 	/* Flags indicating the capability for the target pwrap */
+ 	u32 caps;
++	/* Preserve bootloader bus setup until the SoC cold-init path is ported. */
++	bool bootloader_only;
+ 	int (*init_reg_clock)(struct pmic_wrapper *wrp);
+ 	int (*init_soc_specific)(struct pmic_wrapper *wrp);
+ };
+@@ -1147,15 +1151,17 @@
+ 		(val & PWRAP_STATE_SYNC_IDLE0);
+ }
+ 
++/*
++ * 10 ms on sched_clock, as stock, so the wait still ends with IRQs off
++ * (the MT6358 power-off runs there and jiffies stop).
++ */
+ static int pwrap_wait_for_state(struct pmic_wrapper *wrp,
+ 		bool (*fp)(struct pmic_wrapper *))
+ {
+-	unsigned long timeout;
+-
+-	timeout = jiffies + usecs_to_jiffies(10000);
++	u64 start = sched_clock();
+ 
+ 	do {
+-		if (time_after(jiffies, timeout))
++		if (sched_clock() - start > 10000 * NSEC_PER_USEC)
+ 			return fp(wrp) ? 0 : -ETIMEDOUT;
+ 		if (fp(wrp))
+ 			return 0;
+@@ -1266,6 +1272,31 @@
+ static int pwrap_write(struct pmic_wrapper *wrp, u32 adr, u32 wdata)
+ {
+ 	return wrp->slave->pwrap_write(wrp, adr, wdata);
++}
++
++/*
++ * MT6771 shares the mt8183_regs layout, not its initialization sequence.
++ * Initially support only the validated bootloader-initialized MT6358 bus.
++ * Do not reset the wrapper, change SPI timing or write PMIC test registers.
++ */
++static int pwrap_mt6771_validate_handoff(struct pmic_wrapper *wrp)
++{
++	u32 rdata;
++	int ret;
++
++	if (wrp->slave->type != PMIC_MT6358)
++		return -ENODEV;
++	if (!(pwrap_readl(wrp, PWRAP_INIT_DONE2) & 1) ||
++	    !(pwrap_readl(wrp, PWRAP_WACS2_RDATA) & PWRAP_STATE_INIT_DONE0) ||
++	    !(pwrap_readl(wrp, PWRAP_WRAP_EN) & 1) ||
++	    !(pwrap_readl(wrp, PWRAP_WACS2_EN) & 1))
++		return -ENODEV;
++
++	ret = pwrap_read(wrp, wrp->slave->dew_regs[PWRAP_DEW_READ_TEST], &rdata);
++	if (ret)
++		return ret;
++
++	return rdata == PWRAP_DEW_READ_TEST_VAL ? 0 : -EIO;
+ }
+ 
+ static int pwrap_regmap_read(void *context, u32 adr, u32 *rdata)
+@@ -1487,6 +1518,9 @@
+ 		break;
+ 	case PWRAP_MT8183:
+ 		break;
++	case PWRAP_MT6771:
++		/* Cold initialization is not available for this handoff-only port. */
++		return -EOPNOTSUPP;
+ 	}
+ 
+ 	/* Config cipher mode @PMIC */
+@@ -1660,6 +1694,9 @@
+ static int pwrap_init(struct pmic_wrapper *wrp)
+ {
+ 	int ret;
++
++	if (wrp->master->bootloader_only)
++		return -EOPNOTSUPP;
+ 
+ 	if (wrp->rstc)
+ 		reset_control_reset(wrp->rstc);
+@@ -1960,6 +1997,19 @@
+ 	.init_soc_specific = pwrap_mt8173_init_soc_specific,
+ };
+ 
++static const struct pmic_wrapper_type pwrap_mt6771 = {
++	.regs = mt8183_regs,
++	.type = PWRAP_MT6771,
++	.arb_en_all = 0x3fa65,
++	/* Match the shipped MT6771 wrapper's two interrupt banks. */
++	.int_en_all = 0x0c0001ff,
++	.int1_en_all = 0xeef7ffff,
++	.spi_w = PWRAP_MAN_CMD_SPI_WRITE,
++	.wdt_src = PWRAP_WDT_SRC_MASK_ALL,
++	.caps = PWRAP_CAP_INT1_EN | PWRAP_CAP_WDT_SRC1,
++	.bootloader_only = true,
++};
++
+ static const struct pmic_wrapper_type pwrap_mt8183 = {
+ 	.regs = mt8183_regs,
+ 	.type = PWRAP_MT8183,
+@@ -1992,6 +2042,9 @@
+ 	}, {
+ 		.compatible = "mediatek,mt6765-pwrap",
+ 		.data = &pwrap_mt6765,
++	}, {
++		.compatible = "mediatek,mt6771-pwrap",
++		.data = &pwrap_mt6771,
+ 	}, {
+ 		.compatible = "mediatek,mt6779-pwrap",
+ 		.data = &pwrap_mt6779,
+@@ -2108,7 +2161,13 @@
+ 	 * The PMIC could already be initialized by the bootloader.
+ 	 * Skip initialization here in this case.
+ 	 */
+-	if (!pwrap_readl(wrp, PWRAP_INIT_DONE2)) {
++	if (wrp->master->bootloader_only) {
++		ret = pwrap_mt6771_validate_handoff(wrp);
++		if (ret) {
++			dev_err(wrp->dev, "MT6771 PMIC handoff validation failed: %d\n", ret);
++			goto err_out2;
++		}
++	} else if (!pwrap_readl(wrp, PWRAP_INIT_DONE2)) {
+ 		ret = pwrap_init(wrp);
+ 		if (ret) {
+ 			dev_dbg(wrp->dev, "init failed with %d\n", ret);

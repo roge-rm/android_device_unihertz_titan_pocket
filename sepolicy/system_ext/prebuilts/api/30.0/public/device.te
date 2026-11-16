@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# MTK device nodes labelled by the stock vendor policy.
+type mcupm_device, dev_type;
+type mtd_device, dev_type;

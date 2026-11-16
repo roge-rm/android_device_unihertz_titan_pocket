@@ -1,0 +1,722 @@
+--- a/drivers/thermal/cpufreq_cooling.c
++++ b/drivers/thermal/cpufreq_cooling.c
+@@ -76,6 +76,7 @@
+ 	struct list_head node;
+ 	struct time_in_idle *idle_time;
+ 	struct freq_qos_request qos_req;
++	struct thermal_cooling_device_ops cooling_ops;
+ };
+ 
+ static DEFINE_IDA(cpufreq_ida);
+@@ -443,6 +444,9 @@
+ 		cpufreq_cdev->cpufreq_state = state;
+ 		cpus = cpufreq_cdev->policy->related_cpus;
+ 		max_capacity = arch_scale_cpu_capacity(cpumask_first(cpus));
++		/* states above cpuinfo.max_freq (turbo, boost off) are no cap */
++		frequency = min(frequency,
++				cpufreq_cdev->policy->cpuinfo.max_freq);
+ 		capacity = frequency * max_capacity;
+ 		capacity /= cpufreq_cdev->policy->cpuinfo.max_freq;
+ 		arch_set_thermal_pressure(cpus, max_capacity - capacity);
+@@ -453,12 +457,6 @@
+ }
+ 
+ /* Bind cpufreq callbacks to thermal cooling device ops */
+-
+-static struct thermal_cooling_device_ops cpufreq_cooling_ops = {
+-	.get_max_state		= cpufreq_get_max_state,
+-	.get_cur_state		= cpufreq_get_cur_state,
+-	.set_cur_state		= cpufreq_set_cur_state,
+-};
+ 
+ /**
+  * __cpufreq_cooling_register - helper function to create cpufreq cooling device
+@@ -534,7 +532,10 @@
+ 	snprintf(dev_name, sizeof(dev_name), "thermal-cpufreq-%d",
+ 		 cpufreq_cdev->id);
+ 
+-	cooling_ops = &cpufreq_cooling_ops;
++	cooling_ops = &cpufreq_cdev->cooling_ops;
++	cooling_ops->get_max_state = cpufreq_get_max_state;
++	cooling_ops->get_cur_state = cpufreq_get_cur_state;
++	cooling_ops->set_cur_state = cpufreq_set_cur_state;
+ 
+ #ifdef CONFIG_THERMAL_GOV_POWER_ALLOCATOR
+ 	if (em_is_sane(cpufreq_cdev, em)) {
+--- a/drivers/thermal/mtk_thermal.c
++++ b/drivers/thermal/mtk_thermal.c
+@@ -20,10 +20,15 @@
+ #include <linux/slab.h>
+ #include <linux/io.h>
+ #include <linux/thermal.h>
++#include <linux/workqueue.h>
+ #include <linux/reset.h>
+ #include <linux/types.h>
++#include <asm/unaligned.h>
++
++#include "thermal_core.h"
+ 
+ /* AUXADC Registers */
++#define AUXADC_CON0_V		0x000
+ #define AUXADC_CON1_SET_V	0x008
+ #define AUXADC_CON1_CLR_V	0x00c
+ #define AUXADC_CON2_V		0x010
+@@ -35,6 +40,7 @@
+ #define TEMP_MONCTL0		0x000
+ #define TEMP_MONCTL1		0x004
+ #define TEMP_MONCTL2		0x008
++#define TEMP_MONINT		0x00c
+ #define TEMP_MONIDET0		0x014
+ #define TEMP_MONIDET1		0x018
+ #define TEMP_MSRCTL0		0x038
+@@ -62,6 +68,9 @@
+ #define TEMP_MSR2		0x098
+ #define TEMP_MSR3		0x0B8
+ 
++#define TEMP_PROTCTL		0x0c0
++#define TEMP_PROTTC		0x0cc
++
+ #define TEMP_SPARE0		0x0f0
+ 
+ #define TEMP_ADCPNP0_1          0x148
+@@ -133,6 +142,7 @@
+ #define CALIB_BUF0_O_SLOPE_V1(x)	(((x) >> 26) & 0x3f)
+ #define CALIB_BUF0_O_SLOPE_SIGN_V1(x)	(((x) >> 7) & 0x1)
+ #define CALIB_BUF1_ID_V1(x)		(((x) >> 9) & 0x1)
++#define CALIB_BUF1_ADC_OE_V1(x)		(((x) >> 12) & 0x3ff)
+ 
+ /*
+  * Layout of the fuses providing the calibration data
+@@ -217,6 +227,20 @@
+ /* The calibration coefficient of sensor  */
+ #define MT7622_CALIBRATION	165
+ 
++/* MT6771 uses the MT8183 sensors, banks and fuse layout. */
++#define MT6771_NUM_CONTROLLER		2
++
++/* Hardware protection: TEMPPROTCTL strategy 2, TEMPMONINT stage 3 enable */
++#define TEMP_PROTCTL_STOCK		0x20000
++#define TEMP_MONINT_STAGE3		BIT(31)
++
++/* TOPRGU request registers: a thermal trip resets the SoC, not an IRQ */
++#define TOPRGU_REQ_MODE			0x030
++#define TOPRGU_REQ_MODE_KEY		0x33000000
++#define TOPRGU_REQ_IRQ_EN		0x034
++#define TOPRGU_REQ_IRQ_KEY		0x44000000
++#define TOPRGU_REQ_THERMAL		BIT(18)
++
+ /* MT8183 thermal sensors */
+ #define MT8183_TS1	0
+ #define MT8183_TS2	1
+@@ -253,6 +277,14 @@
+ struct mtk_thermal_bank {
+ 	struct mtk_thermal *mt;
+ 	int id;
++};
++
++/* Per-controller timing written in place of the mainline defaults */
++struct mtk_thermal_tc_speed {
++	u32 monctl1;
++	u32 monctl2;
++	u32 ahbpoll;
++	u32 msrctl0;
+ };
+ 
+ struct mtk_thermal_data {
+@@ -269,6 +301,16 @@
+ 	bool need_switch_bank;
+ 	struct thermal_bank_cfg bank_data[MAX_NUM_ZONES];
+ 	enum mtk_thermal_version version;
++	/*
++	 * MT6771 only: stock tscpu's calibration and conversion, its timing,
++	 * per-controller sensing points, fuse words from the LK devinfo tag,
++	 * and the 117 C hardware reset.
++	 */
++	bool stock_cal;
++	const struct mtk_thermal_tc_speed *tc_speed;
++	const u32 *tc_monctl0;
++	const int *tc_prot_sensor;
++	int devinfo_index;
+ };
+ 
+ struct mtk_thermal {
+@@ -287,9 +329,13 @@
+ 	s32 o_slope;
+ 	s32 o_slope_sign;
+ 	s32 vts[MAX_NUM_VTS];
++	/* stock_cal only: ADC offset (OE - 512) and gain (10000 + GE) */
++	s32 oe;
++	s32 gain;
+ 
+ 	const struct mtk_thermal_data *conf;
+ 	struct mtk_thermal_bank banks[MAX_NUM_ZONES];
++	struct delayed_work dump_work;
+ };
+ 
+ /* MT8183 thermal sensor data */
+@@ -311,6 +357,25 @@
+ 
+ static const int mt8183_vts_index[MT8183_NUM_SENSORS] = {
+ 	VTS1, VTS2, VTS3, VTS4, VTS5, VTSABB
++};
++
++/* MT6771 thermal sensor data, as stock mtk_tc.c */
++static const int mt6771_mux_values[MT8183_NUM_SENSORS] = { 0, 1, 2, 3, 4, 0x10 };
++
++/* TC0 has MCU5 and MCU4, TC1 has MCU1 to MCU3 and ABB */
++static const u32 mt6771_tc_monctl0[MT6771_NUM_CONTROLLER] = { 0x3, 0xf };
++
++/* Stock compares the first sensing point of each controller with PROTTC */
++static const int mt6771_tc_prot_sensor[MT6771_NUM_CONTROLLER] = {
++	MT8183_TS5, MT8183_TS1
++};
++
++/* 4.9 ms per round, 2 of 4 samples (THERMAL_CONTROLLER_HW_FILTER 2) */
++static const struct mtk_thermal_tc_speed mt6771_tc_speed = {
++	.monctl1 = 0xc,
++	.monctl2 = 0x1003b,
++	.ahbpoll = 0x30d,
++	.msrctl0 = 0x492,
+ };
+ 
+ /* MT8173 thermal sensor data */
+@@ -547,6 +612,75 @@
+ 	.version = MTK_THERMAL_V1,
+ };
+ 
++/*
++ * MT6771: devinfo words 100, 101 and 102 hold the thermal fuses (stock
++ * ADDRESS_INDEX_1, _0 and _2), the same three words as the V1 layout.
++ */
++static const struct mtk_thermal_data mt6771_thermal_data = {
++	.auxadc_channel = MT8183_TEMP_AUXADC_CHANNEL,
++	.num_banks = MT8183_NUM_ZONES,
++	.num_sensors = MT8183_NUM_SENSORS,
++	.vts_index = mt8183_vts_index,
++	.cali_val = MT8183_CALIBRATION,
++	.num_controller = MT6771_NUM_CONTROLLER,
++	.controller_offset = mt8183_tc_offset,
++	.need_switch_bank = false,
++	.bank_data = {
++		{
++			.num_sensors = 6,
++			.sensors = mt8183_bank_data,
++		},
++	},
++
++	.msr = mt8183_msr,
++	.adcpnp = mt8183_adcpnp,
++	.sensor_mux_values = mt6771_mux_values,
++	.version = MTK_THERMAL_V1,
++	.stock_cal = true,
++	.tc_speed = &mt6771_tc_speed,
++	.tc_monctl0 = mt6771_tc_monctl0,
++	.tc_prot_sensor = mt6771_tc_prot_sensor,
++	.devinfo_index = 100,
++};
++
++/*
++ * MT6771 conversions, as stock raw_to_temperature_roomt() and
++ * temperature_to_raw_room() in 0.1 C steps. The raw value falls as the
++ * temperature rises. All terms stay well inside s32.
++ */
++static s32 mt6771_x_roomt(struct mtk_thermal *mt, int sensno)
++{
++	return (((mt->vts[sensno] + 3350 - mt->oe) * 10000) / 4096) *
++		10000 / mt->gain;
++}
++
++static int raw_to_mcelsius_mt6771(struct mtk_thermal *mt, int sensno, s32 raw)
++{
++	s32 tmp;
++
++	raw &= 0xfff;
++	if (raw == 0)
++		return 0;
++
++	tmp = ((((raw - mt->oe) * 10000) >> 12) * 10000) / mt->gain -
++	      mt6771_x_roomt(mt, sensno);
++	tmp = tmp * 15 / 18;
++	tmp = tmp * 1000 / (1534 + mt->o_slope * 10);
++
++	return (((mt->degc_cali * 10) >> 1) - tmp) * 100;
++}
++
++static s32 mcelsius_to_raw_mt6771(struct mtk_thermal *mt, int sensno, int temp)
++{
++	s32 tmp;
++
++	tmp = temp - mt->degc_cali * 1000 / 2;
++	tmp = tmp * (1534 + mt->o_slope * 10) / 10 * 18 / 15;
++	tmp = -tmp / 1000 + mt6771_x_roomt(mt, sensno) * 10;
++
++	return (tmp * 4096 / 10000 * mt->gain) / 100000 + mt->oe;
++}
++
+ /**
+  * raw_to_mcelsius - convert a raw ADC value to mcelsius
+  * @mt:	The thermal controller
+@@ -654,7 +788,10 @@
+ 	for (i = 0; i < conf->bank_data[bank->id].num_sensors; i++) {
+ 		raw = readl(mt->thermal_base + conf->msr[i]);
+ 
+-		if (mt->conf->version == MTK_THERMAL_V1) {
++		if (mt->conf->stock_cal) {
++			temp = raw_to_mcelsius_mt6771(
++				mt, conf->bank_data[bank->id].sensors[i], raw);
++		} else if (mt->conf->version == MTK_THERMAL_V1) {
+ 			temp = raw_to_mcelsius_v1(
+ 				mt, conf->bank_data[bank->id].sensors[i], raw);
+ 		} else {
+@@ -708,6 +845,7 @@
+ {
+ 	struct mtk_thermal_bank *bank = &mt->banks[num];
+ 	const struct mtk_thermal_data *conf = mt->conf;
++	const struct mtk_thermal_tc_speed *speed = conf->tc_speed;
+ 	int i;
+ 
+ 	int offset = mt->conf->controller_offset[ctrl_id];
+@@ -735,6 +873,13 @@
+ 
+ 	/* temperature sampling control, 1 sample */
+ 	writel(0x0, controller_base + TEMP_MSRCTL0);
++
++	if (speed) {
++		writel(speed->monctl1, controller_base + TEMP_MONCTL1);
++		writel(speed->monctl2, controller_base + TEMP_MONCTL2);
++		writel(speed->ahbpoll, controller_base + TEMP_AHBPOLL);
++		writel(speed->msrctl0, controller_base + TEMP_MSRCTL0);
++	}
+ 
+ 	/* exceed this polling time, IRQ would be inserted */
+ 	writel(0xffffffff, controller_base + TEMP_AHBTO);
+@@ -801,8 +946,11 @@
+ 		writel(conf->sensor_mux_values[conf->bank_data[num].sensors[i]],
+ 		       mt->thermal_base + conf->adcpnp[i]);
+ 
+-	writel((1 << conf->bank_data[num].num_sensors) - 1,
+-	       controller_base + TEMP_MONCTL0);
++	if (conf->tc_monctl0)
++		writel(conf->tc_monctl0[ctrl_id], controller_base + TEMP_MONCTL0);
++	else
++		writel((1 << conf->bank_data[num].num_sensors) - 1,
++		       controller_base + TEMP_MONCTL0);
+ 
+ 	writel(TEMP_ADCWRITECTRL_ADC_PNP_WRITE |
+ 	       TEMP_ADCWRITECTRL_ADC_MUX_WRITE,
+@@ -821,6 +969,62 @@
+ 		return OF_BAD_ADDR;
+ 
+ 	return of_translate_address(np, regaddr_p);
++}
++
++/*
++ * Stock tscpu's rules on top of the V1 fields: O_SLOPE only counts when
++ * ID is 1, out-of-range fields fall back to the defaults, and the
++ * conversion uses OE and a gain of 10000 + (GE - 512) * 10000 / 4096.
++ */
++static void mtk_thermal_stock_cal(struct mtk_thermal *mt, u32 *buf)
++{
++	s32 adc_oe = CALIB_BUF1_ADC_OE_V1(buf[1]);
++	int i;
++
++	if (!CALIB_BUF1_ID_V1(buf[1]))
++		mt->o_slope = 0;
++	if (mt->adc_ge < 265 || mt->adc_ge > 758)
++		mt->adc_ge = 512;
++	if (adc_oe < 265 || adc_oe > 758)
++		adc_oe = 512;
++	for (i = 0; i < mt->conf->num_sensors; i++)
++		if (mt->vts[i] < -8 || mt->vts[i] > 484)
++			mt->vts[i] = 260;
++	if (mt->degc_cali < 1 || mt->degc_cali > 63)
++		mt->degc_cali = 40;
++
++	mt->oe = adc_oe - 512;
++	mt->gain = 10000 + (mt->adc_ge - 512) * 10000 / 4096;
++}
++
++/* Copy devinfo words index..index+2 from LK's atag,devinfo in /chosen. */
++static int mtk_thermal_read_devinfo(int index, u32 *buf)
++{
++	struct device_node *chosen;
++	const u8 *tag;
++	int length, i, ret = 0;
++	u32 count;
++
++	chosen = of_find_node_by_path("/chosen");
++	if (!chosen)
++		return -ENODEV;
++	tag = of_get_property(chosen, "atag,devinfo", &length);
++	if (!tag || length < (int)sizeof(u32)) {
++		ret = -EINVAL;
++		goto out;
++	}
++	/* Word 0 is the count; devinfo word n is at word n + 1. */
++	count = get_unaligned_le32(tag);
++	if (count < index + 3 ||
++	    count > (length - sizeof(u32)) / sizeof(u32)) {
++		ret = -EINVAL;
++		goto out;
++	}
++	for (i = 0; i < 3; i++)
++		buf[i] = get_unaligned_le32(tag + sizeof(u32) * (index + 1 + i));
++out:
++	of_node_put(chosen);
++	return ret;
+ }
+ 
+ static int mtk_thermal_extract_efuse_v1(struct mtk_thermal *mt, u32 *buf)
+@@ -865,6 +1069,9 @@
+ 	else
+ 		mt->o_slope = CALIB_BUF0_O_SLOPE_V1(buf[0]);
+ 
++	if (mt->conf->stock_cal)
++		mtk_thermal_stock_cal(mt, buf);
++
+ 	return 0;
+ }
+ 
+@@ -899,6 +1106,26 @@
+ 		mt->vts[i] = 260;
+ 	mt->degc_cali = 40;
+ 	mt->o_slope = 0;
++	mt->oe = 0;
++	mt->gain = 10000;
++
++	/*
++	 * MT6771: the fuse words come only from LK's devinfo tag, as stock;
++	 * without it the defaults above stay, as stock does uncalibrated.
++	 */
++	if (mt->conf->devinfo_index) {
++		u32 words[3];
++
++		if (mtk_thermal_read_devinfo(mt->conf->devinfo_index, words)) {
++			dev_warn(dev, "no devinfo tag, using default calibration values\n");
++			return 0;
++		}
++		dev_info(dev, "calibration from devinfo %d: %#x %#x %#x\n",
++			 mt->conf->devinfo_index, words[0], words[1], words[2]);
++		if (mtk_thermal_extract_efuse_v1(mt, words))
++			dev_info(dev, "Device not calibrated, using default calibration values\n");
++		return 0;
++	}
+ 
+ 	cell = nvmem_cell_get(dev, "calibration-data");
+ 	if (IS_ERR(cell)) {
+@@ -937,6 +1164,10 @@
+ }
+ 
+ static const struct of_device_id mtk_thermal_of_match[] = {
++	{
++		.compatible = "mediatek,mt6771-thermal",
++		.data = (void *)&mt6771_thermal_data,
++	},
+ 	{
+ 		.compatible = "mediatek,mt8173-thermal",
+ 		.data = (void *)&mt8173_thermal_data,
+@@ -983,6 +1214,231 @@
+ 	writel((tmp & (~0x10e)), mt->thermal_base + TEMP_MSRCTL1);
+ }
+ 
++/*
++ * MT6771: stock init_thermal() turns the sensor buffer on (TS_CON1[5:4] = 0)
++ * and stops AUXADC channel 11 auto and immediate modes before the
++ * controllers start. With the buffer off the controllers read a very small
++ * raw value, which reads as very hot.
++ */
++static void mtk_thermal_stock_prepare(void __iomem *apmixed_base,
++				      void __iomem *auxadc_base)
++{
++	u32 tmp;
++
++	tmp = readl(apmixed_base + APMIXED_SYS_TS_CON1);
++	writel(tmp & ~0x30, apmixed_base + APMIXED_SYS_TS_CON1);
++	udelay(200);
++
++	tmp = readl(auxadc_base + AUXADC_CON0_V);
++	writel(tmp & ~BIT(11), auxadc_base + AUXADC_CON0_V);
++	writel(BIT(11), auxadc_base + AUXADC_CON1_CLR_V);
++}
++
++static int mtk_thermal_critical_temp(struct thermal_zone_device *tzdev)
++{
++	enum thermal_trip_type type;
++	int trip, temp;
++
++	for (trip = 0; trip < tzdev->trips; trip++) {
++		if (tzdev->ops->get_trip_type(tzdev, trip, &type) ||
++		    type != THERMAL_TRIP_CRITICAL)
++			continue;
++		if (!tzdev->ops->get_trip_temp(tzdev, trip, &temp))
++			return temp;
++	}
++
++	return 0;
++}
++
++/* Sensor @i of bank 0: true when its reading is real and below @crit. */
++static bool mtk_thermal_sensor_ok(struct mtk_thermal *mt, int i, int crit,
++				  int *raw, int *temp)
++{
++	const struct mtk_thermal_data *conf = mt->conf;
++
++	*raw = readl(mt->thermal_base + conf->msr[i]) & 0xfff;
++	*temp = raw_to_mcelsius_mt6771(mt, conf->bank_data[0].sensors[i], *raw);
++
++	return *raw && *temp > -40000 && *temp < crit;
++}
++
++/*
++ * Wait up to 500 ms for the sensors the hardware reset compares (the first
++ * sensing point of each controller) to read below @crit. Other sensors
++ * that are not ready are only logged.
++ */
++static int mtk_thermal_wait_readings(struct mtk_thermal *mt, int crit)
++{
++	const struct mtk_thermal_data *conf = mt->conf;
++	int i, ctrl, n, raw = 0, temp = 0;
++	bool ready = false;
++
++	for (n = 0; n < 50 && !ready; n++) {
++		if (n)
++			usleep_range(10000, 11000);
++		ready = true;
++		for (ctrl = 0; ctrl < conf->num_controller; ctrl++) {
++			i = conf->tc_prot_sensor[ctrl];
++			if (!mtk_thermal_sensor_ok(mt, i, crit, &raw, &temp)) {
++				ready = false;
++				break;
++			}
++		}
++	}
++	if (!ready) {
++		dev_err(mt->dev, "sensor %d raw %d (%d mC) not ready\n",
++			i, raw, temp);
++		return -ETIMEDOUT;
++	}
++
++	for (i = 0; i < conf->bank_data[0].num_sensors; i++)
++		if (!mtk_thermal_sensor_ok(mt, i, crit, &raw, &temp))
++			dev_warn(mt->dev, "sensor %d raw %d (%d mC) not ready\n",
++				 i, raw, temp);
++
++	return 0;
++}
++
++/*
++ * Stock tscpu_config_all_tc_hw_protect(): each controller compares its
++ * first sensing point with PROTTC and TOPRGU resets the SoC when it trips.
++ * Readings must be real first or a zero raw value trips it at once.
++ */
++static void mtk_thermal_hw_protect(struct mtk_thermal *mt,
++				   struct thermal_zone_device *tzdev)
++{
++	const struct mtk_thermal_data *conf = mt->conf;
++	struct device *dev = mt->dev;
++	struct device_node *np;
++	void __iomem *rgu, *base;
++	int crit, ctrl, raw[MT6771_NUM_CONTROLLER];
++	u32 monint;
++
++	crit = mtk_thermal_critical_temp(tzdev);
++	if (crit <= 0) {
++		dev_err(dev, "no critical trip; hardware reset not armed\n");
++		return;
++	}
++	if (mtk_thermal_wait_readings(mt, crit)) {
++		dev_err(dev, "hardware reset not armed\n");
++		return;
++	}
++
++	np = of_parse_phandle(dev->of_node, "mediatek,toprgu", 0);
++	rgu = np ? of_iomap(np, 0) : NULL;
++	of_node_put(np);
++	if (!rgu) {
++		dev_err(dev, "no TOPRGU; hardware reset not armed\n");
++		return;
++	}
++
++	/* Thermal request off and in reset mode while the thresholds change */
++	writel((readl(rgu + TOPRGU_REQ_MODE) & 0xffffff & ~TOPRGU_REQ_THERMAL) |
++	       TOPRGU_REQ_MODE_KEY, rgu + TOPRGU_REQ_MODE);
++	writel((readl(rgu + TOPRGU_REQ_IRQ_EN) & 0xffffff & ~TOPRGU_REQ_THERMAL) |
++	       TOPRGU_REQ_IRQ_KEY, rgu + TOPRGU_REQ_IRQ_EN);
++
++	for (ctrl = 0; ctrl < conf->num_controller; ctrl++) {
++		base = mt->thermal_base + conf->controller_offset[ctrl];
++		raw[ctrl] = mcelsius_to_raw_mt6771(mt, conf->tc_prot_sensor[ctrl],
++						   crit);
++		monint = readl(base + TEMP_MONINT);
++		writel(0, base + TEMP_MONINT);
++		writel(TEMP_PROTCTL_STOCK, base + TEMP_PROTCTL);
++		writel(raw[ctrl], base + TEMP_PROTTC);
++		writel(monint | TEMP_MONINT_STAGE3, base + TEMP_MONINT);
++	}
++
++	writel((readl(rgu + TOPRGU_REQ_MODE) & 0xffffff) | TOPRGU_REQ_THERMAL |
++	       TOPRGU_REQ_MODE_KEY, rgu + TOPRGU_REQ_MODE);
++	writel((readl(rgu + TOPRGU_REQ_IRQ_EN) & 0xffffff & ~TOPRGU_REQ_THERMAL) |
++	       TOPRGU_REQ_IRQ_KEY, rgu + TOPRGU_REQ_IRQ_EN);
++
++	dev_info(dev, "hardware reset at %d mC: PROTTC %#x %#x, MONINT %#x %#x, REQ_MODE %#x, REQ_IRQ_EN %#x\n",
++		 crit, readl(mt->thermal_base + TEMP_PROTTC),
++		 readl(base + TEMP_PROTTC), readl(mt->thermal_base + TEMP_MONINT),
++		 readl(base + TEMP_MONINT),
++		 readl(rgu + TOPRGU_REQ_MODE), readl(rgu + TOPRGU_REQ_IRQ_EN));
++	iounmap(rgu);
++}
++
++/*
++ * One line per bank 0 sensor: slot, controller, register offset, raw and mC.
++ * The clocks stay on while the driver is bound, so the registers can be read
++ * whenever the file exists.
++ */
++static int mtk_thermal_format_sensors(struct mtk_thermal *mt, char *buf,
++				      size_t size)
++{
++	const struct mtk_thermal_data *conf = mt->conf;
++	int i, raw, temp, len = 0;
++
++	for (i = 0; i < conf->bank_data[0].num_sensors; i++) {
++		mtk_thermal_sensor_ok(mt, i, 0, &raw, &temp);
++		len += scnprintf(buf + len, size - len,
++				 "%d tc%d msr%03x raw %d %d\n", i,
++				 conf->msr[i] >= 0x100, conf->msr[i], raw,
++				 temp);
++	}
++
++	return len;
++}
++
++static ssize_t sensors_show(struct device *dev, struct device_attribute *attr,
++			    char *buf)
++{
++	struct mtk_thermal *mt = dev_get_drvdata(dev);
++
++	return mtk_thermal_format_sensors(mt, buf, PAGE_SIZE);
++}
++static DEVICE_ATTR_RO(sensors);
++
++static struct attribute *mtk_thermal_attrs[] = {
++	&dev_attr_sensors.attr,
++	NULL
++};
++
++static const struct attribute_group mtk_thermal_group = {
++	.attrs = mtk_thermal_attrs,
++};
++
++/* Logs the sensors once, a while after probe, for boot log captures. */
++static void mtk_thermal_dump_work(struct work_struct *work)
++{
++	struct mtk_thermal *mt = container_of(to_delayed_work(work),
++					      struct mtk_thermal, dump_work);
++	char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
++
++	if (!buf)
++		return;
++	mtk_thermal_format_sensors(mt, buf, PAGE_SIZE);
++	dev_info(mt->dev, "sensors:\n%s", buf);
++	kfree(buf);
++}
++
++/*
++ * A zone with sustainable-power in its DT node gets power_allocator. 5.10 has
++ * no DT property for the governor; if the switch fails the default stays.
++ */
++static void mtk_thermal_set_governor(struct device *dev,
++				     struct thermal_zone_device *tzdev)
++{
++	char gov[] = "power_allocator";
++	int ret;
++
++	if (!tzdev->tzp || !tzdev->tzp->sustainable_power)
++		return;
++
++	ret = thermal_zone_device_set_policy(tzdev, gov);
++	if (ret)
++		dev_err(dev, "%s: %s not set (%d), %s stays\n", tzdev->type,
++			gov, ret,
++			tzdev->governor ? tzdev->governor->name : "no governor");
++	else
++		dev_info(dev, "%s: %s, sustainable power %u mW\n", tzdev->type,
++			 gov, tzdev->tzp->sustainable_power);
++}
++
+ static int mtk_thermal_probe(struct platform_device *pdev)
+ {
+ 	int ret, i, ctrl_id;
+@@ -990,7 +1446,7 @@
+ 	struct mtk_thermal *mt;
+ 	struct resource *res;
+ 	u64 auxadc_phys_base, apmixed_phys_base;
+-	struct thermal_zone_device *tzdev;
++	struct thermal_zone_device *tzdev, *backstop;
+ 	void __iomem *apmixed_base, *auxadc_base;
+ 
+ 	mt = devm_kzalloc(&pdev->dev, sizeof(*mt), GFP_KERNEL);
+@@ -1071,6 +1527,14 @@
+ 	if (mt->conf->version == MTK_THERMAL_V2) {
+ 		mtk_thermal_turn_on_buffer(apmixed_base);
+ 		mtk_thermal_release_periodic_ts(mt, auxadc_base);
++	}
++
++	if (mt->conf->stock_cal) {
++		if (!apmixed_base || !auxadc_base) {
++			ret = -ENOMEM;
++			goto err_disable_clk_peri_therm;
++		}
++		mtk_thermal_stock_prepare(apmixed_base, auxadc_base);
+ 	}
+ 
+ 	for (ctrl_id = 0; ctrl_id < mt->conf->num_controller ; ctrl_id++)
+@@ -1087,6 +1551,30 @@
+ 		goto err_disable_clk_peri_therm;
+ 	}
+ 
++	if (mt->conf->tc_prot_sensor)
++		mtk_thermal_hw_protect(mt, tzdev);
++
++	if (mt->conf->stock_cal) {
++		mtk_thermal_set_governor(&pdev->dev, tzdev);
++
++		/*
++		 * Sensor id 1 is the same reading for an optional second zone,
++		 * a step_wise backstop next to power_allocator on id 0 (one
++		 * governor per zone).
++		 */
++		backstop = devm_thermal_zone_of_sensor_register(&pdev->dev, 1,
++							mt, &mtk_thermal_ops);
++		if (IS_ERR(backstop) && PTR_ERR(backstop) != -ENODEV)
++			dev_err(&pdev->dev, "backstop zone not registered: %ld\n",
++				PTR_ERR(backstop));
++
++		ret = devm_device_add_group(&pdev->dev, &mtk_thermal_group);
++		if (ret)
++			dev_warn(&pdev->dev, "no sensors file: %d\n", ret);
++		INIT_DELAYED_WORK(&mt->dump_work, mtk_thermal_dump_work);
++		schedule_delayed_work(&mt->dump_work, 10 * HZ);
++	}
++
+ 	return 0;
+ 
+ err_disable_clk_peri_therm:
+@@ -1101,6 +1589,8 @@
+ {
+ 	struct mtk_thermal *mt = platform_get_drvdata(pdev);
+ 
++	if (mt->conf->stock_cal)
++		cancel_delayed_work_sync(&mt->dump_work);
+ 	clk_disable_unprepare(mt->clk_peri_therm);
+ 	clk_disable_unprepare(mt->clk_auxadc);
+ 
+@@ -1113,6 +1603,8 @@
+ 	.driver = {
+ 		.name = "mtk-thermal",
+ 		.of_match_table = mtk_thermal_of_match,
++		/* No unbind: remove() stops the clocks before devres drops the sensors file */
++		.suppress_bind_attrs = true,
+ 	},
+ };
+ 

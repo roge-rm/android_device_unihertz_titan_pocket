@@ -1,0 +1,20 @@
+# Lineage recovery on our 5.10 kernel, imported by recovery's init.rc as init.recovery.${ro.hardware}.rc.
+# From stock init.recovery.mt6771.rc: the configfs gadget. Recovery's init.rc builds g1 with
+# ffs.adb and ffs.fastboot and binds it to sys.usb.controller, the 5.10 UDC name.
+on init
+    setprop sys.usb.configfs 1
+    setprop sys.usb.ffs.aio_compat 1
+    setprop sys.usb.controller 11201000.usb3
+
+# /adb_keys links to /product, which recovery doesn't mount. Put the build's keys there instead,
+# before adbd starts. Recovery may copy /data/misc/adb/adb_keys over it later.
+on init
+    rm /adb_keys
+    copy /system/etc/security/pocket_adb_keys /adb_keys
+    chmod 0644 /adb_keys
+
+# init.rc mounts pstore on init. Keep the previous boot's console as /tmp/last_kmsg,
+# since recovery's own /cache/recovery/last_kmsg is its own kernel log.
+on post-fs
+    copy /sys/fs/pstore/console-ramoops-0 /tmp/last_kmsg
+    chmod 0644 /tmp/last_kmsg

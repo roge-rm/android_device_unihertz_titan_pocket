@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provisioning, bootloader and secure-firmware partitions are not format targets.
+system /system ext4 ro wait,logical,first_stage_mount
+product /product ext4 ro wait,logical,first_stage_mount
+vendor /vendor ext4 ro wait,logical,first_stage_mount
+/dev/block/by-name/md_udc /metadata ext4 noatime,nosuid,nodev wait,check
+# /data is encrypted as in fstab.mt6771. Recovery can't unlock it: it only needs the flags to wipe it (keydirectory makes it
+# zero the partition so vold formats it on the next boot) and to treat it as encrypted. No inlinecrypt, nothing mounts it here.
+/dev/block/by-name/userdata /data ext4 noatime,nosuid,nodev,noauto_da_alloc wait,check,formattable,fileencryption=aes-256-xts:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption
+/dev/block/by-name/cache /cache ext4 noatime,nosuid,nodev wait,check
+/dev/block/by-name/boot /boot emmc defaults defaults
+/dev/block/by-name/recovery /recovery emmc defaults defaults
+/dev/block/by-name/para /misc emmc defaults defaults

@@ -1,0 +1,4 @@
+# Engineering software KeyMint, TEE level /default, with its RKP, shared secret and secure clock.
+service system.keymint-pocket /system_ext/bin/hw/android.hardware.security.keymint-service.pocket
+    class early_hal
+    user nobody

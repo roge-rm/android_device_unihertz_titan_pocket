@@ -1,0 +1,240 @@
+# SPDX-License-Identifier: Apache-2.0
+# Same keys as rootdir/usr/keychars/aw9523-key.kcm, as an OVERLAY so Android 16 keeps this Alt layer
+# over its generic map. Keep the two in step: tools/check-pocket-kcm.py checks both.
+
+type OVERLAY
+
+# Top row
+key Q {
+    number: '0'
+    base: 'q'
+    capslock, shift: 'Q'
+    alt: '0'
+    capslock+alt, shift+alt: none
+    label: 'Q'
+}
+
+key W {
+    number: '1'
+    base: 'w'
+    capslock, shift: 'W'
+    alt: '1'
+    capslock+alt, shift+alt: none
+    label: 'W'
+}
+
+key E {
+    number: '2'
+    base: 'e'
+    capslock, shift: 'E'
+    alt: '2'
+    capslock+alt, shift+alt: none
+    label: 'E'
+}
+
+key R {
+    number: '3'
+    base: 'r'
+    capslock, shift: 'R'
+    alt: '3'
+    capslock+alt, shift+alt: none
+    label: 'R'
+}
+
+key T {
+    base: 't'
+    capslock, shift: 'T'
+    alt: '('
+    capslock+alt, shift+alt: none
+    label: 'T'
+}
+
+key Y {
+    base: 'y'
+    capslock, shift: 'Y'
+    alt: ')'
+    capslock+alt, shift+alt: none
+    label: 'Y'
+}
+
+key U {
+    base: 'u'
+    capslock, shift: 'U'
+    alt: '-'
+    capslock+alt, shift+alt: none
+    label: 'U'
+}
+
+key I {
+    base: 'i'
+    capslock, shift: 'I'
+    alt: '_'
+    capslock+alt, shift+alt: none
+    label: 'I'
+}
+
+key O {
+    base: 'o'
+    capslock, shift: 'O'
+    alt: '/'
+    capslock+alt, shift+alt: none
+    label: 'O'
+}
+
+key P {
+    base: 'p'
+    capslock, shift: 'P'
+    alt: ':'
+    capslock+alt, shift+alt: none
+    label: 'P'
+}
+
+# Middle row
+key A {
+    base: 'a'
+    capslock, shift: 'A'
+    alt: '@'
+    capslock+alt, shift+alt: none
+    label: 'A'
+}
+
+key S {
+    number: '4'
+    base: 's'
+    capslock, shift: 'S'
+    alt: '4'
+    capslock+alt, shift+alt: none
+    label: 'S'
+}
+
+key D {
+    number: '5'
+    base: 'd'
+    capslock, shift: 'D'
+    alt: '5'
+    capslock+alt, shift+alt: none
+    label: 'D'
+}
+
+key F {
+    number: '6'
+    base: 'f'
+    capslock, shift: 'F'
+    alt: '6'
+    capslock+alt, shift+alt: none
+    label: 'F'
+}
+
+key G {
+    base: 'g'
+    capslock, shift: 'G'
+    alt: '*'
+    capslock+alt, shift+alt: none
+    label: 'G'
+}
+
+key H {
+    base: 'h'
+    capslock, shift: 'H'
+    alt: '#'
+    capslock+alt, shift+alt: none
+    label: 'H'
+}
+
+key J {
+    base: 'j'
+    capslock, shift: 'J'
+    alt: '+'
+    capslock+alt, shift+alt: none
+    label: 'J'
+}
+
+key K {
+    base: 'k'
+    capslock, shift: 'K'
+    alt: '"'
+    capslock+alt, shift+alt: none
+    label: 'K'
+}
+
+key L {
+    base: 'l'
+    capslock, shift: 'L'
+    alt: '\''
+    capslock+alt, shift+alt: none
+    label: 'L'
+}
+
+# Bottom row
+key Z {
+    base: 'z'
+    capslock, shift: 'Z'
+    alt: '!'
+    capslock+alt, shift+alt: none
+    label: 'Z'
+}
+
+key X {
+    number: '7'
+    base: 'x'
+    capslock, shift: 'X'
+    alt: '7'
+    capslock+alt, shift+alt: none
+    label: 'X'
+}
+
+key C {
+    number: '8'
+    base: 'c'
+    capslock, shift: 'C'
+    alt: '8'
+    capslock+alt, shift+alt: none
+    label: 'C'
+}
+
+key V {
+    number: '9'
+    base: 'v'
+    capslock, shift: 'V'
+    alt: '9'
+    capslock+alt, shift+alt: none
+    label: 'V'
+}
+
+key B {
+    base: 'b'
+    capslock, shift: 'B'
+    alt: '.'
+    capslock+alt, shift+alt: none
+    label: 'B'
+}
+
+key N {
+    base: 'n'
+    capslock, shift: 'N'
+    alt: ','
+    capslock+alt, shift+alt: none
+    label: 'N'
+}
+
+key M {
+    base: 'm'
+    capslock, shift: 'M'
+    alt: '?'
+    capslock+alt, shift+alt: none
+    label: 'M'
+}
+
+# Space bar
+key SPACE {
+    number: ' '
+    alt, base, shift: ' '
+    label: ' '
+}
+
+# Enter
+key ENTER {
+    number: '\n'
+    alt, base, shift: '\n'
+    label: '\n'
+}

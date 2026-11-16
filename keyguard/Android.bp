@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Bigger PIN, pattern and password bouncer for the 720x720 screen at 220 dpi (524x524 dp).
+
+runtime_resource_overlay {
+    name: "PocketKeyguardOverlay",
+    resource_dirs: ["overlay/PocketKeyguardOverlay/res"],
+    manifest: "overlay/PocketKeyguardOverlay/AndroidManifest.xml",
+    product_specific: true,
+}

@@ -1,0 +1,259 @@
+--- a/drivers/misc/mediatek/include/mt-plat/charger_type.h
++++ b/drivers/misc/mediatek/include/mt-plat/charger_type.h
+@@ -26,8 +26,10 @@
+ 	WIRELESS_CHARGER,
+ };
+ 
++/* built-in mtu3 gadget: the charger tells it about cable plug-in and out */
+ #if defined(CONFIG_USB_MTK_HDRC) || defined(CONFIG_USB_MU3D_DRV) \
+-	|| defined(CONFIG_EXTCON_MTK_USB)
++	|| defined(CONFIG_EXTCON_MTK_USB) \
++	|| (IS_BUILTIN(CONFIG_USB_MTU3) && !IS_ENABLED(CONFIG_USB_MTU3_HOST))
+ extern void mt_usb_connect(void);
+ extern void mt_usb_disconnect(void);
+ #else
+--- a/drivers/usb/mtu3/mtu3_dr.h
++++ b/drivers/usb/mtu3/mtu3_dr.h
+@@ -59,6 +59,10 @@
+ void ssusb_gadget_exit(struct ssusb_mtk *ssusb);
+ bool mtu3_gadget_sleep(struct mtu3 *mtu);
+ void mtu3_gadget_wake(struct mtu3 *mtu);
++void mtu3_gadget_wake_failed(struct mtu3 *mtu);
++/* cable plug-in and plug-out from the charger type detection, as on stock */
++void mt_usb_connect(void);
++void mt_usb_disconnect(void);
+ #else
+ static inline int ssusb_gadget_init(struct ssusb_mtk *ssusb)
+ {
+@@ -74,6 +78,9 @@
+ }
+ 
+ static inline void mtu3_gadget_wake(struct mtu3 *mtu)
++{}
++
++static inline void mtu3_gadget_wake_failed(struct mtu3 *mtu)
+ {}
+ #endif
+ 
+--- a/drivers/usb/mtu3/mtu3_gadget.c
++++ b/drivers/usb/mtu3/mtu3_gadget.c
+@@ -495,6 +495,19 @@
+ 	return 0;
+ }
+ 
++/*
++ * MT6771 forces VBUS valid, so cable plug-in and plug-out come from the
++ * charger type detection instead (mt_usb_connect and mt_usb_disconnect).
++ * vbus_lock orders them with UDC bind and unbind; vbus_stopped is set while
++ * the cable is out and the device is stopped.
++ */
++static DEFINE_MUTEX(vbus_lock);
++static bool vbus_stopped;
++static bool vbus_on = true;
++static struct mtu3 *vbus_mtu;
++static void mtu3_vbus_work(struct work_struct *work);
++static DECLARE_WORK(vbus_work, mtu3_vbus_work);
++
+ static int mtu3_gadget_start(struct usb_gadget *gadget,
+ 		struct usb_gadget_driver *driver)
+ {
+@@ -509,11 +522,14 @@
+ 
+ 	dev_dbg(mtu->dev, "bind driver %s\n", driver->function);
+ 
++	/* with the cable out the device starts on the next plug-in */
++	mutex_lock(&vbus_lock);
++
+ 	/*
+ 	 * MT6771: the PHY and device MAC are otherwise only set up at probe,
+ 	 * so cycle the PHY (calibration again) and reset the MAC on each bind
+ 	 */
+-	if (mtu->ssusb->force_vbus &&
++	if (mtu->ssusb->force_vbus && !vbus_stopped &&
+ 	    mtu->ssusb->dr_mode == USB_DR_MODE_PERIPHERAL) {
+ 		ssusb_phy_power_off(mtu->ssusb);
+ 		if (ssusb_phy_power_on(mtu->ssusb))
+@@ -525,13 +541,14 @@
+ 	mtu->softconnect = 0;
+ 	mtu->gadget_driver = driver;
+ 
+-	if (mtu->ssusb->dr_mode == USB_DR_MODE_PERIPHERAL) {
++	if (mtu->ssusb->dr_mode == USB_DR_MODE_PERIPHERAL && !vbus_stopped) {
+ 		if (mtu->ssusb->force_vbus)
+ 			mtu3_device_reinit(mtu);
+ 		mtu3_start(mtu);
+ 	}
+ 
+ 	spin_unlock_irqrestore(&mtu->lock, flags);
++	mutex_unlock(&vbus_lock);
+ 
+ 	return 0;
+ }
+@@ -577,15 +594,18 @@
+ 
+ 	dev_dbg(mtu->dev, "%s\n", __func__);
+ 
++	mutex_lock(&vbus_lock);
+ 	spin_lock_irqsave(&mtu->lock, flags);
+ 
+ 	stop_activity(mtu);
+ 	mtu->gadget_driver = NULL;
+ 
+-	if (mtu->ssusb->dr_mode == USB_DR_MODE_PERIPHERAL)
++	/* a plug-out already stopped it */
++	if (mtu->ssusb->dr_mode == USB_DR_MODE_PERIPHERAL && !vbus_stopped)
+ 		mtu3_stop(mtu);
+ 
+ 	spin_unlock_irqrestore(&mtu->lock, flags);
++	mutex_unlock(&vbus_lock);
+ 
+ 	synchronize_irq(mtu->irq);
+ 	return 0;
+@@ -687,6 +707,8 @@
+ 
+ int mtu3_gadget_setup(struct mtu3 *mtu)
+ {
++	int ret;
++
+ 	mtu->g.ops = &mtu3_gadget_ops;
+ 	mtu->g.max_speed = mtu->max_speed;
+ 	mtu->g.speed = USB_SPEED_UNKNOWN;
+@@ -697,11 +719,20 @@
+ 
+ 	mtu3_gadget_init_eps(mtu);
+ 
+-	return usb_add_gadget_udc(mtu->dev, &mtu->g);
++	ret = usb_add_gadget_udc(mtu->dev, &mtu->g);
++	/* the device stays on until the first plug-out, so adb works at boot */
++	if (!ret && mtu->ssusb->force_vbus)
++		smp_store_release(&vbus_mtu, mtu);
++
++	return ret;
+ }
+ 
+ void mtu3_gadget_cleanup(struct mtu3 *mtu)
+ {
++	if (vbus_mtu == mtu) {
++		WRITE_ONCE(vbus_mtu, NULL);
++		cancel_work_sync(&vbus_work);
++	}
+ 	usb_del_gadget_udc(&mtu->g);
+ }
+ 
+@@ -818,3 +849,106 @@
+ 	else
+ 		mtu3_state_reset(mtu);
+ }
++
++/*
++ * Plug-out: pull-up off and a disconnect to the functions through the UDC
++ * core, which then keeps the pull-up off across binds, then end all requests
++ * and stop the device MAC, as stock does on unplug. The PHY stays powered.
++ * Plug-in: as on bind, PHY off and on and a fresh MAC, then the pull-up.
++ */
++static void mtu3_vbus_work(struct work_struct *work)
++{
++	struct mtu3 *mtu = smp_load_acquire(&vbus_mtu);
++	unsigned long flags;
++	bool on;
++	int i;
++
++	if (!mtu)
++		return;
++
++	mutex_lock(&vbus_lock);
++	on = READ_ONCE(vbus_on);
++	if (on != vbus_stopped)
++		goto out;
++
++	if (!on) {
++		usb_udc_vbus_handler(&mtu->g, false);
++
++		spin_lock_irqsave(&mtu->lock, flags);
++		nuke(mtu->ep0, -ESHUTDOWN);
++		for (i = 1; i < mtu->num_eps; i++) {
++			nuke(mtu->in_eps + i, -ESHUTDOWN);
++			nuke(mtu->out_eps + i, -ESHUTDOWN);
++		}
++		mtu->g.speed = USB_SPEED_UNKNOWN;
++		mtu3_state_reset(mtu);
++		usb_gadget_set_state(&mtu->g, USB_STATE_NOTATTACHED);
++		if (mtu->is_active)
++			mtu3_stop(mtu);
++		vbus_stopped = true;
++		spin_unlock_irqrestore(&mtu->lock, flags);
++
++		synchronize_irq(mtu->irq);
++		dev_info(mtu->dev, "cable out, device stopped\n");
++		goto out;
++	}
++
++	if (mtu->gadget_driver) {
++		ssusb_phy_power_off(mtu->ssusb);
++		if (ssusb_phy_power_on(mtu->ssusb)) {
++			/* stays stopped; the next plug-in tries again */
++			dev_err(mtu->dev, "cable in, phy power on failed\n");
++			goto out;
++		}
++		spin_lock_irqsave(&mtu->lock, flags);
++		mtu3_device_reinit(mtu);
++		mtu3_start(mtu);
++		spin_unlock_irqrestore(&mtu->lock, flags);
++	}
++	vbus_stopped = false;
++	usb_udc_vbus_handler(&mtu->g, true);
++	dev_info(mtu->dev, "cable in, device started\n");
++out:
++	mutex_unlock(&vbus_lock);
++}
++
++/*
++ * The PHY didn't power on after sleep: IRQ back on and the device left
++ * stopped as after a plug-out, so the plug-in work cycles the PHY and starts
++ * it. It tries once now; if that fails too, the next plug-in tries again.
++ */
++void mtu3_gadget_wake_failed(struct mtu3 *mtu)
++{
++	unsigned long flags;
++
++	mutex_lock(&vbus_lock);
++	spin_lock_irqsave(&mtu->lock, flags);
++	mtu->sleep_stopped = 0;
++	vbus_stopped = true;
++	spin_unlock_irqrestore(&mtu->lock, flags);
++	enable_irq(mtu->irq);
++	mutex_unlock(&vbus_lock);
++
++	if (smp_load_acquire(&vbus_mtu))
++		queue_work(system_freezable_wq, &vbus_work);
++}
++
++static void mtu3_vbus_set(bool on)
++{
++	WRITE_ONCE(vbus_on, on);
++	/* events before the gadget is registered are dropped */
++	if (smp_load_acquire(&vbus_mtu))
++		queue_work(system_freezable_wq, &vbus_work);
++}
++
++/* the charger saw a USB host: SDP, CDP or a non-standard charger */
++void mt_usb_connect(void)
++{
++	mtu3_vbus_set(true);
++}
++
++/* the charger saw a plug-out or a charger that isn't a host */
++void mt_usb_disconnect(void)
++{
++	mtu3_vbus_set(false);
++}
+--- a/drivers/usb/mtu3/mtu3_plat.c
++++ b/drivers/usb/mtu3/mtu3_plat.c
+@@ -510,6 +510,7 @@
+ 			ret = ssusb_phy_power_on(ssusb);
+ 			if (ret) {
+ 				dev_err(dev, "phy power on failed %d\n", ret);
++				mtu3_gadget_wake_failed(ssusb->u3d);
+ 				return ret;
+ 			}
+ 			mtu3_gadget_wake(ssusb->u3d);

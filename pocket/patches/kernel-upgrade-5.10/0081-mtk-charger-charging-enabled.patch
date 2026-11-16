@@ -1,0 +1,54 @@
+--- a/drivers/power/supply/mediatek/charger/mtk_charger.c
++++ b/drivers/power/supply/mediatek/charger/mtk_charger.c
+@@ -2758,6 +2758,40 @@
+ }
+ static DEVICE_ATTR(chg2_current, 0644, show_chg2_current, store_chg2_current);
+ 
++/*
++ * charging_enabled: 0 pauses charging, 1 lets it run again (the health HAL's
++ * charging control). It sets cmd_discharging, which charger_check_status reads
++ * each loop, so the charger thread turns charging off the same way as for a
++ * temperature stop: CHG_EN off, the algorithm in CHR_ERROR, status not
++ * charging. The input stays on, so the phone runs from USB power.
++ */
++static ssize_t show_charging_enabled(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	struct charger_manager *pinfo = dev->driver_data;
++
++	return sprintf(buf, "%d\n", !pinfo->cmd_discharging);
++}
++
++static ssize_t store_charging_enabled(struct device *dev,
++		struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct charger_manager *pinfo = dev->driver_data;
++	bool en;
++
++	if (kstrtobool(buf, &en))
++		return -EINVAL;
++
++	mutex_lock(&pinfo->charger_lock);
++	pinfo->cmd_discharging = !en;
++	mutex_unlock(&pinfo->charger_lock);
++	chr_err("%s: %d\n", __func__, en);
++	_wake_up_charger(pinfo);
++	return size;
++}
++static DEVICE_ATTR(charging_enabled, 0644, show_charging_enabled,
++		   store_charging_enabled);
++
+ static ssize_t show_BatNotify(struct device *dev,
+ 		struct device_attribute *attr, char *buf)
+ {
+@@ -3031,6 +3065,10 @@
+ 		goto _out;
+ 
+ 	ret = device_create_file(&(pdev->dev), &dev_attr_chg2_current);
++	if (ret)
++		goto _out;
++
++	ret = device_create_file(&(pdev->dev), &dev_attr_charging_enabled);
+ 	if (ret)
+ 		goto _out;
+ 

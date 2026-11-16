@@ -1,0 +1,2 @@
+# Serialized diffs retain upstream whitespace and space-prefixed context.
+*.patch -whitespace

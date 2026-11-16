@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <!-- SystemUI sets these for sw360dp, so they have to be overlaid at sw360dp. -->
+    <!-- Largest key width. Height is the width / num_pad_key_ratio; the keys shrink
+         to fit the height left. -->
+    <dimen name="num_pad_key_width">120dp</dimen>
+    <dimen name="num_pad_row_margin_bottom">8dp</dimen>
+    <!-- Gap between keys in a row. -->
+    <dimen name="num_pad_key_margin_end">12dp</dimen>
+</resources>

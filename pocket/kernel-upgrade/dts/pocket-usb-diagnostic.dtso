@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0
+// Captured Pocket FDT only. Peripheral diagnostics; not final USB/OTG support.
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/usb0phy@11f40000";
+		__overlay__ {
+			// Captured apmixed phandle; APMIXED_SSUSB26M gate, ID 12.
+			clocks = <0x64 12>;
+			clock-names = "ref_clk";
+		};
+	};
+	fragment@1 {
+		target-path = "/usb3@11200000";
+		__overlay__ {
+			// Resource lookup precedes the driver's gadget-only Kconfig override.
+			dr_mode = "peripheral";
+		};
+	};
+	fragment@2 {
+		target-path = "/usb3_xhci@11200000";
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+};

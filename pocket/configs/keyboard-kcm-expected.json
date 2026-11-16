@@ -1,0 +1,909 @@
+{
+ "keys": {
+  "A": {
+   "label": "A",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "a"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "A"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "@"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "B": {
+   "label": "B",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "b"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "B"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "."
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "C": {
+   "label": "C",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "8"
+    ],
+    [
+     [
+      "base"
+     ],
+     "c"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "C"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "8"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "D": {
+   "label": "D",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "5"
+    ],
+    [
+     [
+      "base"
+     ],
+     "d"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "D"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "5"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "E": {
+   "label": "E",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "2"
+    ],
+    [
+     [
+      "base"
+     ],
+     "e"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "E"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "2"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "ENTER": {
+   "label": "\n",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "\n"
+    ],
+    [
+     [
+      "alt",
+      "base",
+      "shift"
+     ],
+     "\n"
+    ]
+   ]
+  },
+  "F": {
+   "label": "F",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "6"
+    ],
+    [
+     [
+      "base"
+     ],
+     "f"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "F"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "6"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "G": {
+   "label": "G",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "g"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "G"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "*"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "H": {
+   "label": "H",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "h"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "H"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "#"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "I": {
+   "label": "I",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "i"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "I"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "_"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "J": {
+   "label": "J",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "j"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "J"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "+"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "K": {
+   "label": "K",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "k"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "K"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "\""
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "L": {
+   "label": "L",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "l"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "L"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "'"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "M": {
+   "label": "M",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "m"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "M"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "?"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "N": {
+   "label": "N",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "n"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "N"
+    ],
+    [
+     [
+      "alt"
+     ],
+     ","
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "O": {
+   "label": "O",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "o"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "O"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "/"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "P": {
+   "label": "P",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "p"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "P"
+    ],
+    [
+     [
+      "alt"
+     ],
+     ":"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "Q": {
+   "label": "Q",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "0"
+    ],
+    [
+     [
+      "base"
+     ],
+     "q"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "Q"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "0"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "R": {
+   "label": "R",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "3"
+    ],
+    [
+     [
+      "base"
+     ],
+     "r"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "R"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "3"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "S": {
+   "label": "S",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "4"
+    ],
+    [
+     [
+      "base"
+     ],
+     "s"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "S"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "4"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "SPACE": {
+   "label": " ",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     " "
+    ],
+    [
+     [
+      "alt",
+      "base",
+      "shift"
+     ],
+     " "
+    ]
+   ]
+  },
+  "T": {
+   "label": "T",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "t"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "T"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "("
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "U": {
+   "label": "U",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "u"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "U"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "-"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "V": {
+   "label": "V",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "9"
+    ],
+    [
+     [
+      "base"
+     ],
+     "v"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "V"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "9"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "W": {
+   "label": "W",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "1"
+    ],
+    [
+     [
+      "base"
+     ],
+     "w"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "W"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "1"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "X": {
+   "label": "X",
+   "rules": [
+    [
+     [
+      "number"
+     ],
+     "7"
+    ],
+    [
+     [
+      "base"
+     ],
+     "x"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "X"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "7"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "Y": {
+   "label": "Y",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "y"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "Y"
+    ],
+    [
+     [
+      "alt"
+     ],
+     ")"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  },
+  "Z": {
+   "label": "Z",
+   "rules": [
+    [
+     [
+      "base"
+     ],
+     "z"
+    ],
+    [
+     [
+      "capslock",
+      "shift"
+     ],
+     "Z"
+    ],
+    [
+     [
+      "alt"
+     ],
+     "!"
+    ],
+    [
+     [
+      "capslock+alt",
+      "shift+alt"
+     ],
+     null
+    ]
+   ]
+  }
+ },
+ "schema": 1
+}

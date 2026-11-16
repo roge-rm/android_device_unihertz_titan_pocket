@@ -1,0 +1,4544 @@
+--- a/sound/soc/mediatek/Kconfig
++++ b/sound/soc/mediatek/Kconfig
+@@ -158,3 +158,20 @@
+ 	  BT encoded data to/from BT firmware.
+ 	  Select Y if you have such device.
+ 	  If unsure select "N".
++
++config MTK_SND_SOC_CODEC
++	string "String for Mediatek audio codec"
++	help
++	  Specify Mediatek audio codec.
++	  It depend on the string to choose the audio codec.
++	  Say "mt6358" if you have mt6358 audio codec.
++
++config MTK_SND_SOC_NEW_ARCH
++	bool "Support new audio architecture"
++	depends on ARCH_MEDIATEK
++	select REGMAP_MMIO
++	help
++	  MediaTek's 4.14 audio stack: the AFE platform named by
++	  MTK_PLATFORM, the common_int PCM, DAI and machine drivers, and the
++	  codec named by MTK_SND_SOC_CODEC. Card mt-snd-card, as the vendor
++	  audio HAL expects. Keep the mainline MT8183 and MT6358 drivers off.
+--- a/sound/soc/mediatek/Makefile
++++ b/sound/soc/mediatek/Makefile
+@@ -4,3 +4,37 @@
+ obj-$(CONFIG_SND_SOC_MT6797) += mt6797/
+ obj-$(CONFIG_SND_SOC_MT8173) += mt8173/
+ obj-$(CONFIG_SND_SOC_MT8183) += mt8183/
++
++# MediaTek's 4.14 audio stack, with stock's flags and include paths.
++# Paths stock adds that 5.10 doesn't have (audio_ipi) come with the code that needs them.
++ifeq ($(CONFIG_MTK_SND_SOC_NEW_ARCH),y)
++MTK_PLATFORM := $(subst ",,$(CONFIG_MTK_PLATFORM))
++MTK_CODEC := $(subst ",,$(CONFIG_MTK_SND_SOC_CODEC))
++
++subdir-ccflags-y += -DAUDIO_USING_WRAP_DRIVER
++subdir-ccflags-y += -D_MT_IDLE_HEADER
++subdir-ccflags-y += -D_REG_SYNC_WRITE
++
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/include
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/include/mt-plat/$(MTK_PLATFORM)/include
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/include/mt-plat
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/base/power/include
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/base/power/$(MTK_PLATFORM)
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/dramc/$(MTK_PLATFORM)/
++subdir-ccflags-y += -Werror -I$(srctree)/drivers/misc/mediatek/scp/$(MTK_PLATFORM)/
++subdir-ccflags-y += -Werror -I$(srctree)/$(src)/common_int
++ifneq ($(MTK_CODEC),)
++subdir-ccflags-y += -Werror -I$(srctree)/$(src)/codec/$(MTK_CODEC)
++endif
++subdir-ccflags-y += -Werror -Wno-incompatible-pointer-types
++subdir-ccflags-y += -Werror -I$(srctree)/$(src)/$(MTK_PLATFORM)
++
++# Codec first, as stock, so the codec registers before the AFE probes.
++ifneq ($(MTK_CODEC),)
++obj-y += codec/$(MTK_CODEC)/
++endif
++obj-y += common_int/
++obj-y += $(MTK_PLATFORM)/
++# common/ for mtk-mmap-ion.o, as stock builds it with MTK_ION.
++obj-$(CONFIG_MTK_ION) += common/
++endif
+--- /dev/null
++++ b/sound/soc/mediatek/codec/mt6358/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++# MediaTek 4.14 audio: the MT6358 codec as stock. Its PMIC AUXADC
++# and efuse calls come from drivers/misc/mediatek/pmic/mt6358/pmic_legacy.c.
+--- /dev/null
++++ b/sound/soc/mediatek/codec/mt6358/mtk-auddrv-ana.h
+@@ -0,0 +1,320 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *   AudDrv_Ana.h
++ *
++ * Project:
++ * --------
++ *   Audio Driver Ana
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang (mtk02308)
++ *
++ *------------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************/
++
++#ifndef _AUDDRV_ANA_H_
++#define _AUDDRV_ANA_H_
++
++/*****************************************************************************
++ *                     C O M P I L E R   F L A G S
++ *****************************************************************************/
++
++
++/*****************************************************************************
++ *                E X T E R N A L   R E F E R E N C E S
++ *****************************************************************************/
++#include "mtk-auddrv-def.h"
++
++/*****************************************************************************
++ *                         D A T A   T Y P E S
++ *****************************************************************************/
++
++
++/*****************************************************************************
++ *                         M A C R O
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                  R E G I S T E R       D E F I N I T I O N
++ *****************************************************************************/
++#define SWCID                         0x000A
++#define AUD_TOP_ID                    0x2200
++#define AUD_TOP_REV0                  0x2202
++#define AUD_TOP_DBI                   0x2204
++#define AUD_TOP_DXI                   0x2206
++#define AUD_TOP_CKPDN_TPM0            0x2208
++#define AUD_TOP_CKPDN_TPM1            0x220a
++#define AUD_TOP_CKPDN_CON0            0x220c
++#define AUD_TOP_CKPDN_CON0_SET        0x220e
++#define AUD_TOP_CKPDN_CON0_CLR        0x2210
++#define AUD_TOP_CKSEL_CON0            0x2212
++#define AUD_TOP_CKSEL_CON0_SET        0x2214
++#define AUD_TOP_CKSEL_CON0_CLR        0x2216
++#define AUD_TOP_CKTST_CON0            0x2218
++#define AUD_TOP_CLK_HWEN_CON0         0x221a
++#define AUD_TOP_CLK_HWEN_CON0_SET     0x221c
++#define AUD_TOP_CLK_HWEN_CON0_CLR     0x221e
++#define AUD_TOP_RST_CON0              0x2220
++#define AUD_TOP_RST_CON0_SET          0x2222
++#define AUD_TOP_RST_CON0_CLR          0x2224
++#define AUD_TOP_RST_BANK_CON0         0x2226
++#define AUD_TOP_INT_CON0              0x2228
++#define AUD_TOP_INT_CON0_SET          0x222a
++#define AUD_TOP_INT_CON0_CLR          0x222c
++#define AUD_TOP_INT_MASK_CON0         0x222e
++#define AUD_TOP_INT_MASK_CON0_SET     0x2230
++#define AUD_TOP_INT_MASK_CON0_CLR     0x2232
++#define AUD_TOP_INT_STATUS0           0x2234
++#define AUD_TOP_INT_RAW_STATUS0       0x2236
++#define AUD_TOP_INT_MISC_CON0         0x2238
++#define AUDNCP_CLKDIV_CON0            0x223a
++#define AUDNCP_CLKDIV_CON1            0x223c
++#define AUDNCP_CLKDIV_CON2            0x223e
++#define AUDNCP_CLKDIV_CON3            0x2240
++#define AUDNCP_CLKDIV_CON4            0x2242
++#define AUD_TOP_MON_CON0              0x2244
++#define AUDIO_DIG_DSN_ID              0x2280
++#define AUDIO_DIG_DSN_REV0            0x2282
++#define AUDIO_DIG_DSN_DBI             0x2284
++#define AUDIO_DIG_DSN_DXI             0x2286
++#define AFE_UL_DL_CON0                0x2288
++#define AFE_DL_SRC2_CON0_L            0x228a
++#define AFE_UL_SRC_CON0_H             0x228c
++#define AFE_UL_SRC_CON0_L             0x228e
++#define PMIC_AFE_TOP_CON0             0x2290
++#define PMIC_AUDIO_TOP_CON0           0x2292
++#define AFE_MON_DEBUG0                0x2294
++#define AFUNC_AUD_CON0                0x2296
++#define AFUNC_AUD_CON1                0x2298
++#define AFUNC_AUD_CON2                0x229a
++#define AFUNC_AUD_CON3                0x229c
++#define AFUNC_AUD_CON4                0x229e
++#define AFUNC_AUD_CON5                0x22a0
++#define AFUNC_AUD_CON6                0x22a2
++#define AFUNC_AUD_MON0                0x22a4
++#define AUDRC_TUNE_MON0               0x22a6
++#define AFE_ADDA_MTKAIF_FIFO_CFG0     0x22a8
++#define AFE_ADDA_MTKAIF_FIFO_LOG_MON1 0x22aa
++#define PMIC_AFE_ADDA_MTKAIF_MON0     0x22ac
++#define PMIC_AFE_ADDA_MTKAIF_MON1     0x22ae
++#define PMIC_AFE_ADDA_MTKAIF_MON2     0x22b0
++#define PMIC_AFE_ADDA_MTKAIF_MON3     0x22b2
++#define PMIC_AFE_ADDA_MTKAIF_CFG0     0x22b4
++#define PMIC_AFE_ADDA_MTKAIF_RX_CFG0  0x22b6
++#define PMIC_AFE_ADDA_MTKAIF_RX_CFG1  0x22b8
++#define PMIC_AFE_ADDA_MTKAIF_RX_CFG2  0x22ba
++#define PMIC_AFE_ADDA_MTKAIF_RX_CFG3  0x22bc
++#define PMIC_AFE_ADDA_MTKAIF_TX_CFG1  0x22be
++#define AFE_SGEN_CFG0                 0x22c0
++#define AFE_SGEN_CFG1                 0x22c2
++#define AFE_ADC_ASYNC_FIFO_CFG        0x22c4
++#define AFE_DCCLK_CFG0                0x22c6
++#define AFE_DCCLK_CFG1                0x22c8
++#define AUDIO_DIG_CFG                 0x22ca
++#define AFE_AUD_PAD_TOP               0x22cc
++#define AFE_AUD_PAD_TOP_MON           0x22ce
++#define AFE_AUD_PAD_TOP_MON1          0x22d0
++#define AFE_DL_NLE_CFG                0x22d2
++#define AFE_DL_NLE_MON                0x22d4
++#define AFE_CG_EN_MON                 0x22d6
++#define AUDIO_DIG_2ND_DSN_ID          0x2300
++#define AUDIO_DIG_2ND_DSN_REV0        0x2302
++#define AUDIO_DIG_2ND_DSN_DBI         0x2304
++#define AUDIO_DIG_2ND_DSN_DXI         0x2306
++#define AFE_PMIC_NEWIF_CFG3           0x2308
++#define AFE_VOW_TOP                   0x230a
++#define AFE_VOW_CFG0                  0x230c
++#define AFE_VOW_CFG1                  0x230e
++#define AFE_VOW_CFG2                  0x2310
++#define AFE_VOW_CFG3                  0x2312
++#define AFE_VOW_CFG4                  0x2314
++#define AFE_VOW_CFG5                  0x2316
++#define AFE_VOW_CFG6                  0x2318
++#define AFE_VOW_MON0                  0x231a
++#define AFE_VOW_MON1                  0x231c
++#define AFE_VOW_MON2                  0x231e
++#define AFE_VOW_MON3                  0x2320
++#define AFE_VOW_MON4                  0x2322
++#define AFE_VOW_MON5                  0x2324
++#define AFE_VOW_SN_INI_CFG            0x2326
++#define AFE_VOW_TGEN_CFG0             0x2328
++#define AFE_VOW_POSDIV_CFG0           0x232a
++#define AFE_VOW_HPF_CFG0              0x232c
++#define AFE_VOW_PERIODIC_CFG0         0x232e
++#define AFE_VOW_PERIODIC_CFG1         0x2330
++#define AFE_VOW_PERIODIC_CFG2         0x2332
++#define AFE_VOW_PERIODIC_CFG3         0x2334
++#define AFE_VOW_PERIODIC_CFG4         0x2336
++#define AFE_VOW_PERIODIC_CFG5         0x2338
++#define AFE_VOW_PERIODIC_CFG6         0x233a
++#define AFE_VOW_PERIODIC_CFG7         0x233c
++#define AFE_VOW_PERIODIC_CFG8         0x233e
++#define AFE_VOW_PERIODIC_CFG9         0x2340
++#define AFE_VOW_PERIODIC_CFG10        0x2342
++#define AFE_VOW_PERIODIC_CFG11        0x2344
++#define AFE_VOW_PERIODIC_CFG12        0x2346
++#define AFE_VOW_PERIODIC_CFG13        0x2348
++#define AFE_VOW_PERIODIC_CFG14        0x234a
++#define AFE_VOW_PERIODIC_CFG15        0x234c
++#define AFE_VOW_PERIODIC_CFG16        0x234e
++#define AFE_VOW_PERIODIC_CFG17        0x2350
++#define AFE_VOW_PERIODIC_CFG18        0x2352
++#define AFE_VOW_PERIODIC_CFG19        0x2354
++#define AFE_VOW_PERIODIC_CFG20        0x2356
++#define AFE_VOW_PERIODIC_CFG21        0x2358
++#define AFE_VOW_PERIODIC_CFG22        0x235a
++#define AFE_VOW_PERIODIC_CFG23        0x235c
++#define AFE_VOW_PERIODIC_MON0         0x235e
++#define AFE_VOW_PERIODIC_MON1         0x2360
++#define AUDENC_DSN_ID                 0x2380
++#define AUDENC_DSN_REV0               0x2382
++#define AUDENC_DSN_DBI                0x2384
++#define AUDENC_DSN_FPI                0x2386
++#define AUDENC_ANA_CON0               0x2388
++#define AUDENC_ANA_CON1               0x238a
++#define AUDENC_ANA_CON2               0x238c
++#define AUDENC_ANA_CON3               0x238e
++#define AUDENC_ANA_CON4               0x2390
++#define AUDENC_ANA_CON5               0x2392
++#define AUDENC_ANA_CON6               0x2394
++#define AUDENC_ANA_CON7               0x2396
++#define AUDENC_ANA_CON8               0x2398
++#define AUDENC_ANA_CON9               0x239a
++#define AUDENC_ANA_CON10              0x239c
++#define AUDENC_ANA_CON11              0x239e
++#define AUDENC_ANA_CON12              0x23a0
++#define AUDDEC_DSN_ID                 0x2400
++#define AUDDEC_DSN_REV0               0x2402
++#define AUDDEC_DSN_DBI                0x2404
++#define AUDDEC_DSN_FPI                0x2406
++#define AUDDEC_ANA_CON0               0x2408
++#define AUDDEC_ANA_CON1               0x240a
++#define AUDDEC_ANA_CON2               0x240c
++#define AUDDEC_ANA_CON3               0x240e
++#define AUDDEC_ANA_CON4               0x2410
++#define AUDDEC_ANA_CON5               0x2412
++#define AUDDEC_ANA_CON6               0x2414
++#define AUDDEC_ANA_CON7               0x2416
++#define AUDDEC_ANA_CON8               0x2418
++#define AUDDEC_ANA_CON9               0x241a
++#define AUDDEC_ANA_CON10              0x241c
++#define AUDDEC_ANA_CON11              0x241e
++#define AUDDEC_ANA_CON12              0x2420
++#define AUDDEC_ANA_CON13              0x2422
++#define AUDDEC_ANA_CON14              0x2424
++#define AUDDEC_ANA_CON15              0x2426
++#define AUDDEC_ELR_NUM                0x2428
++#define AUDDEC_ELR_0                  0x242a
++#define AUDZCD_DSN_ID                 0x2480
++#define AUDZCD_DSN_REV0               0x2482
++#define AUDZCD_DSN_DBI                0x2484
++#define AUDZCD_DSN_FPI                0x2486
++#define ZCD_CON0                      0x2488
++#define ZCD_CON1                      0x248a
++#define ZCD_CON2                      0x248c
++#define ZCD_CON3                      0x248e
++#define ZCD_CON4                      0x2490
++#define ZCD_CON5                      0x2492
++#define ACCDET_DSN_DIG_ID             0x2500
++#define ACCDET_DSN_DIG_REV0           0x2502
++#define ACCDET_DSN_DBI                0x2504
++#define ACCDET_DSN_FPI                0x2506
++#define ACCDET_CON0                   0x2508
++#define ACCDET_CON1                   0x250a
++#define ACCDET_CON2                   0x250c
++#define ACCDET_CON3                   0x250e
++#define ACCDET_CON4                   0x2510
++#define ACCDET_CON5                   0x2512
++#define ACCDET_CON6                   0x2514
++#define ACCDET_CON7                   0x2516
++#define ACCDET_CON8                   0x2518
++#define ACCDET_CON9                   0x251a
++#define ACCDET_CON10                  0x251c
++#define ACCDET_CON11                  0x251e
++#define ACCDET_CON12                  0x2520
++#define ACCDET_CON13                  0x2522
++#define ACCDET_CON14                  0x2524
++#define ACCDET_CON15                  0x2526
++#define ACCDET_CON16                  0x2528
++#define ACCDET_CON17                  0x252a
++#define ACCDET_CON18                  0x252c
++#define ACCDET_CON19                  0x252e
++#define ACCDET_CON20                  0x2530
++#define ACCDET_CON21                  0x2532
++#define ACCDET_CON22                  0x2534
++#define ACCDET_CON23                  0x2536
++#define ACCDET_CON24                  0x2538
++#define ACCDET_CON25                  0x253a
++#define ACCDET_CON26                  0x253c
++#define ACCDET_CON27                  0x253e
++#define ACCDET_CON28                  0x2540
++
++#define TOP_CKPDN_CON0      0x10c
++#define TOP_CKPDN_CON0_SET  0x10e
++#define TOP_CKPDN_CON0_CLR  0x110
++
++#define TOP_CKHWEN_CON0     0x12a
++#define TOP_CKHWEN_CON0_SET 0x12c
++#define TOP_CKHWEN_CON0_CLR 0x12e
++
++#define OTP_CON0            0x38a
++#define OTP_CON8            0x39a
++#define OTP_CON11           0x3a0
++#define OTP_CON12           0x3a2
++#define OTP_CON13           0x3a4
++
++#define SMT_CON1            0x30
++#define DRV_CON3            0x3c
++#define GPIO_DIR0           0x88
++
++#define GPIO_MODE2          0xd8	/* mosi */
++#define GPIO_MODE2_SET      0xda
++#define GPIO_MODE2_CLR      0xdc
++
++#define GPIO_MODE3          0xde	/* miso */
++#define GPIO_MODE3_SET      0xe0
++#define GPIO_MODE3_CLR      0xe2
++
++#define DCXO_CW13           0x7aa
++#define DCXO_CW14           0x7ac
++
++#define AUXADC_CON1         0x118e
++#define AUXADC_CON10        0x11a0
++
++void Ana_Set_Reg(unsigned int offset, unsigned int value, unsigned int mask);
++unsigned int Ana_Get_Reg(unsigned int offset);
++/* 5.10: looks up the pwrap regmap Ana_Set_Reg and Ana_Get_Reg use; 0 or -EPROBE_DEFER */
++int Ana_Init_Regmap(void);
++
++/* for debug usage */
++void Ana_Log_Print(void);
++
++int Ana_Debug_Read(char *buffer, const int size);
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/codec/mt6358/mtk-soc-analog-type.h
+@@ -0,0 +1,187 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *  mt_sco_analog_type.h
++ *
++ * Project:
++ * --------
++ *   MT6583  Audio Driver Kernel Function
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ * Chipeng Chang
++ *
++ *------------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************/
++
++#ifndef _AUDIO_ANALOG_TYPE_H
++#define _AUDIO_ANALOG_TYPE_H
++
++
++/*****************************************************************************
++ *                ENUM DEFINITION
++ *****************************************************************************/
++
++
++enum ANA_GAIN_type {
++	ANA_GAIN_HSOUTL = 0,
++	ANA_GAIN_HSOUTR,
++	ANA_GAIN_HPOUTL,
++	ANA_GAIN_HPOUTR,
++	ANA_GAIN_SPKL,
++	ANA_GAIN_SPKR,
++	ANA_GAIN_SPEAKER_HEADSET_R,
++	ANA_GAIN_SPEAKER_HEADSET_L,
++	ANA_GAIN_IV_BUFFER,
++	ANA_GAIN_LINEOUTL,
++	ANA_GAIN_LINEOUTR,
++	ANA_GAIN_LINEINL,
++	ANA_GAIN_LINEINR,
++	ANA_GAIN_MICAMP1,
++	ANA_GAIN_MICAMP2,
++	ANA_GAIN_MICAMP3,
++	ANA_GAIN_MICAMP4,
++	ANA_GAIN_LEVELSHIFTL,
++	ANA_GAIN_LEVELSHIFTR,
++	ANA_GAIN_TYPE_MAX
++};
++
++/* mux seleciotn */
++enum audio_analog_mux_type {
++	AUDIO_ANALOG_MUX_VOICE = 0,
++	AUDIO_ANALOG_MUX_AUDIO,
++	AUDIO_ANALOG_MUX_IV_BUFFER,
++	AUDIO_ANALOG_MUX_LINEIN_STEREO,
++	AUDIO_ANALOG_MUX_LINEIN_L,
++	AUDIO_ANALOG_MUX_LINEIN_R,
++	AUDIO_ANALOG_MUX_LINEIN_AUDIO_MONO,
++	AUDIO_ANALOG_MUX_LINEIN_AUDIO_STEREO,
++	AUDIO_ANALOG_MUX_IN_MIC1,
++	AUDIO_ANALOG_MUX_IN_MIC2,
++	AUDIO_ANALOG_MUX_IN_MIC3,
++	AUDIO_ANALOG_MUX_IN_MIC4,
++	AUDIO_ANALOG_MUX_IN_LINE_IN,
++	AUDIO_ANALOG_MUX_IN_PREAMP_1,
++	AUDIO_ANALOG_MUX_IN_PREAMP_2,
++	AUDIO_ANALOG_MUX_IN_PREAMP_3,
++	AUDIO_ANALOG_MUX_IN_PREAMP_4,
++	MICSOURCE_MUX_IN_1,
++	MICSOURCE_MUX_IN_2,
++	MICSOURCE_MUX_IN_3,
++	MICSOURCE_MUX_IN_4,
++	AUDIO_ANALOG_MUX_IN_LEVEL_SHIFT_BUFFER,
++	AUDIO_ANALOG_MUX_MUTE,
++	AUDIO_ANALOG_MUX_OPEN,
++	AUDIO_ANALOG_MAX_MUX_TYPE
++};
++
++/* device power */
++enum audio_analog_device_type {
++	ANA_DEV_OUT_EARPIECER = 0,
++	ANA_DEV_OUT_EARPIECEL = 1,
++	ANA_DEV_OUT_HEADSETR = 2,
++	ANA_DEV_OUT_HEADSETL = 3,
++	ANA_DEV_OUT_SPEAKERR = 4,
++	ANA_DEV_OUT_SPEAKERL = 5,
++	ANA_DEV_OUT_SPEAKER_HEADSET_R = 6,
++	ANA_DEV_OUT_SPEAKER_HEADSET_L = 7,
++	ANA_DEV_OUT_LINEOUTR = 8,
++	ANA_DEV_OUT_LINEOUTL = 9,
++	ANA_DEV_OUT_EXTSPKAMP = 10,
++	ANA_DEV_2IN1_SPK = 11,
++	/* DEVICE_IN_LINEINR = 11, */
++	/* DEVICE_IN_LINEINL = 12, */
++	ANA_DEV_IN_ADC1 = 13,
++	ANA_DEV_IN_ADC2 = 14,
++	ANA_DEV_IN_ADC3 = 15,
++	ANA_DEV_IN_ADC4 = 16,
++	ANA_DEV_IN_PREAMP_L = 17,
++	ANA_DEV_IN_PREAMP_R = 18,
++	ANA_DEV_IN_DIGITAL_MIC = 19,
++	ANA_DEV_RECEIVER_SPEAKER_SWITCH = 20,
++	ANA_DEV_MAX
++};
++
++enum audio_analog_device_sample_rate {
++	ANA_DEV_OUT_DAC,
++	ANA_DEV_IN_ADC,
++	ANA_DEV_IN_ADC_2,
++	ANA_DEV_IN_OUT_MAX
++};
++
++enum audio_analog_audio_analog_input {
++	AUDIO_ANALOG_AUDIOANALOG_INPUT_OPEN = 0,
++	AUDIO_ANALOG_AUDIOANALOG_INPUT_ADC,
++	AUDIO_ANALOG_AUDIOANALOG_INPUT_PREAMP,
++};
++
++enum audio_analog_channels {
++	AUDIO_ANALOG_CHANNELS_LEFT1 = 0,
++	AUDIO_ANALOG_CHANNELS_RIGHT1,
++};
++
++enum audio_analog_loopback {
++	AUDIO_ANALOG_DAC_LOOP_DAC_HS_ON = 0,
++	AUDIO_ANALOG_DAC_LOOP_DAC_HS_OFF,
++	AUDIO_ANALOG_DAC_LOOP_DAC_HP_ON,
++	AUDIO_ANALOG_DAC_LOOP_DAC_HP_OFF,
++	AUDIO_ANALOG_DAC_LOOP_DAC_SPEAKER_ON,
++	AUDIO_ANALOG_DAC_LOOP_DAC_SPEAKER_OFF,
++};
++
++enum audio_analog_ul_mode {
++	ANA_UL_MODE_ACC = 0,
++	ANA_UL_MODE_DCC,
++	ANA_UL_MODE_DMIC,
++	ANA_UL_MODE_DCCECMDIFF,
++	ANA_UL_MODE_DCCECMSINGLE,
++};
++
++enum audio_offset_trim_mux {
++	AUDIO_OFFSET_TRIM_MUX_OPEN = 0,
++	AUDIO_OFFSET_TRIM_MUX_HPL,
++	AUDIO_OFFSET_TRIM_MUX_HPR,
++	AUDIO_OFFSET_TRIM_MUX_HSP,
++	AUDIO_OFFSET_TRIM_MUX_HSN,
++	AUDIO_OFFSET_TRIM_MUX_LOLP,
++	AUDIO_OFFSET_TRIM_MUX_LOLN,
++	AUDIO_OFFSET_TRIM_MUX_AU_REFN,
++	AUDIO_OFFSET_TRIM_MUX_AVSS28,
++	AUDIO_OFFSET_TRIM_MUX_AVSS28_2,
++	AUDIO_OFFSET_TRIM_MUX_UNUSED,
++	AUDIO_OFFSET_TRIM_MUX_GROUND,
++};
++
++struct mt6358_codec_priv {
++	int ana_gain[ANA_GAIN_TYPE_MAX];
++	int ana_mux[AUDIO_ANALOG_MAX_MUX_TYPE];
++	int dev_power[ANA_DEV_MAX];
++	int backup_dev_power[ANA_DEV_MAX];
++};
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/codec/mt6358/mtk-soc-codec-63xx.h
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *  mtk-soc-codec-63xx.h
++ *
++ * Project:
++ * --------
++ *    Audio codec header file
++ *
++ * Description:
++ * ------------
++ *   Audio codec function
++ *
++ * Author:
++ * -------
++ * Chipeng Chang
++ *
++ *------------------------------------------------------------------------------
++ *
++ ******************************************************************************/
++
++#ifndef _AUDIO_CODEC_63xx_H
++#define _AUDIO_CODEC_63xx_H
++
++struct mtk_codec_ops {
++	int (*enable_dc_compensation)(bool enable);
++	int (*set_lch_dc_compensation)(int value);
++	int (*set_rch_dc_compensation)(int value);
++
++	int (*set_ap_dmic)(bool enable);
++
++	int (*set_hp_impedance_ctl)(bool enable);
++};
++
++void audckbufEnable(bool enable);
++
++void SetAnalogSuspend(bool bEnable);
++
++int set_codec_ops(struct mtk_codec_ops *ops);
++
++#ifdef CONFIG_MTK_ACCDET
++extern void accdet_late_init(unsigned long a);
++#endif
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common/mtk-mmap-ion.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * mtk-mmap-ion.h  --  Mediatek Smart Phone PCM Operation
++ *
++ * Copyright (c) 2017 MediaTek Inc.
++ * Author: Kai Chieh Chuang <kaichieh.chuang@mediatek.com>
++ */
++
++#ifndef _MTK_MMAP_ION_H_
++#define _MTK_MMAP_ION_H_
++
++#define MMAP_BUFFER_SIZE    (24*1024)
++
++
++int mtk_get_ion_buffer(void);
++
++int mtk_get_mmap_dl_fd(void);
++int mtk_get_mmap_ul_fd(void);
++
++void mtk_get_mmap_dl_buffer(unsigned long *phy_addr, void **vir_addr);
++void mtk_get_mmap_ul_buffer(unsigned long *phy_addr, void **vir_addr);
++
++#endif
++
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0
++# MediaTek 4.14 audio. Stock's objects in stock's order.
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-clk.h
+@@ -0,0 +1,136 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/***************************************************************************
++ *
++ * Filename:
++ * ---------
++ *   AudDrv_Clk.h
++ *
++ * Project:
++ * --------
++ *   MT6797  Audio Driver clock control
++ *
++ * Description:
++ * ------------
++ *   Audio clcok control
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang (mtk02308)
++ *
++ *---------------------------------------------------------------------------
++ *
++ ****************************************************************************
++ */
++
++#ifndef _AUDDRV_CLK_H_
++#define _AUDDRV_CLK_H_
++
++/*****************************************************************************
++ *                     C O M P I L E R   F L A G S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                E X T E R N A L   R E F E R E N C E S
++ *****************************************************************************/
++
++#include "mtk-auddrv-common.h"
++
++/*****************************************************************************
++ *                         D A T A   T Y P E S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                         M A C R O
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                 FUNCTION       D E F I N I T I O N
++ *****************************************************************************/
++#include <linux/clk.h>
++
++extern int AudDrv_Clk_probe(void *dev);
++extern void AudDrv_Clk_Deinit(void *dev);
++
++void AudDrv_Clk_Global_Variable_Init(void);
++void AudDrv_AUDINTBUS_Sel(int parentidx);
++
++void AudDrv_Bus_Init(void);
++
++/*
++ * 5.10: returns 0 with the AFE powered, -EIO if it stayed off. The caller is counted either
++ * way and still calls AudDrv_Clk_Off.
++ */
++int AudDrv_Clk_On(void);
++void AudDrv_Clk_Off(void);
++
++void AudDrv_ANA_Clk_On(void);
++void AudDrv_ANA_Clk_Off(void);
++
++void AudDrv_I2S_Clk_On(void);
++void AudDrv_I2S_Clk_Off(void);
++
++void AudDrv_TDM_Clk_On(void);
++void AudDrv_TDM_Clk_Off(void);
++
++void AudDrv_ADC_Clk_On(void);
++void AudDrv_ADC_Clk_Off(void);
++void AudDrv_ADC2_Clk_On(void);
++void AudDrv_ADC2_Clk_Off(void);
++void AudDrv_ADC3_Clk_On(void);
++void AudDrv_ADC3_Clk_Off(void);
++void AudDrv_ADC_Hires_Clk_On(void);
++void AudDrv_ADC_Hires_Clk_Off(void);
++void AudDrv_ADC2_Hires_Clk_On(void);
++void AudDrv_ADC2_Hires_Clk_Off(void);
++
++void AudDrv_HDMI_Clk_On(void);
++void AudDrv_HDMI_Clk_Off(void);
++
++void AudDrv_APLL24M_Clk_On(void);
++void AudDrv_APLL24M_Clk_Off(void);
++void AudDrv_APLL22M_Clk_On(void);
++void AudDrv_APLL22M_Clk_Off(void);
++
++void AudDrv_APLL1Tuner_Clk_On(void);
++void AudDrv_APLL1Tuner_Clk_Off(void);
++void AudDrv_APLL2Tuner_Clk_On(void);
++void AudDrv_APLL2Tuner_Clk_Off(void);
++
++void AudDrv_Emi_Clk_On(void);
++void AudDrv_Emi_Clk_Off(void);
++
++void AudDrv_ANC_Clk_On(void);
++void AudDrv_ANC_Clk_Off(void);
++
++/* APLL , low jitter mode setting */
++unsigned int GetApllbySampleRate(unsigned int SampleRate);
++void EnableALLbySampleRate(unsigned int SampleRate);
++void DisableALLbySampleRate(unsigned int SampleRate);
++void EnableI2SDivPower(unsigned int Diveder_name, bool bEnable);
++void EnableApll1(bool bEnable);
++void EnableApll2(bool bEnable);
++void SetCLkBclk(unsigned int MckDiv, unsigned int SampleRate,
++		unsigned int Channels, unsigned int Wlength);
++unsigned int SetCLkMclk(unsigned int I2snum, unsigned int SampleRate);
++void EnableI2SCLKDiv(unsigned int I2snum, bool bEnable);
++void PowerDownAllI2SDiv(void);
++void audio_clk_control(void);
++
++extern void aud_intbus_mux_sel(unsigned int aud_idx);
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-common-func.h
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++/******************************************************************************
++ *
++ *
++ * Filename:
++ * ---------
++ *   AudDrv_Common_func.h
++ *
++ * Project:
++ * --------
++ *   MT6797 FPGA LDVT Audio Driver
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ *   George
++ *
++ *---------------------------------------------------------------------------
++ *
++ *
++ ****************************************************************************
++ */
++
++#ifndef AUDIO_COMMON_FUNC_H
++#define AUDIO_COMMON_FUNC_H
++
++#include <linux/device.h>
++#include <linux/pm_wakeup.h>
++
++bool get_voice_bt_status(void);
++bool get_voice_status(void);
++bool get_voice_md2_bt_status(void);
++bool get_voice_md2_status(void);
++bool get_voice_ultra_status(void);
++bool get_voice_usb_status(void);
++void Auddrv_Read_Efuse_HPOffset(void);
++bool get_internalmd_status(void);
++
++/* wake lock relate*/
++#define aud_wake_lock_init(ws, name) wakeup_source_init(ws, name)
++#define aud_wake_lock_destroy(ws) wakeup_source_trash(ws)
++#define aud_wake_lock(ws) __pm_stay_awake(ws)
++#define aud_wake_unlock(ws) __pm_relax(ws)
++
++/* for AUDIO_DL2_ISR_COPY_SUPPORT */
++void mtk_dl2_copy_l(void);
++void mtk_dl2_copy2buffer(const void *addr, uint32_t size);
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-common.h
+@@ -0,0 +1,185 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/******************************************************************************
++ *
++ *
++ * Filename:
++ * ---------
++ *   AudDrv_Common.h
++ *
++ * Project:
++ * --------
++ *   Audio Common function header file
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang (MTK02308)
++ *
++ *---------------------------------------------------------------------------
++ *
++ *
++ ****************************************************************************
++ */
++
++#ifndef AUDIO_GLOBAL_H
++#define AUDIO_GLOBAL_H
++
++#include "mtk-auddrv-afe.h"
++#include "mtk-auddrv-afe.h"
++#include "mtk-auddrv-clk.h"
++#include "mtk-auddrv-def.h"
++#include <asm/div64.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/dma-mapping.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/irq.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/kernel.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/printk.h>
++#include <linux/proc_fs.h>
++#include <linux/sched.h>
++#include <linux/semaphore.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/spinlock.h>
++#include <linux/string.h>
++#include <linux/string.h>
++#include <linux/time.h>
++#include <linux/timer.h>
++#include <linux/types.h>
++#include <linux/uaccess.h>
++#include <linux/vmalloc.h>
++#include <linux/wait.h>
++#include <mt-plat/sync_write.h>
++
++/* wakelock is replace by pm_wakeup*/
++#include <linux/device.h>
++#include <linux/pm_wakeup.h>
++
++//#define DL1_DEBUG_LOG
++//#define DL2_DEBUG_LOG
++//#define DL3_DEBUG_LOG
++//#define AFE_CONTROL_DEBUG_LOG
++
++/* TODO: KC: don't declare unnecessary typdef, just use it */
++#define DL_ABNORMAL_CONTROL_MAX (5)
++
++typedef uint8_t kal_uint8;
++typedef int8_t kal_int8;
++typedef uint32_t kal_uint32;
++typedef int32_t kal_int32;
++typedef uint64_t kal_uint64;
++typedef int64_t kal_int64;
++
++struct afe_block_t {
++	kal_uint32 pucPhysBufAddr;
++	kal_uint8 *pucVirtBufAddr;
++	kal_int32 u4BufferSize;
++	kal_int32 u4DataRemained;
++	kal_uint32 u4SampleNumMask; /* sample number mask */
++	kal_uint32 u4SamplesPerInt; /* number of samples to play before
++				     *  interrupting
++				     */
++	kal_int32 u4WriteIdx;       /* Previous Write Index. */
++	kal_int32 u4DMAReadIdx;     /* Previous DMA Read Index. */
++	kal_uint32 u4MaxCopySize;
++	kal_uint32 u4fsyncflag;
++	kal_uint32 uResetFlag;
++};
++
++struct substream_list {
++	kal_uint32 u4MaxCopySize;
++
++	struct snd_pcm_substream *substream;
++	struct substream_list *next;
++};
++
++struct afe_mem_control_t {
++	struct file *flip;
++	struct substream_list *substreamL;
++	struct afe_block_t rBlock;
++	kal_uint32 MemIfNum;
++	bool interruptTrigger;
++	spinlock_t substream_lock;
++	bool mWaitForIRQ;
++	bool mAssignDRAM;
++};
++
++struct pcm_afe_info {
++	struct afe_block_t *mAfeBlock;
++	struct snd_pcm_substream *substream;
++};
++
++struct afe_dl_abnormal_control_t {
++	kal_int32 u4BufferSize[DL_ABNORMAL_CONTROL_MAX];
++	kal_int32 u4DataRemained[DL_ABNORMAL_CONTROL_MAX];
++
++	kal_int32
++		u4WriteIdx[DL_ABNORMAL_CONTROL_MAX]; /* Previous Write Index. */
++	kal_int32 u4DMAReadIdx[DL_ABNORMAL_CONTROL_MAX]; /* Previous DMA Read
++							  *  Index.
++							  */
++	kal_int32 u4ConsumedBytes[DL_ABNORMAL_CONTROL_MAX];
++	kal_int32 u4HwMemoryIndex[DL_ABNORMAL_CONTROL_MAX];
++	kal_int32 pucPhysBufAddr[DL_ABNORMAL_CONTROL_MAX];
++	kal_int32 u4UnderflowCnt;
++	kal_uint32 MemIfNum[DL_ABNORMAL_CONTROL_MAX];
++	unsigned long long IrqLastTimeNs[DL_ABNORMAL_CONTROL_MAX];
++	unsigned long long IrqCurrentTimeNs[DL_ABNORMAL_CONTROL_MAX];
++	unsigned long long IrqIntervalNs[DL_ABNORMAL_CONTROL_MAX];
++	kal_uint32 IrqIntervalLimitMs[DL_ABNORMAL_CONTROL_MAX];
++	bool IrqDelayCnt;
++};
++
++struct mtk_dai {
++	bool enable;
++	uint32_t sample_rate;
++};
++
++struct afe_dl_isr_copy_t {
++	kal_int8 *pBufferBase;
++	kal_int8 *pBufferIndx;
++	kal_uint32 u4BufferSize;
++	kal_uint32 u4BufferSizeMax;
++
++	kal_int32 u4IsrConsumeSize;
++};
++
++struct aud_reg_string {
++	char *regname;
++	unsigned int address;
++};
++
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-def.h
+@@ -0,0 +1,274 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++/******************************************************************************
++ *
++ *
++ * Filename:
++ * ---------
++ *   auddrv-def.h
++ *
++ * Project:
++ * --------
++ *   Audio Driver
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang (MTK02308)
++ *
++ *---------------------------------------------------------------------------
++ *
++ *****************************************************************************
++ */
++
++#ifndef AUDIO_DEF_H
++#define AUDIO_DEF_H
++
++#include "mtk-auddrv-type-def.h"
++#ifdef CONFIG_MTK_AEE_FEATURE
++#include <mt-plat/aee.h>
++#endif
++
++#define PM_MANAGER_API
++#define AUDIO_MEMORY_SRAM
++#define AUDIO_MEM_IOREMAP
++#define AUDIO_DL2_ISR_COPY_SUPPORT
++
++/* if need assert , use AUDIO_ASSERT(true) */
++#define AUDIO_ASSERT(value) WARN_ON(value)
++
++#ifdef CONFIG_MTK_AEE_FEATURE
++#define AUDIO_AEE(message)                                                     \
++	(aee_kernel_exception_api(__FILE__, __LINE__, DB_OPT_FTRACE, message,  \
++				  "audio dump ftrace"))
++#else
++#define AUDIO_AEE(message)
++#endif
++
++/**********************************
++ *  Other Definitions             *
++ **********************************/
++#define BIT_00 0x00000001 /* ---- ---- ---- ---- ---- ---- ---- ---1 */
++#define BIT_01 0x00000002 /* ---- ---- ---- ---- ---- ---- ---- --1- */
++#define BIT_02 0x00000004 /* ---- ---- ---- ---- ---- ---- ---- -1-- */
++#define BIT_03 0x00000008 /* ---- ---- ---- ---- ---- ---- ---- 1--- */
++#define BIT_04 0x00000010 /* ---- ---- ---- ---- ---- ---- ---1 ---- */
++#define BIT_05 0x00000020 /* ---- ---- ---- ---- ---- ---- --1- ---- */
++#define BIT_06 0x00000040 /* ---- ---- ---- ---- ---- ---- -1-- ---- */
++#define BIT_07 0x00000080 /* ---- ---- ---- ---- ---- ---- 1--- ---- */
++#define BIT_08 0x00000100 /* ---- ---- ---- ---- ---- ---1 ---- ---- */
++#define BIT_09 0x00000200 /* ---- ---- ---- ---- ---- --1- ---- ---- */
++#define BIT_10 0x00000400 /* ---- ---- ---- ---- ---- -1-- ---- ---- */
++#define BIT_11 0x00000800 /* ---- ---- ---- ---- ---- 1--- ---- ---- */
++#define BIT_12 0x00001000 /* ---- ---- ---- ---- ---1 ---- ---- ---- */
++#define BIT_13 0x00002000 /* ---- ---- ---- ---- --1- ---- ---- ---- */
++#define BIT_14 0x00004000 /* ---- ---- ---- ---- -1-- ---- ---- ---- */
++#define BIT_15 0x00008000 /* ---- ---- ---- ---- 1--- ---- ---- ---- */
++#define BIT_16 0x00010000 /* ---- ---- ---- ---1 ---- ---- ---- ---- */
++#define BIT_17 0x00020000 /* ---- ---- ---- --1- ---- ---- ---- ---- */
++#define BIT_18 0x00040000 /* ---- ---- ---- -1-- ---- ---- ---- ---- */
++#define BIT_19 0x00080000 /* ---- ---- ---- 1--- ---- ---- ---- ---- */
++#define BIT_20 0x00100000 /* ---- ---- ---1 ---- ---- ---- ---- ---- */
++#define BIT_21 0x00200000 /* ---- ---- --1- ---- ---- ---- ---- ---- */
++#define BIT_22 0x00400000 /* ---- ---- -1-- ---- ---- ---- ---- ---- */
++#define BIT_23 0x00800000 /* ---- ---- 1--- ---- ---- ---- ---- ---- */
++#define BIT_24 0x01000000 /* ---- ---1 ---- ---- ---- ---- ---- ---- */
++#define BIT_25 0x02000000 /* ---- --1- ---- ---- ---- ---- ---- ---- */
++#define BIT_26 0x04000000 /* ---- -1-- ---- ---- ---- ---- ---- ---- */
++#define BIT_27 0x08000000 /* ---- 1--- ---- ---- ---- ---- ---- ---- */
++#define BIT_28 0x10000000 /* ---1 ---- ---- ---- ---- ---- ---- ---- */
++#define BIT_29 0x20000000 /* --1- ---- ---- ---- ---- ---- ---- ---- */
++#define BIT_30 0x40000000 /* -1-- ---- ---- ---- ---- ---- ---- ---- */
++#define BIT_31 0x80000000 /* 1--- ---- ---- ---- ---- ---- ---- ---- */
++#define MASK_ALL (0xFFFFFFFF)
++
++/* cpu dai name */
++#define MT_SOC_DAI_NAME "mt-soc-dai-driver"
++#define MT_SOC_DL1DAI_NAME "mt-soc-dl1dai-driver"
++#define MT_SOC_DL2DAI_NAME "mt-soc-dl2dai-driver"
++#define MT_SOC_EXTSPKDAI_NAME "mt-soc-extspkdai-driver"
++#define MT_SOC_DL1DATA2DAI_NAME "mt-soc-dl1data2dai-driver"
++#define MT_SOC_UL1DAI_NAME "mt-soc-ul1dai-driver"
++#define MT_SOC_UL1DATA2_NAME "mt-soc-ul1data2dai-driver"
++#define MT_SOC_UL2DAI_NAME "mt-soc-ul2dai-driver"
++#define MT_SOC_I2S0AWBDAI_NAME "mt-soc-i2s0awbdai-driver"
++#define MT_SOC_I2S2ADC2DAI_NAME "mt-soc-i2s2adc2dai-driver"
++#define MT_SOC_VOICE_MD1_NAME "mt-soc-voicemd1dai-driver"
++#define MT_SOC_VOICE_MD1_BT_NAME "mt-soc-voicemd1-btdai-driver"
++#define MT_SOC_VOICE_MD2_NAME "mt-soc-voicemd2dai-driver"
++#define MT_SOC_VOICE_MD2_BT_NAME "mt-soc-voicemd2-btdai-driver"
++#define MT_SOC_VOIP_CALL_BT_OUT_NAME "mt-soc-voipcall-btdai-out-driver"
++#define MT_SOC_VOIP_CALL_BT_IN_NAME "mt-soc-voipcall-btdai-in-driver"
++#define MT_SOC_ULDLLOOPBACK_NAME "mt-soc-uldlloopbackdai-driver"
++#define MT_SOC_HDMI_NAME "mt-soc-hdmidai-driver"
++#define MT_SOC_I2S0_NAME "mt-soc-i2s0dai-driver"
++#define MT_SOC_I2S0DL1_NAME "mt-soc-i2s0dl1dai-driver"
++#define MT_SOC_DL1SCPSPK_NAME "mt-soc-dl1scpspkdai-driver"
++#define MT_SOC_SCPVOICE_NAME "mt-soc-scpvoicedai-driver"
++#define MT_SOC_MRGRX_NAME "mt-soc-mrgrxdai-driver"
++#define MT_SOC_MRGRXCAPTURE_NAME "mt-soc-mrgrxcapturedai-driver"
++#define MT_SOC_DL1AWB_NAME "mt-soc-dl1awbdai-driver"
++#define MT_SOC_FM_MRGTX_NAME "mt-soc-fmmrgtxdai-driver"
++#define MT_SOC_TDMRX_NAME "mt-soc-tdmrxdai-driver"
++#define MT_SOC_HP_IMPEDANCE_NAME "mt-soc-hpimpedancedai-driver"
++#define MT_SOC_FM_I2S_NAME "mt-soc-fmi2S-driver"
++#define MT_SOC_FM_I2S_CAPTURE_NAME "mt-soc-fmi2Scapturedai-driver"
++#define MT_SOC_BTCVSD_RX_DAI_NAME "mt-soc-btcvsd-rx-dai-driver"
++#define MT_SOC_BTCVSD_TX_DAI_NAME "mt-soc-btcvsd-tx-dai-driver"
++#define MT_SOC_BTCVSD_DAI_NAME "mt-soc-btcvsd-dai-driver"
++#define MT_SOC_MOD_DAI_NAME "mt-soc-moddai-driver"
++#define MT_SOC_ANC_NAME "mt-soc-anc-driver"
++#define MT_SOC_ANC_RECORD_DAI_NAME "mt-soc-anc-record-dai-driver"
++#define MT_SOC_OFFLOAD_PLAYBACK_DAI_NAME "mt-soc-offload-playback-dai-driver"
++
++/* platform name */
++#define MT_SOC_DL1_PCM "mt-soc-dl1-pcm"
++#define MT_SOC_HP_IMPEDANCE_PCM "mt-soc-hp-impedence-pcm"
++#define MT_SOC_DEEP_BUFFER_DL_PCM "mt-soc-deep-buffer-dl-pcm"
++#define MT_SOC_DL2_PCM "mt-soc-dl2-pcm"
++#define MT_SOC_UL1_PCM "mt-soc-ul1-pcm"
++#define MT_SOC_UL2_PCM "mt-soc-ul2-pcm"
++#define MT_SOC_I2S0_AWB_PCM "mt-soc-i2s0awb-pcm"
++#define MT_SOC_AWB_PCM "mt-soc-awb-pcm"
++#define MT_SOC_MRGRX_AWB_PCM "mt-soc-mrgrx-awb-pcm"
++#define MT_SOC_DL1_AWB_PCM "mt-soc-dl1-awb-pcm"
++#define MT_SOC_DAI_PCM "mt-soc-DAI-pcm"
++#define MT_SOC_HDMI_PCM "mt-soc-hdmi-pcm"
++#define MT_SOC_I2S0_PCM "mt-soc-i2s0-pcm"
++#define MT_SOC_MRGRX_PCM "mt-soc-mrgrx-pcm"
++#define MT_SOC_SCP_VOICE_PCM "mt-soc-scp-voice-pcm"
++#define MT_SOC_I2S0DL1_PCM "mt-soc-i2s0dl1-pcm"
++#define MT_SOC_DL1SCPSPK_PCM "mt-soc-dl1scpspk-pcm"
++#define MT_SOC_MODDAI_PCM "mt-soc-MODDAI-pcm"
++#define MT_SOC_VOICE_MD1 "mt-soc-voicemd1"
++#define MT_SOC_VOICE_MD2 "mt-soc-voicemd2"
++#define MT_SOC_VOICE_MD1_BT "mt-soc-voicemd1-bt"
++#define MT_SOC_VOICE_MD2_BT "mt-soc-voicemd2-bt"
++#define MT_SOC_VOICE_ULTRA "mt-soc-voice-ultra"
++#define MT_SOC_VOICE_USB "mt-soc-voice-usb"
++#define MT_SOC_VOICE_USB_ECHOREF "mt-soc-voice-usb-echoref"
++#define MT_SOC_VOIP_BT_OUT "mt-soc-voip-bt-out"
++#define MT_SOC_VOIP_BT_IN "mt-soc-voip-bt-in"
++#define MT_SOC_IFMI2S2 "mt-soc-fm-i2s2"
++#define MT_SOC_DUMMY_PCM "mt-soc-dummy-pcm"
++#define MT_SOC_ULDLLOOPBACK_PCM "mt-soc-uldlloopback-pcm"
++#define MT_SOC_ROUTING_PCM "mt-soc-routing-pcm"
++#define MT_SOC_FM_MRGTX_PCM "mt-soc-fmmrgtx-pcm"
++#define MT_SOC_TDMRX_PCM "mt-soc-tdmrx-pcm"
++#define MT_SOC_MOD_ADCI2S_PCM "mt-soc-mod2adci2s-pcm"
++#define MT_SOC_I2S2_ADC2_PCM "mt-soc-i2s2_adc2-pcm"
++#define MT_SOC_IO2_DAI_PCM "mt-soc-io2dai-pcm"
++#define MT_SOC_FM_I2S_PCM "mt-soc-fm-i2s-pcm"
++#define MT_SOC_FM_I2S_AWB_PCM "mt-soc-fm-i2s-awb-pcm"
++#define MT_SOC_BTCVSD_RX_PCM "mt-soc-btcvsd-rx-pcm"
++#define MT_SOC_BTCVSD_TX_PCM "mt-soc-btcvsd-tx-pcm"
++#define MT_SOC_MOD_DAI_PCM "mt-soc-MODDAI-pcm"
++#define MT_SOC_ANC_PCM "mt-soc-anc-pcm"
++#define MT_SOC_PLAYBACK_OFFLOAD "mt-soc-playback-offload"
++
++/* codec dai name */
++#define MT_SOC_CODEC_TXDAI_NAME "mt-soc-codec-tx-dai"
++#define MT_SOC_CODEC_TXDAI2_NAME "mt-soc-codec-tx-dai2"
++#define MT_SOC_CODEC_RXDAI_NAME "mt-soc-codec-rx-dai"
++#define MT_SOC_CODEC_RXDAI2_NAME "mt-soc-codec-rx-dai2"
++#define MT_SOC_CODEC_I2S0AWB_NAME "mt-soc-codec-i2s0awb-dai"
++#define MT_SOC_CODEC_I2S0TXDAI_NAME "mt-soc-codec-I2s0tx-dai"
++#define MT_SOC_CODEC_DEEPBUFFER_TX_DAI_NAME "mt-soc-codec-deepbuffer-tx-dai"
++#define MT_SOC_CODEC_SPKSCPTXDAI_NAME "mt-soc-codec-spkscptx-dai"
++#define MT_SOC_CODEC_DL1AWBDAI_NAME "mt-soc-codec-dl1awb-dai"
++#define MT_SOC_CODEC_VOICE_MD1DAI_NAME "mt-soc-codec-voicemd1-dai"
++#define MT_SOC_CODEC_VOICE_MD2DAI_NAME "mt-soc-codec-voicemd2-dai"
++#define MT_SOC_CODEC_VOICE_MD1_BTDAI_NAME "mt-soc-codec-voicemd1-bt-dai"
++#define MT_SOC_CODEC_VOICE_MD2_BTDAI_NAME "mt-soc-codec-voicemd2-bt-dai"
++#define MT_SOC_CODEC_VOICE_ULTRADAI_NAME "mt-soc-codec-voiceultra-dai"
++#define MT_SOC_CODEC_VOICE_USBDAI_NAME "mt-soc-codec-voiceusb-dai"
++#define MT_SOC_CODEC_VOICE_USB_ECHOREF_DAI_NAME                                \
++	"mt-soc-codec-voiceusb-echoref-dai"
++#define MT_SOC_CODEC_VOIPCALLBTOUTDAI_NAME "mt-soc-codec-voipcall-btout-dai"
++#define MT_SOC_CODEC_VOIPCALLBTINDAI_NAME "mt-soc-codec-voipcall-btin-dai"
++#define MT_SOC_CODEC_TDMRX_DAI_NAME "mt-soc-tdmrx-dai-codec"
++#define MT_SOC_CODEC_HP_IMPEDANCE_NAME "mt-soc-codec-hp-impedance-dai"
++#define MT_SOC_CODEC_OFFLOAD_NAME "mt-soc-codec-offload-dai"
++#define MT_SOC_CODEC_ANC_NAME "mt-soc-codec-anc-dai"
++
++#define MT_SOC_CODEC_FMI2S2TXDAI_NAME "mt-soc-codec-fmi2s2tx-dai"
++#define MT_SOC_CODEC_FMI2S2RXDAI_NAME "mt-soc-codec-fmi2s2rx-dai"
++#define MT_SOC_CODEC_ULDLLOOPBACK_NAME "mt-soc-codec-uldlloopback-dai"
++#define MT_SOC_ROUTING_DAI_NAME "Routing-Control"
++#define MT_SOC_CODEC_STUB_NAME "mt-soc-codec-stub"
++#define MT_SOC_CODEC_NAME "mt-soc-codec"
++#define MT_SOC_CODEC_DUMMY_NAME "mt-soc-dummy-codec"
++#define MT_SOC_CODEC_DUMMY_DAI_NAME "mt-soc-dummy-dai-codec"
++#define MT_SOC_CODEC_HDMI_DUMMY_DAI_NAME "mt-soc-hdmi-dummy-dai-codec"
++#define MT_SOC_CODEC_I2S0_DUMMY_DAI_NAME "mt-soc-i2s0-dummy-dai-codec"
++#define MT_SOC_CODEC_MRGRX_DUMMY_DAI_NAME "mt-soc-mrgrx-dummy-dai-codec"
++#define MT_SOC_CODEC_MRGRX_DAI_NAME "mt-soc-mrgrx-dai-codec"
++#define MT_SOC_CODEC_FMMRGTXDAI_DUMMY_DAI_NAME "mt-soc-fmmrg2tx-dummy-dai-codec"
++#define MT_SOC_CODEC_FM_I2S_DUMMY_DAI_NAME "mt-soc-fm-i2s-dummy-dai-codec"
++#define MT_SOC_CODEC_FM_I2S_DAI_NAME "mt-soc-fm-i2s-dai-codec"
++#define MT_SOC_CODEC_BTCVSD_RX_DAI_NAME "mt-soc-codec-btcvsd-rx-dai"
++#define MT_SOC_CODEC_BTCVSD_TX_DAI_NAME "mt-soc-codec-btcvsd-tx-dai"
++#define MT_SOC_CODEC_BTCVSD_DAI_NAME "mt-soc-codec-btcvsd-dai"
++#define MT_SOC_CODEC_MOD_DAI_NAME "mt-soc-mod-dai-codec"
++
++/* stream name */
++#define MT_SOC_DL1_STREAM_NAME "MultiMedia1_PLayback"
++#define MT_SOC_SPEAKER_STREAM_NAME "Speaker_PLayback"
++#define MT_SOC_HEADPHONE_STREAM_NAME "Headphone_PLayback"
++#define MT_SOC_DEEP_BUFFER_DL_STREAM_NAME "Deep_Buffer_PLayback"
++#define MT_SOC_DL2_STREAM_NAME "MultiMedia2_PLayback"
++#define MT_SOC_DL3_STREAM_NAME "MultiMedia3_PLayback"
++#define MT_SOC_VOICE_MD1_STREAM_NAME "Voice_MD1_PLayback"
++#define MT_SOC_VOICE_MD2_STREAM_NAME "Voice_MD2_PLayback"
++#define MT_SOC_VOICE_MD1_BT_STREAM_NAME "Voice_MD1_BT_Playback"
++#define MT_SOC_VOICE_MD2_BT_STREAM_NAME "Voice_MD2_BT_Playback"
++#define MT_SOC_VOICE_ULTRA_STREAM_NAME "Voice_ULTRA_PLayback"
++#define MT_SOC_VOICE_USB_STREAM_NAME "Voice_USB_PLayback"
++#define MT_SOC_VOICE_USB_ECHOREF_STREAM_NAME "Voice_USB_EchoRef"
++#define MT_SOC_VOIP_BT_OUT_STREAM_NAME "VOIP_Call_BT_Playback"
++#define MT_SOC_VOIP_BT_IN_STREAM_NAME "VOIP_Call_BT_Capture"
++#define MT_SOC_HDMI_STREAM_NAME "HMDI_PLayback"
++#define MT_SOC_I2S0_STREAM_NAME "I2S0_PLayback"
++#define MT_SOC_I2SDL1_STREAM_NAME "I2S0DL1_PLayback"
++#define MT_SOC_DL1SCPSPK_STREAM_NAME "DL1SCPSPK_PLayback"
++#define MT_SOC_SCPVOICE_STREAM_NAME "SCPVoice_PLayback"
++#define MT_SOC_MRGRX_STREAM_NAME "MRGRX_PLayback"
++#define MT_SOC_MRGRX_CAPTURE_STREAM_NAME "MRGRX_CAPTURE"
++#define MT_SOC_FM_I2S2_STREAM_NAME "FM_I2S2_PLayback"
++#define MT_SOC_ULDLLOOPBACK_STREAM_NAME "ULDL_Loopback"
++#define MT_SOC_FM_I2S2_RECORD_STREAM_NAME "FM_I2S2_Record"
++#define MT_SOC_DL1_AWB_RECORD_STREAM_NAME "DL1_AWB_Record"
++#define MT_SOC_UL1_STREAM_NAME "MultiMedia1_Capture"
++#define MT_SOC_UL1DATA2_STREAM_NAME "MultiMediaData2_Capture"
++#define MT_SOC_I2S0AWB_STREAM_NAME "I2S0AWB_Capture"
++#define MT_SOC_I2S2ADC2_STREAM_NAME "I2S2ADC2_Capture"
++#define MT_SOC_AWB_STREAM_NAME "MultiMedia_awb_Capture"
++#define MT_SOC_DAI_STREAM_NAME "MultiMedia_dai_Capture"
++#define MT_SOC_MODDAI_STREAM_NAME "Voice_Dai_Capture"
++#define MT_SOC_ROUTING_STREAM_NAME "MultiMedia_Routing"
++#define MT_SOC_HP_IMPEDANCE_STREAM_NAME "HP_IMPEDANCE_Playback"
++#define MT_SOC_FM_MRGTX_STREAM_NAME "FM_MRGTX_Playback"
++#define MT_SOC_TDM_CAPTURE_STREAM_NAME "TDM_Debug_Record"
++#define MT_SOC_FM_I2S_PLAYBACK_STREAM_NAME "FM_I2S_Playback"
++#define MT_SOC_FM_I2S_CAPTURE_STREAM_NAME "FM_I2S_Capture"
++#define MT_SOC_BTCVSD_CAPTURE_STREAM_NAME "BTCVSD_Capture"
++#define MT_SOC_BTCVSD_PLAYBACK_STREAM_NAME "BTCVSD_Playback"
++#define MT_SOC_OFFLOAD_STREAM_NAME "Offload_Playback"
++#define MT_SOC_ANC_STREAM_NAME "ANC_Playback"
++#define MT_SOC_ANC_RECORD_STREAM_NAME "ANC_Record"
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-devtree-parser.h
+@@ -0,0 +1,138 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *   auddrv_devtree_parser.h
++ *
++ * Project:
++ * --------
++ *   devtree config parser
++ *
++ * Description:
++ * ------------
++ *  devtree config parser
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang
++ *
++ *-----------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************
++ */
++
++#ifndef _MT_AUDDRV_DEVTREE_PARSER_H_
++#define _MT_AUDDRV_DEVTREE_PARSER_H_
++
++#ifdef CONFIG_OF
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_irq.h>
++#endif
++
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/proc_fs.h>
++#include <linux/sched.h>
++#include <linux/semaphore.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <linux/vmalloc.h>
++#include <linux/wait.h>
++
++#define AUDDRV_I2S0_MCLKGPIO "i2s0mclk-gpio"
++#define AUDDRV_I2S0_CLKGPIO "i2s0clk-gpio"
++#define AUDDRV_I2S0_WSGPIO "i2s0ws-gpio"
++#define AUDDRV_I2S0_DATGPIO "i2s0dat-gpio"
++#define AUDDRV_I2S0_DAT1GPIO "i2s0dat1-gpio"
++#define AUDDRV_I2S0_DATAINGPIO "i2s0datain-gpio"
++
++#define AUDDRV_I2S1_MCLKGPIO "i2s1mclk-gpio"
++#define AUDDRV_I2S1_CLKGPIO "i2s1clk-gpio"
++#define AUDDRV_I2S1_WSGPIO "i2s1ws-gpio"
++#define AUDDRV_I2S1_DATGPIO "i2s1dat-gpio"
++#define AUDDRV_I2S1_DAT1GPIO "i2s1dat1-gpio"
++
++#define AUDDRV_I2S2_MCLKGPIO "i2s2mclk-gpio"
++#define AUDDRV_I2S2_CLKGPIO "i2s2clk-gpio"
++#define AUDDRV_I2S2_WSGPIO "i2s2ws-gpio"
++#define AUDDRV_I2S2_DATGPIO "i2s2dat-gpio"
++#define AUDDRV_I2S2_DAT1GPIO "i2s2dat1-gpio"
++
++#define AUDDRV_I2S3_MCLKGPIO "i2s3mclk-gpio"
++#define AUDDRV_I2S3_CLKGPIO "i2s3clk-gpio"
++#define AUDDRV_I2S3_WSGPIO "i2s3ws-gpio"
++#define AUDDRV_I2S3_DATGPIO "i2s3dat-gpio"
++#define AUDDRV_I2S3_DAT1GPIO "i2s3dat1-gpio"
++
++#define AUDDRV_AUD_CLKGPIO "audclk-gpio"
++#define AUDDRV_AUD_DATIGPIO "audmosi-gpio"
++#define AUDDRV_AUD_DATOGPIO "audmopi-gpio"
++
++enum Auddrv_I2S_NUMBER {
++	Auddrv_I2S0_Setting = 0,
++	Auddrv_I2S1_Setting,
++	Auddrv_I2S2_Setting,
++	Auddrv_I2S3_Setting,
++	Auddrv_I2S_Num,
++};
++
++enum Auddrv_I2S_Setting {
++	Auddrv_I2S_Setting_ws = 0,
++	Auddrv_I2S_Setting_bck,
++	Auddrv_I2S_Setting_D00,
++	Auddrv_I2S_Setting_D01,
++	Auddrv_I2S_Setting_I00,
++	Auddrv_I2S_Setting_I01,
++	Auddrv_I2S_Setting_Mclk,
++	Auddrv_I2S_Attribute_Num
++};
++
++enum Auddrv_CLK_Setting {
++	Auddrv_CLK_Mosi = 0,
++	Auddrv_DataIn1_Mosi,
++	Auddrv_DataOut1_Mosi,
++	Auddrv_Attribute_num,
++};
++
++struct auddrv_i2s_attribute {
++	unsigned int Gpio_Number;
++	unsigned int Gpio_Mode;
++};
++
++void Auddrv_Devtree_Init(void);
++void Auddrv_DevTree_I2S_Setting(const char *DevTreeName);
++void Auddrv_Devtree_Dump(void);
++struct auddrv_i2s_attribute *GetI2SSetting(uint32_t I2S_Number,
++					   uint32_t I2S_Setting);
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-gpio.h
+@@ -0,0 +1,82 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *   AudDrv_Gpio.h
++ *
++ * Project:
++ * --------
++ *   MT6797Audio Driver Gpio control
++ *
++ * Description:
++ * ------------
++ *   Audio gpio control
++ *
++ * Author:
++ * -------
++ *   George
++ *
++ *------------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************
++ */
++
++#ifndef _AUDDRV_GPIO_H_
++#define _AUDDRV_GPIO_H_
++
++/*****************************************************************************
++ *                     C O M P I L E R   F L A G S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                E X T E R N A L   R E F E R E N C E S
++ *****************************************************************************/
++#include "mtk-auddrv-def.h"
++#include "mtk-soc-digital-type.h"
++
++/*****************************************************************************
++ *                         D A T A   T Y P E S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                         M A C R O
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                 FUNCTION       D E F I N I T I O N
++ *****************************************************************************/
++#include <linux/gpio.h>
++
++void AudDrv_GPIO_probe(void *dev);
++
++int AudDrv_GPIO_Request(bool _enable, enum soc_aud_digital_block _usage);
++
++int AudDrv_GPIO_SMARTPA_Select(int mode);
++int AudDrv_GPIO_TDM_Select(int mode);
++
++int AudDrv_GPIO_I2S_Select(int bEnable);
++int AudDrv_GPIO_EXTAMP_Select(int bEnable, int mode);
++int AudDrv_GPIO_EXTAMP2_Select(int bEnable, int mode);
++int AudDrv_GPIO_RCVSPK_Select(int bEnable);
++int AudDrv_GPIO_HPDEPOP_Select(int bEnable);
++
++int audio_drv_gpio_aud_clk_pull(bool high);
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-kernel.h
+@@ -0,0 +1,248 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef AUDDRV_KERNEL_H
++#define AUDDRV_KERNEL_H
++
++#include "mtk-auddrv-common.h"
++#include "mtk-auddrv-def.h"
++
++/*****************************************************************************
++ *                     C O M P I L E R   F L A G S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                E X T E R N A L   R E F E R E N C E S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                         D A T A   T Y P E S
++ *****************************************************************************/
++
++#if 0
++struct afe_suspend_reg {
++	unsigned int Suspend_AUDIO_TOP_CON0;
++	unsigned int Suspend_AUDIO_TOP_CON3;
++	unsigned int Suspend_AFE_DAC_CON0;
++	unsigned int Suspend_AFE_DAC_CON1;
++	unsigned int Suspend_AFE_I2S_CON;
++
++	unsigned int Suspend_AFE_CONN0;
++	unsigned int Suspend_AFE_CONN1;
++	unsigned int Suspend_AFE_CONN2;
++	unsigned int Suspend_AFE_CONN3;
++	unsigned int Suspend_AFE_CONN4;
++
++	unsigned int Suspend_AFE_I2S_CON1;
++	unsigned int Suspend_AFE_I2S_CON2;
++
++	unsigned int Suspend_AFE_DL1_BASE;
++	unsigned int Suspend_AFE_DL1_CUR;
++	unsigned int Suspend_AFE_DL1_END;
++	unsigned int Suspend_AFE_DL2_BASE;
++	unsigned int Suspend_AFE_DL2_CUR;
++	unsigned int Suspend_AFE_DL2_END;
++	unsigned int Suspend_AFE_AWB_BASE;
++	unsigned int Suspend_AFE_AWB_CUR;
++	unsigned int Suspend_AFE_AWB_END;
++	unsigned int Suspend_AFE_VUL_BASE;
++	unsigned int Suspend_AFE_VUL_CUR;
++	unsigned int Suspend_AFE_VUL_END;
++
++	unsigned int Suspend_AFE_MEMIF_MON0;
++	unsigned int Suspend_AFE_MEMIF_MON1;
++	unsigned int Suspend_AFE_MEMIF_MON2;
++	unsigned int Suspend_AFE_MEMIF_MON4;
++
++	unsigned int Suspend_AFE_SIDETONE_DEBUG;
++	unsigned int Suspend_AFE_SIDETONE_MON;
++	unsigned int Suspend_AFE_SIDETONE_CON0;
++	unsigned int Suspend_AFE_SIDETONE_COEFF;
++	unsigned int Suspend_AFE_SIDETONE_CON1;
++	unsigned int Suspend_AFE_SIDETONE_GAIN;
++	unsigned int Suspend_AFE_SGEN_CON0;
++
++	unsigned int Suspend_AFE_TOP_CON0;
++
++	unsigned int Suspend_AFE_PREDIS_CON0;
++	unsigned int Suspend_AFE_PREDIS_CON1;
++
++	unsigned int Suspend_AFE_MOD_PCM_BASE;
++	unsigned int Suspend_AFE_MOD_PCM_END;
++	unsigned int Suspend_AFE_MOD_PCM_CUR;
++	unsigned int Suspend_AFE_IRQ_MCU_CON;
++	unsigned int Suspend_AFE_IRQ_MCU_STATUS;
++	unsigned int Suspend_AFE_IRQ_CLR;
++	unsigned int Suspend_AFE_IRQ_MCU_CNT1;
++	unsigned int Suspend_AFE_IRQ_MCU_CNT2;
++	unsigned int Suspend_AFE_IRQ_MCU_MON2;
++
++	unsigned int Suspend_AFE_IRQ1_MCN_CNT_MON;
++	unsigned int Suspend_AFE_IRQ2_MCN_CNT_MON;
++	unsigned int Suspend_AFE_IRQ1_MCU_EN_CNT_MON;
++
++	unsigned int Suspend_AFE_MEMIF_MINLEN;
++	unsigned int Suspend_AFE_MEMIF_MAXLEN;
++	unsigned int Suspend_AFE_MEMIF_PBUF_SIZE;
++
++	unsigned int Suspend_AFE_GAIN1_CON0;
++	unsigned int Suspend_AFE_GAIN1_CON1;
++	unsigned int Suspend_AFE_GAIN1_CON2;
++	unsigned int Suspend_AFE_GAIN1_CON3;
++	unsigned int Suspend_AFE_GAIN1_CUR;
++	unsigned int Suspend_AFE_GAIN2_CON0;
++	unsigned int Suspend_AFE_GAIN2_CON1;
++	unsigned int Suspend_AFE_GAIN2_CON2;
++	unsigned int Suspend_AFE_GAIN2_CON3;
++
++	unsigned int Suspend_DBG_MON0;
++	unsigned int Suspend_DBG_MON1;
++	unsigned int Suspend_DBG_MON2;
++	unsigned int Suspend_DBG_MON3;
++	unsigned int Suspend_DBG_MON4;
++	unsigned int Suspend_DBG_MON5;
++	unsigned int Suspend_DBG_MON6;
++	unsigned int Suspend_AFE_ASRC_CON0;
++	unsigned int Suspend_AFE_ASRC_CON1;
++	unsigned int Suspend_AFE_ASRC_CON2;
++	unsigned int Suspend_AFE_ASRC_CON3;
++	unsigned int Suspend_AFE_ASRC_CON4;
++	unsigned int Suspend_AFE_ASRC_CON6;
++	unsigned int Suspend_AFE_ASRC_CON7;
++	unsigned int Suspend_AFE_ASRC_CON8;
++	unsigned int Suspend_AFE_ASRC_CON9;
++	unsigned int Suspend_AFE_ASRC_CON10;
++	unsigned int Suspend_AFE_ASRC_CON11;
++	unsigned int Suspend_PCM_INTF_CON1;
++	unsigned int Suspend_PCM_INTF_CON2;
++	unsigned int Suspend_PCM2_INTF_CON;
++	unsigned int Suspend_FOC_ROM_SIG;
++
++	unsigned int Suspend_AUDIO_TOP_CON1;
++	unsigned int Suspend_AFE_I2S_CON3;
++	unsigned int Suspend_AFE_ADDA_DL_SRC2_CON0;
++	unsigned int Suspend_AFE_ADDA_DL_SRC2_CON1;
++	unsigned int Suspend_AFE_ADDA_UL_SRC_CON0;
++	unsigned int Suspend_AFE_ADDA_UL_SRC_CON1;
++	unsigned int Suspend_AFE_ADDA_TOP_CON0;
++	unsigned int Suspend_AFE_ADDA_UL_DL_CON0;
++	unsigned int Suspend_AFE_ADDA_SRC_DEBUG;
++	unsigned int Suspend_AFE_ADDA_SRC_DEBUG_MON0;
++	unsigned int Suspend_AFE_ADDA_SRC_DEBUG_MON1;
++	unsigned int Suspend_AFE_ADDA_NEWIF_CFG0;
++	unsigned int Suspend_AFE_ADDA_NEWIF_CFG1;
++	unsigned int Suspend_AFE_ASRC_CON13;
++	unsigned int Suspend_AFE_ASRC_CON14;
++	unsigned int Suspend_AFE_ASRC_CON15;
++	unsigned int Suspend_AFE_ASRC_CON16;
++	unsigned int Suspend_AFE_ASRC_CON17;
++	unsigned int Suspend_AFE_ASRC_CON18;
++	unsigned int Suspend_AFE_ASRC_CON19;
++	unsigned int Suspend_AFE_ASRC_CON20;
++	unsigned int Suspend_AFE_ASRC_CON21;
++};
++
++struct ana_suspend_reg {
++	unsigned short Suspend_Ana_ABB_AFE_CON0;
++	unsigned short Suspend_Ana_ABB_AFE_CON1;
++	unsigned short Suspend_Ana_ABB_AFE_CON2;
++	unsigned short Suspend_Ana_ABB_AFE_CON3;
++	unsigned short Suspend_Ana_ABB_AFE_CON4;
++	unsigned short Suspend_Ana_ABB_AFE_CON5;
++	unsigned short Suspend_Ana_ABB_AFE_CON6;
++	unsigned short Suspend_Ana_ABB_AFE_CON7;
++	unsigned short Suspend_Ana_ABB_AFE_CON8;
++	unsigned short Suspend_Ana_ABB_AFE_CON9;
++	unsigned short Suspend_Ana_ABB_AFE_CON10;
++	unsigned short Suspend_Ana_ABB_AFE_CON11;
++	unsigned short Suspend_Ana_ABB_AFE_UP8X_FIFO_CFG0;
++	unsigned short Suspend_Ana_ABB_AFE_PMIC_NEWIF_CFG0;
++	unsigned short Suspend_Ana_ABB_AFE_PMIC_NEWIF_CFG1;
++	unsigned short Suspend_Ana_ABB_AFE_PMIC_NEWIF_CFG2;
++	unsigned short Suspend_Ana_ABB_AFE_PMIC_NEWIF_CFG3;
++	unsigned short Suspend_Ana_ABB_AFE_TOP_CON0;
++	unsigned short Suspend_Ana_ABB_AFE_MON_DEBUG0;
++
++	unsigned short Suspend_Ana_SPK_CON0;
++	unsigned short Suspend_Ana_SPK_CON1;
++	unsigned short Suspend_Ana_SPK_CON2;
++	unsigned short Suspend_Ana_SPK_CON6;
++	unsigned short Suspend_Ana_SPK_CON7;
++	unsigned short Suspend_Ana_SPK_CON8;
++	unsigned short Suspend_Ana_SPK_CON9;
++	unsigned short Suspend_Ana_SPK_CON10;
++	unsigned short Suspend_Ana_SPK_CON11;
++	unsigned short Suspend_Ana_SPK_CON12;
++	unsigned short Suspend_Ana_TOP_CKPDN0;
++	unsigned short Suspend_Ana_TOP_CKPDN0_SET;
++	unsigned short Suspend_Ana_TOP_CKPDN0_CLR;
++	unsigned short Suspend_Ana_TOP_CKPDN1;
++	unsigned short Suspend_Ana_TOP_CKPDN1_SET;
++	unsigned short Suspend_Ana_TOP_CKPDN1_CLR;
++	unsigned short Suspend_Ana_TOP_CKPDN2;
++	unsigned short Suspend_Ana_TOP_CKPDN2_SET;
++	unsigned short Suspend_Ana_TOP_CKPDN2_CLR;
++	unsigned short Suspend_Ana_TOP_RST_CON;
++	unsigned short Suspend_Ana_TOP_RST_CON_SET;
++	unsigned short Suspend_Ana_TOP_RST_CON_CLR;
++	unsigned short Suspend_Ana_TOP_CKCON0;
++	unsigned short Suspend_Ana_TOP_CKCON0_SET;
++	unsigned short Suspend_Ana_TOP_CKCON0_CLR;
++	unsigned short Suspend_Ana_TOP_CKCON1;
++	unsigned short Suspend_Ana_TOP_CKCON1_SET;
++	unsigned short Suspend_Ana_TOP_CKCON1_CLR;
++	unsigned short Suspend_Ana_TOP_CKTST0;
++	unsigned short Suspend_Ana_TOP_CKTST1;
++	unsigned short Suspend_Ana_TOP_CKTST2;
++
++	unsigned short Suspend_Ana_AUDTOP_CON0;
++	unsigned short Suspend_Ana_AUDTOP_CON1;
++	unsigned short Suspend_Ana_AUDTOP_CON2;
++	unsigned short Suspend_Ana_AUDTOP_CON3;
++	unsigned short Suspend_Ana_AUDTOP_CON4;
++	unsigned short Suspend_Ana_AUDTOP_CON5;
++	unsigned short Suspend_Ana_AUDTOP_CON6;
++	unsigned short Suspend_Ana_AUDTOP_CON7;
++	unsigned short Suspend_Ana_AUDTOP_CON8;
++	unsigned short Suspend_Ana_AUDTOP_CON9;
++};
++
++enum memif_buffer_type {
++	MEM_DL1,
++	MEM_DL2,
++	MEM_VUL,
++	MEM_DAI,
++	MEM_AWB,
++	MEM_MOD_DAI,
++	NUM_OF_MEM_INTERFACE
++};
++
++/* TODO: KC: not used */
++enum {
++	CLOCK_AUD_AFE = 0,
++	CLOCK_AUD_I2S,
++	CLOCK_AUD_ADC,
++	CLOCK_AUD_DAC,
++	CLOCK_AUD_LINEIN,
++	CLOCK_AUD_HDMI,
++	CLOCK_AUD_26M,
++	CLOCK_TYPE_MAX
++};
++
++#endif
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-auddrv-type-def.h
+@@ -0,0 +1,45 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/******************************************************************************
++ *
++ *
++ * Filename:
++ * ---------
++ *   AudDrv_Common.h
++ *
++ * Project:
++ * --------
++ *   MT6797 FPGA LDVT Audio Driver
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang (MTK02308)
++ *
++ *---------------------------------------------------------------------------
++ *
++ *****************************************************************************
++ */
++
++#ifndef AUDIO_TYPE_DEF_H
++#define AUDIO_TYPE_DEF_H
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-soc-afe-connection.h
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *  mt_sco_afe_connection.c
++ *
++ * Project:
++ * --------
++ *   MT6797  Audio Driver Kernel Function
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ * Chipeng Chang
++ *
++ *------------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************
++ */
++#ifndef _MT_SOC_AFE_CONNECTION_H_
++#define _MT_SOC_AFE_CONNECTION_H_
++
++#include "mtk-auddrv-afe.h"
++#include "mtk-auddrv-ana.h"
++#include "mtk-auddrv-clk.h"
++#include "mtk-auddrv-common.h"
++#include "mtk-auddrv-def.h"
++
++/*****************************************************************************
++ *                E X T E R N A L   R E F E R E N C E
++ *****************************************************************************/
++bool SetConnectionState(unsigned int ConnectionState, unsigned int Input,
++			unsigned int Output);
++bool SetIntfConnectionFormat(unsigned int ConnectionFormat,
++			     unsigned int Aud_block);
++bool SetIntfConnectionState(unsigned int ConnectionState,
++			    unsigned int Aud_block_In,
++			    unsigned int Aud_block_Out);
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-soc-afe-control.h
+@@ -0,0 +1,396 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *  mt_sco_afe_control.h
++ *
++ * Project:
++ * --------
++ *   MT6583  Audio Driver Kernel Function
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ * Chipeng Chang
++ *
++ *------------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************
++ */
++
++/*****************************************************************************
++ *                     C O M P I L E R   F L A G S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                E X T E R N A L   R E F E R E N C E S
++ *****************************************************************************/
++
++#ifndef _AUDIO_AFE_CONTROL_H
++#define _AUDIO_AFE_CONTROL_H
++
++#include "mtk-auddrv-afe.h"
++#include "mtk-auddrv-clk.h"
++#include "mtk-auddrv-common.h"
++#include "mtk-auddrv-def.h"
++
++#include <sound/memalloc.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++
++#define GIC_PRIVATE_SIGNALS (32)
++#define AUDDRV_DL1_MAX_BUFFER_LENGTH (0x6000)
++#define MT6735_AFE_MCU_IRQ_LINE (GIC_PRIVATE_SIGNALS + 144)
++#define MASK_ALL (0xFFFFFFFF)
++#define AFE_MASK_ALL (0xffffffff)
++
++int InitAfeControl(struct device *pdev);
++bool ResetAfeControl(void);
++bool Register_Aud_Irq(void *dev, unsigned int afe_irq_number);
++
++bool SetConnectionFormat(unsigned int ConnectionFormat, unsigned int Aud_block);
++bool SetConnection(unsigned int ConnectionState, unsigned int Input,
++		   unsigned int Output);
++bool SetIntfConnection(unsigned int ConnectionState, unsigned int Aud_block_In,
++		       unsigned int Aud_block_Out);
++bool SetMemoryPathEnable(unsigned int Aud_block, bool bEnable);
++bool GetMemoryPathEnable(unsigned int Aud_block);
++bool SetI2SDacEnable(bool bEnable);
++bool GetI2SDacEnable(void);
++void EnableAfe(bool bEnable);
++bool set_chip_afe_enable(bool enable);
++
++bool Set2ndI2SOutAttribute(uint32_t sampleRate);
++bool Set2ndI2SOut(struct audio_digital_i2s *DigtalI2S);
++bool Set2ndI2SOutEnable(bool benable);
++bool set_adc_in(unsigned int rate);
++bool set_adc2_in(unsigned int rate);
++bool setDmicPath(bool _enable);
++
++void set_ul_src_enable(bool enable);
++void set_ul2_src_enable(bool enable);
++void SetDLSrcEnable(bool bEnable);
++void SetADDAEnable(bool bEnable);
++bool set_chip_adda_enable(bool bEnable);
++bool set_chip_ul_src_enable(bool enable);
++bool set_chip_ul2_src_enable(bool enable);
++bool set_chip_dl_src_enable(bool enable);
++bool set_chip_proximity_src_enable(bool enable);
++
++bool SetExtI2SAdcIn(struct audio_digital_i2s *DigtalI2S);
++bool SetExtI2SAdcInEnable(bool bEnable);
++
++bool Set2ndI2SAdcIn(struct audio_digital_i2s *DigtalI2S);
++
++int setConnsysI2SIn(struct audio_digital_i2s *DigtalI2S);
++int setConnsysI2SInEnable(bool enable);
++int setConnsysI2SAsrc(bool bIsUseASRC, unsigned int dToSampleRate);
++int setConnsysI2SEnable(bool enable);
++
++bool GetMrgI2SEnable(void);
++bool SetMrgI2SEnable(bool bEnable, unsigned int sampleRate);
++bool SetDaiBt(struct audio_digital_dai_bt *mAudioDaiBt);
++bool SetDaiBtEnable(bool bEanble);
++bool set_chip_dai_bt_enable(bool enable, struct audio_digital_dai_bt *dai_bt,
++			    struct audio_mrg_if *mrg);
++
++bool set_adc_enable(bool enable);
++bool set_adc2_enable(bool enable);
++bool Set2ndI2SAdcEnable(bool bEnable);
++bool SetI2SDacOut(unsigned int SampleRate, bool Lowgitter, bool I2SWLen);
++bool Set2ndI2SEnable(bool bEnable);
++bool set_i2s_dac_out_source(unsigned int aud_block);
++
++int get_dai_rate(enum soc_aud_digital_block digitalBlock);
++
++bool SetHwDigitalGainMode(enum soc_aud_digital_block AudBlock,
++			  unsigned int SampleRate,
++			  unsigned int SamplePerStep);
++bool SetHwDigitalGainEnable(enum soc_aud_digital_block AudBlock, bool Enable);
++bool SetHwDigitalGain(enum soc_aud_digital_block AudBlock, unsigned int Gain);
++bool set_chip_hw_digital_gain_mode(enum soc_aud_digital_block aud_block,
++				   unsigned int sample_rate,
++				   unsigned int sample_per_step);
++bool set_chip_hw_digital_gain_enable(enum soc_aud_digital_block aud_block,
++				     bool enable);
++bool set_chip_hw_digital_gain(enum soc_aud_digital_block aud_block,
++			      unsigned int gain);
++
++bool EnableSineGen(unsigned int connection, bool direction, bool Enable);
++bool SetSineGenSampleRate(unsigned int SampleRate);
++bool SetSineGenAmplitude(unsigned int ampDivide);
++bool set_chip_sine_gen_sample_rate(unsigned int sample_rate);
++bool set_chip_sine_gen_amplitude(unsigned int amp_divide);
++
++bool SetModemPcmEnable(int modem_index, bool modem_pcm_on);
++bool SetModemPcmConfig(int modem_index,
++		       struct audio_digital_pcm p_modem_pcm_attribute);
++
++bool Set2ndI2SIn(struct audio_digital_i2s *mDigitalI2S);
++bool Set2ndI2SInConfig(unsigned int sampleRate, bool bIsSlaveMode);
++bool Set2ndI2SInEnable(bool bEnable);
++
++bool checkDllinkMEMIfStatus(void);
++bool checkUplinkMEMIfStatus(void);
++bool SetMemIfFetchFormatPerSample(unsigned int InterfaceType,
++				  unsigned int eFetchFormat);
++bool SetMemIfFormatReg(unsigned int InterfaceType, unsigned int eFetchFormat);
++bool SetoutputConnectionFormat(unsigned int ConnectionFormat,
++			       unsigned int Output);
++
++int set_memif_pbuf_size(int aud_blk, enum memif_pbuf_size pbuf_size);
++
++bool set_chip_adc_in(unsigned int rate);
++bool set_chip_adc2_in(unsigned int rate);
++bool setChipDmicPath(bool _enable, unsigned int sample_rate);
++
++void set_stf_gain(int gain);
++void set_stf_positive_gain_db(int gain_db);
++
++bool set_general_asrc_enable(enum audio_general_asrc_id id, bool enable);
++bool set_general_asrc_parameter(enum audio_general_asrc_id id,
++				unsigned int sample_rate_in,
++				unsigned int sample_rate_out);
++
++/* Sample Rate Transform */
++unsigned int SampleRateTransform(unsigned int sampleRate,
++				 enum soc_aud_digital_block audBlock);
++
++void EnableAPLLTunerbySampleRate(unsigned int SampleRate);
++void DisableAPLLTunerbySampleRate(unsigned int SampleRate);
++
++int AudDrv_Allocate_mem_Buffer(struct device *pDev,
++			       enum soc_aud_digital_block MemBlock,
++			       unsigned int Buffer_length);
++struct afe_mem_control_t *Get_Mem_ControlT(enum soc_aud_digital_block MemBlock);
++bool SetMemifSubStream(enum soc_aud_digital_block MemBlock,
++		       struct snd_pcm_substream *substream);
++bool RemoveMemifSubStream(enum soc_aud_digital_block MemBlock,
++			  struct snd_pcm_substream *substream);
++bool ClearMemBlock(enum soc_aud_digital_block MemBlock);
++
++/* interrupt handler */
++void Auddrv_Dl1_Spinlock_lock(void);
++void Auddrv_Dl1_Spinlock_unlock(void);
++void Auddrv_Dl2_Spinlock_lock(void);
++void Auddrv_Dl2_Spinlock_unlock(void);
++void Auddrv_Dl3_Spinlock_lock(void);
++void Auddrv_Dl3_Spinlock_unlock(void);
++
++int AudDrv_DSP_IRQ_handler(void *PrivateData);
++void Auddrv_DSP_DL1_Interrupt_Handler(void *PrivateData);
++void Auddrv_DL1_Interrupt_Handler(void);
++void Auddrv_DL2_Interrupt_Handler(void);
++void Auddrv_UL1_Interrupt_Handler(void);
++void Auddrv_AWB_Interrupt_Handler(void);
++void Auddrv_DAI_Interrupt_Handler(void);
++void Auddrv_HDMI_Interrupt_Handler(void);
++void Auddrv_UL2_Interrupt_Handler(void);
++void Auddrv_MOD_DAI_Interrupt_Handler(void);
++void Auddrv_DL1_Data2_Interrupt_Handler(enum soc_aud_digital_block mem_block);
++void Auddrv_VUL2_Interrupt_Handler(void);
++kal_uint32 Get_Mem_CopySizeByStream(enum soc_aud_digital_block MemBlock,
++				    struct snd_pcm_substream *substream);
++void Set_Mem_CopySizeByStream(enum soc_aud_digital_block MemBlock,
++			      struct snd_pcm_substream *substream,
++			      unsigned int size);
++
++struct snd_dma_buffer *Get_Mem_Buffer(enum soc_aud_digital_block MemBlock);
++int AudDrv_Allocate_DL1_Buffer(struct device *pDev, kal_uint32 Afe_Buf_Length,
++			       dma_addr_t dma_addr, unsigned char *dma_area);
++
++bool Restore_Audio_Register(void);
++
++void AfeControlMutexLock(void);
++void AfeControlMutexUnLock(void);
++
++/* Sram management  function */
++void AfeControlSramLock(void);
++void AfeControlSramUnLock(void);
++size_t GetCaptureSramSize(void);
++unsigned int GetSramState(void);
++void ClearSramState(unsigned int State);
++void SetSramState(unsigned int State);
++unsigned int GetPLaybackSramFullSize(void);
++unsigned int GetPLaybackSramPartial(void);
++unsigned int GetPLaybackDramSize(void);
++size_t GetCaptureDramSize(void);
++
++void SetExternalModemStatus(const bool bEnable);
++
++/* set VOW status for AFE GPIO control */
++void SetVOWStatus(bool bEnable);
++bool ConditionEnterSuspend(void);
++void SetFMEnableFlag(bool bEnable);
++void SetOffloadEnableFlag(bool bEnable);
++bool GetOffloadEnableFlag(void);
++
++unsigned int word_size_align(unsigned int in_size);
++
++void AudDrv_checkDLISRStatus(void);
++
++/* sram mamager */
++bool InitSramManager(struct device *pDev, unsigned int sramblocksize);
++bool CheckSramAvail(unsigned int mSramLength, unsigned int *mSramBlockidx,
++		    unsigned int *mSramBlocknum);
++int AllocateAudioSram(dma_addr_t *sram_phys_addr,
++		      unsigned char **msram_virt_addr, unsigned int mSramLength,
++		      void *user, snd_pcm_format_t format, bool force_normal);
++int freeAudioSram(void *user);
++
++enum audio_sram_mode get_prefer_sram_mode(void);
++int set_sram_mode(enum audio_sram_mode sram_mode);
++
++/* IRQ Manager */
++int init_irq_manager(void);
++int irq_add_user(const void *_user, enum Soc_Aud_IRQ_MCU_MODE _irq,
++		 unsigned int _rate, unsigned int _count);
++int irq_remove_user(const void *_user, enum Soc_Aud_IRQ_MCU_MODE _irq);
++int irq_update_user(const void *_user, enum Soc_Aud_IRQ_MCU_MODE _irq,
++		    unsigned int _rate, unsigned int _count);
++int irq_get_total_user(enum Soc_Aud_IRQ_MCU_MODE _irq);
++
++int irq_add_substream_user(struct snd_pcm_substream *substream,
++			   enum Soc_Aud_IRQ_MCU_MODE _irq, unsigned int _rate,
++			   unsigned int _count);
++int irq_remove_substream_user(struct snd_pcm_substream *substream,
++			      enum Soc_Aud_IRQ_MCU_MODE _irq);
++
++enum Soc_Aud_IRQ_MCU_MODE
++irq_request_number(enum soc_aud_digital_block mem_block);
++/* IRQ Register Control Table and Handler Function Table*/
++void RunIRQHandler(enum Soc_Aud_IRQ_MCU_MODE irqIndex);
++const struct Aud_IRQ_CTRL_REG *
++GetIRQCtrlReg(enum Soc_Aud_IRQ_MCU_MODE irqIndex);
++const struct Aud_RegBitsInfo *
++GetIRQPurposeReg(enum Soc_Aud_IRQ_PURPOSE sIrqPurpose);
++
++const unsigned int GetBufferCtrlReg(enum soc_aud_afe_io_block memif_type,
++				    enum aud_buffer_ctrl_info buffer_ctrl);
++
++bool SetHighAddr(enum soc_aud_digital_block MemBlock, bool usingdram,
++		 dma_addr_t addr);
++
++int memif_lpbk_enable(struct memif_lpbk *memif_lpbk);
++int memif_lpbk_disable(struct memif_lpbk *memif_lbpk);
++
++/* GetEnableAudioBlockRegOffset */
++enum MEM_BLOCK_ENABLE_REG_INDEX {
++	MEM_EN_REG_IDX_AUDIO_BLOCK = 0,
++	MEM_EN_REG_IDX_REG,
++	MEM_EN_REG_IDX_OFFSET,
++	MEM_EN_REG_IDX_NUM
++};
++unsigned int GetEnableAudioBlockRegOffset(unsigned int Aud_block);
++unsigned int GetEnableAudioBlockRegAddr(unsigned int Aud_block);
++
++/* FM AP Dependent */
++bool SetFmI2sConnection(unsigned int ConnectionState);
++bool SetFmAwbConnection(unsigned int ConnectionState);
++int SetFmI2sInEnable(bool enable);
++int SetFmI2sIn(struct audio_digital_i2s *mDigitalI2S);
++bool GetFmI2sInPathEnable(void);
++bool SetFmI2sInPathEnable(bool bEnable);
++int SetFmI2sAsrcEnable(bool bEnable);
++int SetFmI2sAsrcConfig(bool bIsUseASRC, unsigned int dToSampleRate);
++
++/* ANC AP Dependent */
++bool SetAncRecordReg(unsigned int value, unsigned int mask);
++
++/* irq from other module */
++bool is_irq_from_ext_module(void);
++int start_ext_sync_signal(void);
++int stop_ext_sync_signal(void);
++int ext_sync_signal(void);
++void ext_sync_signal_lock(void);
++void ext_sync_signal_unlock(void);
++
++/* api for other modules to allocate audio sram */
++int mtk_audio_request_sram(dma_addr_t *phys_addr, unsigned char **virt_addr,
++			   unsigned int length, void *user);
++void mtk_audio_free_sram(void *user);
++
++struct mtk_mem_blk_ops {
++	int (*set_chip_memif_addr)(int mem_blk, dma_addr_t addr, size_t size);
++};
++
++struct mtk_afe_platform_ops {
++	bool (*set_sinegen)(unsigned int connection, bool direction,
++			    bool Enable);
++	void (*init_platform)(void);
++	bool (*set_smartpa_i2s)(int sidegen_control, int hdoutput_control,
++				int extcodec_echoref_control,
++				int mtk_soc_always_hd);
++	bool (*set_smartpa_echo_ref)(int sample_rate,
++				     int extcodec_echoref_control, int enable);
++	bool (*set_dpd_module)(bool enable);
++	bool (*handle_suspend)(bool suspend);
++	bool (*set_general_asrc_enable)(enum audio_general_asrc_id id,
++					bool enable);
++	bool (*set_general_asrc_parameter)(enum audio_general_asrc_id id,
++					   unsigned int sample_rate_in,
++					   unsigned int sample_rate_out);
++};
++
++void set_mem_blk_ops(struct mtk_mem_blk_ops *ops);
++
++/* sould return current frame index  with memblock*/
++snd_pcm_uframes_t get_mem_frame_index(struct snd_pcm_substream *substream,
++				      struct afe_mem_control_t *afe_mem_control,
++				      enum soc_aud_digital_block mem_block);
++void mem_blk_spinlock(enum soc_aud_digital_block mem_blk);
++void mem_blk_spinunlock(enum soc_aud_digital_block mem_blk);
++int mtk_memblk_copy(struct snd_pcm_substream *substream, int channel,
++		    unsigned long pos, void __user *dst,
++		    unsigned long count,
++		    struct afe_mem_control_t *pMemControl,
++		    enum soc_aud_digital_block mem_blk);
++
++int set_memif_addr(int mem_blk, dma_addr_t addr, size_t size);
++int set_mem_block(struct snd_pcm_substream *substream,
++		  struct snd_pcm_hw_params *hw_params,
++		  struct afe_mem_control_t *pMemControl,
++		  enum soc_aud_digital_block mem_blk);
++void init_afe_ops(void);
++void set_afe_platform_ops(struct mtk_afe_platform_ops *ops);
++struct mtk_afe_platform_ops *get_afe_platform_ops(void);
++
++/* for vcore dvfs */
++int vcore_dvfs(bool *enable, bool reset);
++void set_screen_state(bool state);
++
++/* low latency debug */
++int get_LowLatencyDebug(void);
++void set_LowLatencyDebug(unsigned int bFlag);
++
++/* For handling suspend */
++bool handle_suspend(bool suspend);
++
++int get_usage_digital_block(enum audio_usage_id id);
++int get_usage_digital_block_io(enum audio_usage_id id);
++int mtk_pcm_mmap(struct snd_pcm_substream *substream,
++		 struct vm_area_struct *vma);
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-soc-digital-type.h
+@@ -0,0 +1,1181 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *  mt-soc-digital-type.h
++ *
++ * Project:
++ * --------
++ *   MT6583  Audio Driver Kernel Function
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ * Chipeng Chang
++ *
++ *------------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************
++ */
++
++#ifndef _AUDIO_DIGITAL_TYPE_H
++#define _AUDIO_DIGITAL_TYPE_H
++
++#include <linux/list.h>
++
++/*****************************************************************************
++ *                ENUM DEFINITION
++ *****************************************************************************/
++
++enum soc_aud_digital_block {
++	/* memmory interfrace */
++	Soc_Aud_Digital_Block_MEM_DL1 = 0,
++	Soc_Aud_Digital_Block_MEM_DL1_DATA2,
++	Soc_Aud_Digital_Block_MEM_DL2,
++	Soc_Aud_Digital_Block_MEM_VUL,
++	Soc_Aud_Digital_Block_MEM_VUL2,
++	Soc_Aud_Digital_Block_MEM_DAI,
++	Soc_Aud_Digital_Block_MEM_DL3,
++	Soc_Aud_Digital_Block_MEM_AWB,
++	Soc_Aud_Digital_Block_MEM_MOD_DAI,
++	/* currently no use */
++	Soc_Aud_Digital_Block_MEM_VUL_DATA2,
++	Soc_Aud_Digital_Block_MEM_DAI2,
++	Soc_Aud_Digital_Block_MEM_AWB2,
++	Soc_Aud_Digital_Block_MEM_I2S, /* this is not actually a mem if... */
++	Soc_Aud_Digital_Block_MEM_HDMI,
++	/* ADDA */
++	Soc_Aud_Digital_Block_ADDA_DL,
++	Soc_Aud_Digital_Block_ADDA_DL2,
++	Soc_Aud_Digital_Block_ADDA_UL,
++	Soc_Aud_Digital_Block_ADDA_UL2,
++	Soc_Aud_Digital_Block_ADDA_VOW,
++	Soc_Aud_Digital_Block_ADDA_ANC,
++	Soc_Aud_Digital_Block_ADDA_ALL,
++	/* connection to int main modem */
++	Soc_Aud_Digital_Block_MODEM_PCM_1_O,
++	/* connection to extrt/int modem */
++	Soc_Aud_Digital_Block_MODEM_PCM_2_O,
++	/* 1st I2S for DAC and ADC */
++	Soc_Aud_Digital_Block_I2S_OUT_DAC,
++	Soc_Aud_Digital_Block_I2S_OUT_DAC_2, /* 4 channel */
++	Soc_Aud_Digital_Block_I2S_IN_ADC,
++	Soc_Aud_Digital_Block_I2S_IN_ADC_2, /* 4 channel */
++	/*  I2S2 input    */
++	Soc_Aud_Digital_Block_I2S_IN,
++	/* 2nd I2S */
++	Soc_Aud_Digital_Block_I2S_OUT_2,
++	Soc_Aud_Digital_Block_I2S_IN_2,
++	/* CONNSYS I2S */
++	Soc_Aud_Digital_Block_I2S_IN_CONNSYS,
++	/* HW gain contorl */
++	Soc_Aud_Digital_Block_HW_GAIN1,
++	Soc_Aud_Digital_Block_HW_GAIN2,
++	/* megrge interface */
++	Soc_Aud_Digital_Block_MRG_I2S_OUT,
++	Soc_Aud_Digital_Block_MRG_I2S_IN,
++	Soc_Aud_Digital_Block_DAI_BT,
++	Soc_Aud_Digital_Block_NUM_OF_DIGITAL_BLOCK,
++	Soc_Aud_Digital_Block_NUM_OF_MEM_INTERFACE =
++		Soc_Aud_Digital_Block_MEM_HDMI + 1
++};
++
++enum soc_aud_afe_io_block {
++	/* memory interfrace */
++	Soc_Aud_AFE_IO_Block_MEM_DL1 = 0,
++	Soc_Aud_AFE_IO_Block_MEM_DL1_CH1,
++	Soc_Aud_AFE_IO_Block_MEM_DL1_DATA2,
++	Soc_Aud_AFE_IO_Block_MEM_DL2,
++	Soc_Aud_AFE_IO_Block_MEM_VUL,
++	Soc_Aud_AFE_IO_Block_MEM_DAI,
++	Soc_Aud_AFE_IO_Block_MEM_DL3,
++	Soc_Aud_AFE_IO_Block_MEM_DL3_CH1,
++	Soc_Aud_AFE_IO_Block_MEM_AWB,
++	Soc_Aud_AFE_IO_Block_MEM_AWB_CH1,
++	Soc_Aud_AFE_IO_Block_MEM_MOD_DAI,
++	Soc_Aud_AFE_IO_Block_MEM_VUL_DATA2,
++	Soc_Aud_AFE_IO_Block_MEM_VUL2,
++	Soc_Aud_AFE_IO_Block_MEM_DAI2,
++	Soc_Aud_AFE_IO_Block_MEM_AWB2,
++	/* ADDA */
++	Soc_Aud_AFE_IO_Block_ADDA_UL,
++	Soc_Aud_AFE_IO_Block_ADDA_UL2,
++	Soc_Aud_AFE_IO_Block_ADDA_UL_LCH,
++	Soc_Aud_AFE_IO_Block_ADDA_UL_RCH,
++	/* I2S */
++	Soc_Aud_AFE_IO_Block_I2S0,
++	Soc_Aud_AFE_IO_Block_I2S0_CH2,
++	Soc_Aud_AFE_IO_Block_I2S1_DAC,
++	Soc_Aud_AFE_IO_Block_I2S1_DAC_2,
++	Soc_Aud_AFE_IO_Block_I2S2,
++	Soc_Aud_AFE_IO_Block_I2S2_2,
++	Soc_Aud_AFE_IO_Block_I2S3,
++	Soc_Aud_AFE_IO_Block_I2S_CONNSYS,
++	/* HW gain contorl */
++	Soc_Aud_AFE_IO_Block_HW_GAIN1_OUT,
++	Soc_Aud_AFE_IO_Block_HW_GAIN1_IN,
++	Soc_Aud_AFE_IO_Block_HW_GAIN2_OUT,
++	Soc_Aud_AFE_IO_Block_HW_GAIN2_IN,
++	/* megrge interface */
++	Soc_Aud_AFE_IO_Block_MRG_I2S_OUT,
++	Soc_Aud_AFE_IO_Block_MRG_I2S_IN,
++	/* DAI/BT */
++	Soc_Aud_AFE_IO_Block_DAI_BT_OUT,
++	Soc_Aud_AFE_IO_Block_DAI_BT_IN,
++	/* HDMI */
++	Soc_Aud_AFE_IO_Block_HDMI_OUT,
++	Soc_Aud_AFE_IO_Block_HDMI_IN,
++	/* General SRC */
++	Soc_Aud_AFE_IO_Block_GENERAL_SRC_1_OUT,
++	Soc_Aud_AFE_IO_Block_GENERAL_SRC_1_IN,
++	Soc_Aud_AFE_IO_Block_GENERAL_SRC_2_OUT,
++	Soc_Aud_AFE_IO_Block_GENERAL_SRC_2_IN,
++	/* Proximity CIC */
++	Soc_Aud_AFE_IO_Block_PROXIMITY_CIC,
++	/* connection to int main modem */
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_1_O,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_1_I,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_1_I_CH1,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_1_I_CH2,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_1_O_CH3,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_1_O_CH4,
++	/* connection to extrt/int modem */
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_2_O, /* 2 channel */
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_2_I, /* 2 channel */
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_2_I_CH1,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_2_I_CH2,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_2_O_CH3,
++	Soc_Aud_AFE_IO_Block_MODEM_PCM_2_O_CH4,
++	/* num of IO block */
++	Soc_Aud_AFE_IO_Block_NUM_OF_IO_BLOCK
++};
++
++enum audio_usage_id {
++	AUDIO_USAGE_PCM_CAPTURE,
++	AUDIO_USAGE_SCP_SPK_IV_DATA,
++	AUDIO_USAGE_DEEPBUFFER_PLAYBACK,
++	AUDIO_USAGE_FM_CAPTURE,
++	AUDIO_USAGE_SMART_PA_IN,
++	AUDIO_USAGE_VOW_BARGE_IN,
++};
++
++enum audio_general_asrc_id {
++	AUDIO_GENERAL_ASRC_1,
++	AUDIO_GENERAL_ASRC_2,
++};
++
++enum soc_aud_memif_direction {
++	Soc_Aud_MemIF_Direction_DIRECTION_OUTPUT,
++	Soc_Aud_MemIF_Direction_DIRECTION_INPUT
++};
++
++enum soc_aud_interconnection_input {
++	Soc_Aud_InterConnectionInput_I00,
++	Soc_Aud_InterConnectionInput_I01,
++	Soc_Aud_InterConnectionInput_I02,
++	Soc_Aud_InterConnectionInput_I03,
++	Soc_Aud_InterConnectionInput_I04,
++	Soc_Aud_InterConnectionInput_I05,
++	Soc_Aud_InterConnectionInput_I06,
++	Soc_Aud_InterConnectionInput_I07,
++	Soc_Aud_InterConnectionInput_I08,
++	Soc_Aud_InterConnectionInput_I09,
++	Soc_Aud_InterConnectionInput_I10,
++	Soc_Aud_InterConnectionInput_I11,
++	Soc_Aud_InterConnectionInput_I12,
++	Soc_Aud_InterConnectionInput_I13,
++	Soc_Aud_InterConnectionInput_I14,
++	Soc_Aud_InterConnectionInput_I15,
++	Soc_Aud_InterConnectionInput_I16,
++	Soc_Aud_InterConnectionInput_I17,
++	Soc_Aud_InterConnectionInput_I18,
++	Soc_Aud_InterConnectionInput_I19,
++	Soc_Aud_InterConnectionInput_I20,
++	Soc_Aud_InterConnectionInput_I21,
++	Soc_Aud_InterConnectionInput_I22,
++	Soc_Aud_InterConnectionInput_I23,
++	Soc_Aud_InterConnectionInput_I24,
++	Soc_Aud_InterConnectionInput_I25,
++	Soc_Aud_InterConnectionInput_I26,
++	Soc_Aud_InterConnectionInput_I27,
++	Soc_Aud_InterConnectionInput_I28,
++	Soc_Aud_InterConnectionInput_I29,
++	Soc_Aud_InterConnectionInput_I30,
++	Soc_Aud_InterConnectionInput_I31,
++	Soc_Aud_InterConnectionInput_I32,
++	Soc_Aud_InterConnectionInput_I33,
++	Soc_Aud_InterConnectionInput_I34,
++	Soc_Aud_InterConnectionInput_I35,
++	Soc_Aud_InterConnectionInput_I36,
++	Soc_Aud_InterConnectionInput_I37,
++	Soc_Aud_InterConnectionInput_I38,
++	Soc_Aud_InterConnectionInput_I39,
++	Soc_Aud_InterConnectionInput_Num_Input
++};
++
++enum soc_aud_interconnection_output {
++	Soc_Aud_InterConnectionOutput_O00,
++	Soc_Aud_InterConnectionOutput_O01,
++	Soc_Aud_InterConnectionOutput_O02,
++	Soc_Aud_InterConnectionOutput_O03,
++	Soc_Aud_InterConnectionOutput_O04,
++	Soc_Aud_InterConnectionOutput_O05,
++	Soc_Aud_InterConnectionOutput_O06,
++	Soc_Aud_InterConnectionOutput_O07,
++	Soc_Aud_InterConnectionOutput_O08,
++	Soc_Aud_InterConnectionOutput_O09,
++	Soc_Aud_InterConnectionOutput_O10,
++	Soc_Aud_InterConnectionOutput_O11,
++	Soc_Aud_InterConnectionOutput_O12,
++	Soc_Aud_InterConnectionOutput_O13,
++	Soc_Aud_InterConnectionOutput_O14,
++	Soc_Aud_InterConnectionOutput_O15,
++	Soc_Aud_InterConnectionOutput_O16,
++	Soc_Aud_InterConnectionOutput_O17,
++	Soc_Aud_InterConnectionOutput_O18,
++	Soc_Aud_InterConnectionOutput_O19,
++	Soc_Aud_InterConnectionOutput_O20,
++	Soc_Aud_InterConnectionOutput_O21,
++	Soc_Aud_InterConnectionOutput_O22,
++	Soc_Aud_InterConnectionOutput_O23,
++	Soc_Aud_InterConnectionOutput_O24,
++	Soc_Aud_InterConnectionOutput_O25,
++	Soc_Aud_InterConnectionOutput_O26,
++	Soc_Aud_InterConnectionOutput_O27,
++	Soc_Aud_InterConnectionOutput_O28,
++	Soc_Aud_InterConnectionOutput_O29,
++	Soc_Aud_InterConnectionOutput_O30,
++	Soc_Aud_InterConnectionOutput_O31,
++	Soc_Aud_InterConnectionOutput_O32,
++	Soc_Aud_InterConnectionOutput_O33,
++	Soc_Aud_InterConnectionOutput_O34,
++	Soc_Aud_InterConnectionOutput_O35,
++	Soc_Aud_InterConnectionOutput_O36,
++	Soc_Aud_InterConnectionOutput_O37,
++	Soc_Aud_InterConnectionOutput_O38,
++	Soc_Aud_InterConnectionOutput_O39,
++	Soc_Aud_InterConnectionOutput_O40,
++	Soc_Aud_InterConnectionOutput_O41,
++	Soc_Aud_InterConnectionOutput_O42,
++	Soc_Aud_InterConnectionOutput_O43,
++	Soc_Aud_InterConnectionOutput_Num_Output
++};
++
++#ifdef CONFIG_MTK_HDMI_TDM
++enum soc_aud_hdmi_interconnection_input {
++	Soc_Aud_Hdmi_InterConnectionInput_I30,
++	Soc_Aud_Hdmi_InterConnectionInput_I31,
++	Soc_Aud_Hdmi_InterConnectionInput_I32,
++	Soc_Aud_Hdmi_InterConnectionInput_I33,
++	Soc_Aud_Hdmi_InterConnectionInput_I34,
++	Soc_Aud_Hdmi_InterConnectionInput_I35,
++	Soc_Aud_Hdmi_InterConnectionInput_I36,
++	Soc_Aud_Hdmi_InterConnectionInput_I37,
++};
++
++#if 0
++enum soc_aud_hdmi_interconnection_output {
++	Soc_Aud_InterConnectionOutput_O30,
++	Soc_Aud_InterConnectionOutput_O31,
++	Soc_Aud_InterConnectionOutput_O32,
++	Soc_Aud_InterConnectionOutput_O33,
++	Soc_Aud_InterConnectionOutput_O34,
++	Soc_Aud_InterConnectionOutput_O35,
++	Soc_Aud_InterConnectionOutput_O36,
++	Soc_Aud_InterConnectionOutput_O37,
++};
++#endif
++#endif
++
++enum soc_aud_interconnection_state {
++	Soc_Aud_InterCon_DisConnect = 0x0,
++	Soc_Aud_InterCon_Connection = 0x1,
++	Soc_Aud_InterCon_ConnectionShift = 0x2
++};
++
++enum stream_status {
++	STREAMSTATUS_STATE_FREE = -1, /* memory is not allocate */
++	STREAMSTATUS_STATE_STANDBY,   /* memory allocate and ready */
++	STREAMSTATUS_STATE_EXECUTING, /* stream is running */
++};
++
++enum Soc_Aud_TopClockType {
++	Soc_Aud_TopClockType_APB_CLOCK = 1,
++	Soc_Aud_TopClockType_APB_AFE_CLOCK = 2,
++	Soc_Aud_TopClockType_APB_I2S_INPUT_CLOCK = 6,
++	Soc_Aud_TopClockType_APB_AFE_CK_DIV_RRST = 16,
++	Soc_Aud_TopClockType_APB_PDN_APLL_TUNER = 19,
++	Soc_Aud_TopClockType_APB_PDN_HDMI_CK = 20,
++	Soc_Aud_TopClockType_APB_PDN_SPDIF_CK = 21
++};
++
++enum Soc_Aud_AFEClockType {
++	Soc_Aud_AFEClockType_AFE_ON = 0,
++	Soc_Aud_AFEClockType_DL1_ON = 1,
++	Soc_Aud_AFEClockType_DL2_ON = 2,
++	Soc_Aud_AFEClockType_VUL_ON = 3,
++	Soc_Aud_AFEClockType_DAI_ON = 4,
++	Soc_Aud_AFEClockType_I2S_ON = 5,
++	Soc_Aud_AFEClockType_AWB_ON = 6,
++	Soc_Aud_AFEClockType_MOD_PCM_ON = 7,
++	Soc_Aud_AFEClockType_DL1Data2 = 8,
++	Soc_Aud_AFEClockType_VULdata2 = 9,
++	Soc_Aud_AFEClockType_VUL2data = 10,
++};
++
++enum Soc_Aud_IRQ_MCU_MODE {
++	Soc_Aud_IRQ_MCU_MODE_IRQ0_MCU_MODE = 0,
++	Soc_Aud_IRQ_MCU_MODE_IRQ1_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ2_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ3_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ4_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ5_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ6_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ7_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ8_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ9_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ10_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ11_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ12_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ_ACC1_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_IRQ_ACC2_MCU_MODE,
++	Soc_Aud_IRQ_MCU_MODE_NUM
++};
++
++enum Soc_Aud_IRQ_PURPOSE {
++	Soc_Aud_IRQ_MCU = 0,
++	Soc_Aud_IRQ_MD32,
++	Soc_Aud_IRQ_MD32_H,
++	Soc_Aud_IRQ_DSP,
++	Soc_Aud_IRQ_CM4,
++	Soc_Aud_IRQ_PURPOSE_NUM
++};
++
++enum aud_buffer_ctrl_info {
++	aud_buffer_ctrl_base,
++	aud_buffer_ctrl_end,
++	aud_buffer_ctrl_cur,
++	aud_buffer_ctrl_num
++};
++
++struct Aud_RegBitsInfo {
++	unsigned int reg;
++	unsigned int sbit;
++	unsigned int mask;
++};
++
++struct Aud_IRQ_CTRL_REG {
++	struct Aud_RegBitsInfo on;
++	struct Aud_RegBitsInfo mode;
++	struct Aud_RegBitsInfo cnt;
++	struct Aud_RegBitsInfo clr;
++	struct Aud_RegBitsInfo missclr;
++	struct Aud_RegBitsInfo status;
++	struct Aud_RegBitsInfo en;
++	enum Soc_Aud_IRQ_PURPOSE irqPurpose;
++};
++
++enum Soc_Aud_SGEN_AMP_DIV {
++	Soc_Aud_SGEN_AMP_DIV_128 = 0,
++	Soc_Aud_SGEN_AMP_DIV_64 = 1,
++	Soc_Aud_SGEN_AMP_DIV_32 = 2,
++	Soc_Aud_SGEN_AMP_DIV_16 = 3,
++	Soc_Aud_SGEN_AMP_DIV_8 = 4,
++	Soc_Aud_SGEN_AMP_DIV_4 = 5,
++	Soc_Aud_SGEN_AMP_DIV_2 = 6,
++	Soc_Aud_SGEN_AMP_DIV_1 = 7
++};
++
++enum Soc_Aud_Hw_Digital_Gain {
++	Soc_Aud_Hw_Digital_Gain_HW_DIGITAL_GAIN1,
++	Soc_Aud_Hw_Digital_Gain_HW_DIGITAL_GAIN2
++};
++
++enum Soc_Aud_BCK_INV {
++	Soc_Aud_INV_BCK_NO_INVERSE = 0,
++	Soc_Aud_INV_BCK_INVESE = 1
++};
++
++enum Soc_Aud_I2S_IN_PAD_SEL {
++	Soc_Aud_I2S_IN_PAD_SEL_I2S_IN_FROM_CONNSYS = 0,
++	Soc_Aud_I2S_IN_PAD_SEL_I2S_IN_FROM_IO_MUX = 1
++};
++
++enum Soc_Aud_LR_SWAP {
++	Soc_Aud_LR_SWAP_NO_SWAP = 0,
++	Soc_Aud_LR_SWAP_LR_DATASWAP = 1
++};
++
++enum Soc_Aud_INV_LRCK {
++	Soc_Aud_INV_LRCK_NO_INVERSE = 0,
++	Soc_Aud_INV_LRCK_INVESE_LRCK = 1
++};
++
++enum Soc_Aud_I2S_FORMAT {
++	Soc_Aud_I2S_FORMAT_EIAJ = 0,
++	Soc_Aud_I2S_FORMAT_I2S = 1
++};
++
++enum Soc_Aud_I2S_SRC {
++	Soc_Aud_I2S_SRC_MASTER_MODE = 0,
++	Soc_Aud_I2S_SRC_SLAVE_MODE = 1
++};
++
++enum Soc_Aud_I2S_HD_EN {
++	Soc_Aud_NORMAL_CLOCK = 0,
++	Soc_Aud_LOW_JITTER_CLOCK = 1
++};
++
++enum Soc_Aud_I2S_WLEN {
++	Soc_Aud_I2S_WLEN_WLEN_16BITS = 0,
++	Soc_Aud_I2S_WLEN_WLEN_32BITS = 1
++};
++
++enum Soc_Aud_I2S_SAMPLERATE {
++	Soc_Aud_I2S_SAMPLERATE_I2S_8K = 0,
++	Soc_Aud_I2S_SAMPLERATE_I2S_11K = 1,
++	Soc_Aud_I2S_SAMPLERATE_I2S_12K = 2,
++	Soc_Aud_I2S_SAMPLERATE_I2S_16K = 4,
++	Soc_Aud_I2S_SAMPLERATE_I2S_22K = 5,
++	Soc_Aud_I2S_SAMPLERATE_I2S_24K = 6,
++	Soc_Aud_I2S_SAMPLERATE_I2S_130K = 7,
++	Soc_Aud_I2S_SAMPLERATE_I2S_32K = 8,
++	Soc_Aud_I2S_SAMPLERATE_I2S_44K = 9,
++	Soc_Aud_I2S_SAMPLERATE_I2S_48K = 10,
++	Soc_Aud_I2S_SAMPLERATE_I2S_88K = 11,
++	Soc_Aud_I2S_SAMPLERATE_I2S_96K = 12,
++	Soc_Aud_I2S_SAMPLERATE_I2S_174K = 13,
++	Soc_Aud_I2S_SAMPLERATE_I2S_192K = 14,
++	Soc_Aud_I2S_SAMPLERATE_I2S_260K = 15,
++	Soc_Aud_I2S_SAMPLERATE_I2S_NUM
++};
++
++enum Soc_Aud_I2S {
++	Soc_Aud_I2S0 = 0,
++	Soc_Aud_I2S1,
++	Soc_Aud_I2S2,
++	Soc_Aud_I2S3,
++	Soc_Aud_I2S4,
++	Soc_Aud_I2S5,
++	Soc_Aud_I2SConnSys
++};
++
++enum Soc_Aud_I2S_CLKDIV {
++	Soc_Aud_APLL1_DIV = 0,
++	Soc_Aud_APLL2_DIV,
++	Soc_Aud_I2S0_MCKDIV,
++	Soc_Aud_I2S1_MCKDIV,
++	Soc_Aud_I2S2_MCKDIV,
++	Soc_Aud_I2S3_MCKDIV,
++	Soc_Aud_I2S4_MCKDIV,
++	Soc_Aud_I2S4_BCKDIV,
++	Soc_Aud_I2S5_MCKDIV,
++	Soc_Aud_I2S_CLKDIV_NUMBER
++};
++
++enum Soc_Aud_APLL_SOURCE {
++	Soc_Aud_APLL_NOUSE = 0,
++	Soc_Aud_APLL1 = 1, /* 44.1K base */
++	Soc_Aud_APLL2 = 2, /* 48base */
++};
++
++struct audio_digital_i2s {
++	bool mLR_SWAP;
++	bool mI2S_SLAVE;
++	unsigned int mI2S_SAMPLERATE;
++	bool mINV_LRCK;
++	bool mI2S_FMT;
++	bool mI2S_WLEN;
++	bool mI2S_EN;
++	bool mI2S_HDEN;       /* TODO: KC: split from this struct */
++	bool mI2S_IN_PAD_SEL; /* TODO: KC: split from this sturct */
++
++	/* her for ADC usage , DAC will not use this */
++	/* TODO: KC: don't put here */
++	int mBuffer_Update_word;
++	bool mloopback;
++	bool mFpga_bit;
++	bool mFpga_bit_test;
++};
++
++enum Soc_Aud_TX_LCH_RPT {
++	Soc_Aud_TX_LCH_RPT_TX_LCH_NO_REPEAT = 0,
++	Soc_Aud_TX_LCH_RPT_TX_LCH_REPEAT = 1
++};
++
++enum Soc_Aud_VBT_16K_MODE {
++	Soc_Aud_VBT_16K_MODE_VBT_16K_MODE_DISABLE = 0,
++	Soc_Aud_VBT_16K_MODE_VBT_16K_MODE_ENABLE = 1
++};
++
++enum Soc_Aud_EXT_MODEM {
++	Soc_Aud_EXT_MODEM_MODEM_2_USE_INTERNAL_MODEM = 0,
++	Soc_Aud_EXT_MODEM_MODEM_2_USE_EXTERNAL_MODEM = 1
++};
++
++enum Soc_Aud_PCM_SYNC_TYPE {
++	Soc_Aud_PCM_SYNC_TYPE_BCK_CYCLE_SYNC = 0, /* bck sync length = 1 */
++	Soc_Aud_PCM_SYNC_TYPE_EXTEND_BCK_CYCLE_SYNC =
++		1 /* bck sync length = PCM_INTF_CON1[9:13] */
++};
++
++enum Soc_Aud_BT_MODE {
++	Soc_Aud_BT_MODE_DUAL_MIC_ON_TX = 0,
++	Soc_Aud_BT_MODE_SINGLE_MIC_ON_TX = 1
++};
++
++enum Soc_Aud_BYPASS_SRC {
++	Soc_Aud_BYPASS_SRC_SLAVE_USE_ASRC =
++		0, /* slave mode & external modem uses different crystal */
++	Soc_Aud_BYPASS_SRC_SLAVE_USE_ASYNC_FIFO =
++		1 /* slave mode & external modem uses the same crystal */
++};
++
++enum Soc_Aud_PCM_CLOCK_SOURCE {
++	Soc_Aud_PCM_CLOCK_SOURCE_MASTER_MODE = 0,
++	Soc_Aud_PCM_CLOCK_SOURCE_SALVE_MODE = 1
++};
++
++enum Soc_Aud_PCM_WLEN_LEN {
++	Soc_Aud_PCM_WLEN_LEN_PCM_16BIT = 0,
++	Soc_Aud_PCM_WLEN_LEN_PCM_32BIT = 1
++};
++
++enum Soc_Aud_PCM_MODE {
++	Soc_Aud_PCM_MODE_PCM_MODE_8K = 0,
++	Soc_Aud_PCM_MODE_PCM_MODE_16K = 1,
++	Soc_Aud_PCM_MODE_PCM_MODE_32K = 2,
++	Soc_Aud_PCM_MODE_PCM_MODE_48K = 3,
++};
++
++enum Soc_Aud_PCM_FMT {
++	Soc_Aud_PCM_FMT_PCM_I2S = 0,
++	Soc_Aud_PCM_FMT_PCM_EIAJ = 1,
++	Soc_Aud_PCM_FMT_PCM_MODE_A = 2,
++	Soc_Aud_PCM_FMT_PCM_MODE_B = 3
++};
++
++struct audio_digital_pcm {
++	unsigned int mBclkOutInv;
++	unsigned int mTxLchRepeatSel;
++	unsigned int mVbt16kModeSel;
++	unsigned int mExtModemSel;
++	unsigned char mExtendBckSyncLength;
++	unsigned int mExtendBckSyncTypeSel;
++	unsigned int mSingelMicSel;
++	unsigned int mAsyncFifoSel;
++	unsigned int mSlaveModeSel;
++	unsigned int mPcmWordLength;
++	unsigned int mPcmModeWidebandSel;
++	unsigned int mPcmFormat;
++	unsigned char mModemPcmOn;
++};
++
++enum Soc_Aud_BT_DAI_INPUT {
++	Soc_Aud_BT_DAI_INPUT_FROM_BT,
++	Soc_Aud_BT_DAI_INPUT_FROM_MGRIF
++};
++
++enum Soc_Aud_DATBT_MODE {
++	Soc_Aud_DATBT_MODE_Mode8K,
++	Soc_Aud_DATBT_MODE_Mode16K
++};
++
++enum Soc_Aud_DAI_DEL { Soc_Aud_DAI_DEL_HighWord, Soc_Aud_DAI_DEL_LowWord };
++
++enum Soc_Aud_BTSYNC { Soc_Aud_BTSYNC_Short_Sync, Soc_Aud_BTSYNC_Long_Sync };
++
++struct audio_digital_dai_bt {
++	bool mUSE_MRGIF_INPUT;
++	bool mDAI_BT_MODE;
++	bool mDAI_DEL;
++	int mBT_LEN;
++	bool mDATA_RDY;
++	bool mBT_SYNC;
++	bool mBT_ON;
++	bool mDAIBT_ON;
++};
++
++enum Soc_Aud_MRFIF_I2S_SAMPLERATE {
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_8K = 0,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_11K = 1,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_12K = 2,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_16K = 4,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_22K = 5,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_24K = 6,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_32K = 8,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_44K = 9,
++	Soc_Aud_MRFIF_I2S_SAMPLERATE_MRFIF_I2S_48K = 10
++};
++
++struct audio_mrg_if {
++	bool Mergeif_I2S_Enable;
++	bool Merge_cnt_Clear;
++	int Mrg_I2S_SampleRate;
++	int Mrg_Sync_Dly;
++	int Mrg_Clk_Edge_Dly;
++	int Mrg_Clk_Dly;
++	bool MrgIf_En;
++};
++
++enum Soc_Aud_DAI_MEMIF_SAMPLERATE {
++	Soc_Aud_DAI_MEMIF_SAMPLERATE_8K = 0,
++	Soc_Aud_DAI_MEMIF_SAMPLERATE_16K = 1,
++	Soc_Aud_DAI_MEMIF_SAMPLERATE_32K = 2
++};
++
++enum Soc_Aud_ADDA_DL_SAMPLERATE {
++	Soc_Aud_ADDA_DL_SAMPLERATE_8K = 0,
++	Soc_Aud_ADDA_DL_SAMPLERATE_11K = 1,
++	Soc_Aud_ADDA_DL_SAMPLERATE_12K = 2,
++	Soc_Aud_ADDA_DL_SAMPLERATE_16K = 3,
++	Soc_Aud_ADDA_DL_SAMPLERATE_22K = 4,
++	Soc_Aud_ADDA_DL_SAMPLERATE_24K = 5,
++	Soc_Aud_ADDA_DL_SAMPLERATE_32K = 6,
++	Soc_Aud_ADDA_DL_SAMPLERATE_44K = 7,
++	Soc_Aud_ADDA_DL_SAMPLERATE_48K = 8,
++	Soc_Aud_ADDA_DL_SAMPLERATE_96K = 9,
++	Soc_Aud_ADDA_DL_SAMPLERATE_192K = 10
++};
++
++enum Soc_Aud_ADDA_UL_SAMPLERATE {
++	Soc_Aud_ADDA_UL_SAMPLERATE_8K = 0,
++	Soc_Aud_ADDA_UL_SAMPLERATE_16K = 1,
++	Soc_Aud_ADDA_UL_SAMPLERATE_32K = 2,
++	Soc_Aud_ADDA_UL_SAMPLERATE_48K = 3,
++	Soc_Aud_ADDA_UL_SAMPLERATE_96K = 4,
++	Soc_Aud_ADDA_UL_SAMPLERATE_192K = 5,
++	Soc_Aud_ADDA_UL_SAMPLERATE_48K_HD = 6
++};
++
++enum memif_pbuf_size {
++	MEMIF_PBUF_SIZE_32_BYTES,
++	MEMIF_PBUF_SIZE_64_BYTES,
++	MEMIF_PBUF_SIZE_128_BYTES,
++	MEMIF_PBUF_SIZE_256_BYTES,
++	MEMIF_PBUF_SIZE_NUM,
++};
++
++struct audio_memif_attribute {
++	int mFormat;
++	int mDirection;
++	unsigned int mSampleRate;
++	unsigned int mChannels;
++	unsigned int mBufferSize;
++	unsigned int mInterruptSample;
++	unsigned int mMemoryInterFaceType;
++	unsigned int mClockInverse;
++	unsigned int mMonoSel;
++	unsigned int mdupwrite;
++	unsigned int mState;
++	unsigned int mFetchFormatPerSample;
++	int mUserCount;
++	void *privatedata;
++};
++
++struct register_control {
++	unsigned int offset;
++	unsigned int value;
++	unsigned int mask;
++};
++
++struct speech_control {
++	int bSpeechFlag;
++	int bBgsFlag;
++	int bRecordFlag;
++	int bTtyFlag;
++	int bVT;
++	int bAudioPlay;
++};
++
++struct hdmi_clock_control {
++	int SampleRate;
++	int ClkApllSel; /* 0-5 */
++};
++
++enum SPEAKER_CHANNEL {
++	Channel_None = 0,
++	Channel_Right,
++	Channel_Left,
++	Channel_Stereo
++};
++
++enum SOUND_PATH {
++	DEFAULT_PATH = 0,
++	IN1_PATH,
++	IN2_PATH,
++	IN3_PATH,
++	IN1_IN2_MIX,
++};
++
++enum MIC_ANALOG_SWICTH { MIC_ANA_DEFAULT_PATH = 0, MIC_ANA_SWITCH1_HIGH };
++enum PolicyParameters {
++	POLICY_LOAD_VOLUME = 0,
++	POLICY_SET_FM_SPEAKER,
++	POLICY_CHECK_FM_PRIMARY_KEY_ROUTING,
++	POLICY_SET_FM_PRESTOP,
++};
++
++enum modem_index_t { MODEM_1 = 0, MODEM_2 = 1, MODEM_EXTERNAL = 2, NUM_MODEM };
++
++enum fetch_format_per_sample {
++	AFE_WLEN_16_BIT = 0,
++	AFE_WLEN_32_BIT_ALIGN_8BIT_0_24BIT_DATA = 1,
++	AFE_WLEN_32_BIT_ALIGN_24BIT_DATA_8BIT_0 = 3,
++};
++
++enum output_data_format {
++	OUTPUT_DATA_FORMAT_16BIT = 0,
++	OUTPUT_DATA_FORMAT_24BIT
++};
++
++enum apll_source_sel { APLL_SOURCE_24576 = 0, APLL_SOURCE_225792 = 1 };
++
++enum hdmi_sdata_channel {
++	HDMI_SDATA0 = 0,
++	HDMI_SDATA1,
++	HDMI_SDATA2,
++	HDMI_SDATA3,
++};
++
++enum hdmi_sdata_sequence {
++	HDMI_8_CHANNELS = 0,
++	HDMI_6_CHANNELS,
++	HDMI_4_CHANNELS,
++	HDMI_2_CHANNELS,
++};
++
++struct audio_hdmi {
++	bool mLR_SWAP;
++	bool mI2S_SLAVE;
++	unsigned int mSampleRate;
++	bool mINV_LRCK;
++	bool mI2S_FMT;
++	bool mI2S_WLEN;
++	bool mI2S_EN;
++
++	unsigned int mChannels;
++	unsigned int mApllSource;
++	unsigned int mApllSamplerate;
++	unsigned int mHdmiMckDiv;
++	unsigned int mMckSamplerate;
++	unsigned int mHdmiBckDiv;
++	unsigned int mBckSamplerate;
++
++	/* her for ADC usage , DAC will not use this */
++	int mBuffer_Update_word;
++	bool mloopback;
++	bool mFpga_bit;
++	bool mFpga_bit_test;
++};
++
++enum audio_sram_mode {
++	audio_sram_normal_mode,
++	audio_sram_compact_mode,
++};
++
++enum audio_sram_state {
++	SRAM_STATE_FREE = 0,
++	SRAM_STATE_PLAYBACKFULL = 0x1,
++	SRAM_STATE_PLAYBACKPARTIAL = 0x2,
++	SRAM_STATE_CAPTURE = 0x4,
++	SRAM_STATE_PLAYBACKDRAM = 0x8,
++};
++
++struct audio_ul_dl_sram_manager {
++	unsigned int mMemoryState;
++	bool mPlaybackAllocated;
++	bool mPlaybackAllocateSize;
++	bool mCaptureAllocated;
++	bool mCaptureAllocateSize;
++};
++
++enum audio_anc_mode {
++	AUDIO_ANC_ON = 0,
++	AUDIO_ANC_OFF,
++};
++
++enum audio_mode {
++	AUDIO_MODE_NORMAL = 0,
++	AUDIO_MODE_RINGTONE,
++	AUDIO_MODE_INCALL,
++	AUDIO_MODE_INCALL2,
++	AUDIO_MODE_INCALL_EXTERNAL,
++};
++
++enum audio_src_param_type {
++	AUDIO_SRC_PARAM_TYPE_FREQ_MODE,
++	AUDIO_SRC_PARAM_TYPE_AUTORST_THRESHOLD_HIGH,
++	AUDIO_SRC_PARAM_TYPE_AUTORST_THRESHOLD_LOW,
++	AUDIO_SRC_PARAM_TYPE_NUM
++};
++
++struct audio_afe_reg_cache {
++	unsigned int REG_AUDIO_TOP_CON1;
++	unsigned int REG_AUDIO_TOP_CON3;
++	unsigned int REG_AFE_DAC_CON0;
++	unsigned int REG_AFE_DAC_CON1;
++	unsigned int REG_AFE_I2S_CON;
++	unsigned int REG_AFE_DAIBT_CON0;
++	unsigned int REG_AFE_CONN0;
++	unsigned int REG_AFE_CONN1;
++	unsigned int REG_AFE_CONN2;
++	unsigned int REG_AFE_CONN3;
++	unsigned int REG_AFE_CONN4;
++	unsigned int REG_AFE_I2S_CON1;
++	unsigned int REG_AFE_I2S_CON2;
++	unsigned int REG_AFE_MRGIF_CON;
++	unsigned int REG_AFE_DL1_BASE;
++	unsigned int REG_AFE_DL1_CUR;
++	unsigned int REG_AFE_DL1_END;
++	unsigned int REG_AFE_VUL_D2_BASE;
++	unsigned int REG_AFE_VUL_D2_END;
++	unsigned int REG_AFE_VUL_D2_CUR;
++	unsigned int REG_AFE_I2S_CON3;
++	unsigned int REG_AFE_DL2_BASE;
++	unsigned int REG_AFE_DL2_CUR;
++	unsigned int REG_AFE_DL2_END;
++	unsigned int REG_AFE_CONN5;
++	unsigned int REG_AFE_CONN_24BIT;
++	unsigned int REG_AFE_AWB_BASE;
++	unsigned int REG_AFE_AWB_END;
++	unsigned int REG_AFE_AWB_CUR;
++	unsigned int REG_AFE_VUL_BASE;
++	unsigned int REG_AFE_VUL_END;
++	unsigned int REG_AFE_VUL_CUR;
++	unsigned int REG_AFE_DAI_BASE;
++	unsigned int REG_AFE_DAI_END;
++	unsigned int REG_AFE_DAI_CUR;
++	unsigned int REG_AFE_CONN6;
++	unsigned int REG_AFE_MEMIF_MSB;
++	unsigned int REG_AFE_MEMIF_MON0;
++	unsigned int REG_AFE_MEMIF_MON1;
++	unsigned int REG_AFE_MEMIF_MON2;
++	unsigned int REG_AFE_MEMIF_MON3;
++	unsigned int REG_AFE_MEMIF_MON4;
++	unsigned int REG_AFE_ADDA_DL_SRC2_CON0;
++	unsigned int REG_AFE_ADDA_DL_SRC2_CON1;
++	unsigned int REG_AFE_ADDA_UL_SRC_CON0;
++	unsigned int REG_AFE_ADDA_UL_SRC_CON1;
++	unsigned int REG_AFE_ADDA_TOP_CON0;
++	unsigned int REG_AFE_ADDA_UL_DL_CON0;
++	unsigned int REG_AFE_ADDA_SRC_DEBUG;
++	unsigned int REG_AFE_ADDA_SRC_DEBUG_MON0;
++	unsigned int REG_AFE_ADDA_SRC_DEBUG_MON1;
++	unsigned int REG_AFE_ADDA_NEWIF_CFG0;
++	unsigned int REG_AFE_ADDA_NEWIF_CFG1;
++	unsigned int REG_AFE_SIDETONE_DEBUG;
++	unsigned int REG_AFE_SIDETONE_MON;
++	unsigned int REG_AFE_SIDETONE_CON0;
++	unsigned int REG_AFE_SIDETONE_COEFF;
++	unsigned int REG_AFE_SIDETONE_CON1;
++	unsigned int REG_AFE_SIDETONE_GAIN;
++	unsigned int REG_AFE_SGEN_CON0;
++	unsigned int REG_AFE_SGEN_CON1;
++	unsigned int REG_AFE_TOP_CON0;
++	unsigned int REG_AFE_ADDA_PREDIS_CON0;
++	unsigned int REG_AFE_ADDA_PREDIS_CON1;
++	unsigned int REG_AFE_MRGIF_MON0;
++	unsigned int REG_AFE_MRGIF_MON1;
++	unsigned int REG_AFE_MRGIF_MON2;
++	unsigned int REG_AFE_MOD_DAI_BASE;
++	unsigned int REG_AFE_MOD_DAI_END;
++	unsigned int REG_AFE_MOD_DAI_CUR;
++	unsigned int REG_AFE_HDMI_OUT_CON0;
++	unsigned int REG_AFE_HDMI_BASE;
++	unsigned int REG_AFE_HDMI_CUR;
++	unsigned int REG_AFE_HDMI_END;
++	unsigned int REG_AFE_HDMI_CONN0;
++	unsigned int REG_AFE_IRQ_MCU_CON;
++	unsigned int REG_AFE_IRQ_MCU_STATUS;
++	unsigned int REG_AFE_IRQ_MCU_CLR;
++	unsigned int REG_AFE_IRQ_MCU_CNT1;
++	unsigned int REG_AFE_IRQ_MCU_CNT2;
++	unsigned int REG_AFE_IRQ_MCU_EN;
++	unsigned int REG_AFE_IRQ_MCU_MON2;
++	unsigned int REG_AFE_IRQ1_MCU_CNT_MON;
++	unsigned int REG_AFE_IRQ2_MCU_CNT_MON;
++	unsigned int REG_AFE_IRQ1_MCU_EN_CNT_MON;
++	unsigned int REG_AFE_MEMIF_MAXLEN;
++	unsigned int REG_AFE_MEMIF_PBUF_SIZE;
++	unsigned int REG_AFE_IRQ_MCU_CNT7;
++	unsigned int REG_AFE_APLL1_TUNER_CFG;
++	unsigned int REG_AFE_APLL2_TUNER_CFG;
++	unsigned int REG_AFE_GAIN1_CON0;
++	unsigned int REG_AFE_GAIN1_CON1;
++	unsigned int REG_AFE_GAIN1_CON2;
++	unsigned int REG_AFE_GAIN1_CON3;
++	unsigned int REG_AFE_GAIN1_CUR;
++	unsigned int REG_AFE_GAIN2_CON0;
++	unsigned int REG_AFE_GAIN2_CON1;
++	unsigned int REG_AFE_GAIN2_CON2;
++	unsigned int REG_AFE_GAIN2_CON3;
++	unsigned int REG_AFE_GAIN2_CUR;
++	unsigned int REG_AFE_CONN7;
++	unsigned int REG_AFE_CONN8;
++	unsigned int REG_AFE_CONN9;
++	unsigned int REG_AFE_CONN10;
++	unsigned int REG_AFE_ASRC_CON0;
++	unsigned int REG_AFE_ASRC_CON1;
++	unsigned int REG_AFE_ASRC_CON2;
++	unsigned int REG_AFE_ASRC_CON3;
++	unsigned int REG_AFE_ASRC_CON4;
++	unsigned int REG_AFE_ASRC_CON5;
++	unsigned int REG_AFE_ASRC_CON6;
++	unsigned int REG_AFE_ASRC_CON7;
++	unsigned int REG_AFE_ASRC_CON8;
++	unsigned int REG_AFE_ASRC_CON9;
++	unsigned int REG_AFE_ASRC_CON10;
++	unsigned int REG_AFE_ASRC_CON11;
++	unsigned int REG_PCM_INTF_CON1;
++	unsigned int REG_PCM_INTF_CON2;
++	unsigned int REG_PCM2_INTF_CON;
++	unsigned int REG_AUDIO_CLK_AUDDIV_0;
++	unsigned int REG_AUDIO_CLK_AUDDIV_1;
++	unsigned int REG_AFE_ASRC4_CON0;
++	unsigned int REG_AFE_ASRC4_CON1;
++	unsigned int REG_AFE_ASRC4_CON2;
++	unsigned int REG_AFE_ASRC4_CON3;
++	unsigned int REG_AFE_ASRC4_CON4;
++	unsigned int REG_AFE_ASRC4_CON5;
++	unsigned int REG_AFE_ASRC4_CON6;
++	unsigned int REG_AFE_ASRC4_CON7;
++	unsigned int REG_AFE_ASRC4_CON8;
++	unsigned int REG_AFE_ASRC4_CON9;
++	unsigned int REG_AFE_ASRC4_CON10;
++	unsigned int REG_AFE_ASRC4_CON11;
++	unsigned int REG_AFE_ASRC4_CON12;
++	unsigned int REG_AFE_ASRC4_CON13;
++	unsigned int REG_AFE_ASRC4_CON14;
++	unsigned int REG_AFE_TDM_CON1;
++	unsigned int REG_AFE_TDM_CON2;
++	unsigned int REG_AFE_ASRC_CON13;
++	unsigned int REG_AFE_ASRC_CON14;
++	unsigned int REG_AFE_ASRC_CON15;
++	unsigned int REG_AFE_ASRC_CON16;
++	unsigned int REG_AFE_ASRC_CON17;
++	unsigned int REG_AFE_ASRC_CON18;
++	unsigned int REG_AFE_ASRC_CON19;
++	unsigned int REG_AFE_ASRC_CON20;
++	unsigned int REG_AFE_ASRC_CON21;
++	unsigned int REG_AFE_ADDA2_TOP_CON0;
++	unsigned int REG_AFE_ADDA2_UL_SRC_CON0;
++	unsigned int REG_AFE_ADDA2_UL_SRC_CON1;
++	unsigned int REG_AFE_ADDA2_SRC_DEBUG;
++	unsigned int REG_AFE_ADDA2_SRC_DEBUG_MON0;
++	unsigned int REG_AFE_ADDA2_SRC_DEBUG_MON1;
++	unsigned int REG_AFE_ADDA2_NEWIF_CFG0;
++	unsigned int REG_AFE_ADDA2_NEWIF_CFG1;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_02_01;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_04_03;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_06_05;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_08_07;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_10_09;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_12_11;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_14_13;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_16_15;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_18_17;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_20_19;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_22_21;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_24_23;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_26_25;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_28_27;
++	unsigned int REG_AFE_ADDA2_ULCF_CFG_30_29;
++	unsigned int REG_AFE_ADDA3_UL_SRC_CON0;
++	unsigned int REG_AFE_ADDA3_UL_SRC_CON1;
++	unsigned int REG_AFE_ADDA3_SRC_DEBUG;
++	unsigned int REG_AFE_ADDA3_SRC_DEBUG_MON0;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_02_01;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_04_03;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_06_05;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_08_07;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_10_09;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_12_11;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_14_13;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_16_15;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_18_17;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_20_19;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_22_21;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_24_23;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_26_25;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_28_27;
++	unsigned int REG_AFE_ADDA3_ULCF_CFG_30_29;
++	unsigned int REG_AFE_ASRC2_CON0;
++	unsigned int REG_AFE_ASRC2_CON1;
++	unsigned int REG_AFE_ASRC2_CON2;
++	unsigned int REG_AFE_ASRC2_CON3;
++	unsigned int REG_AFE_ASRC2_CON4;
++	unsigned int REG_AFE_ASRC2_CON5;
++	unsigned int REG_AFE_ASRC2_CON6;
++	unsigned int REG_AFE_ASRC2_CON7;
++	unsigned int REG_AFE_ASRC2_CON8;
++	unsigned int REG_AFE_ASRC2_CON9;
++	unsigned int REG_AFE_ASRC2_CON10;
++	unsigned int REG_AFE_ASRC2_CON11;
++	unsigned int REG_AFE_ASRC2_CON12;
++	unsigned int REG_AFE_ASRC2_CON13;
++	unsigned int REG_AFE_ASRC2_CON14;
++	unsigned int REG_AFE_ASRC3_CON0;
++	unsigned int REG_AFE_ASRC3_CON1;
++	unsigned int REG_AFE_ASRC3_CON2;
++	unsigned int REG_AFE_ASRC3_CON3;
++	unsigned int REG_AFE_ASRC3_CON4;
++	unsigned int REG_AFE_ASRC3_CON5;
++	unsigned int REG_AFE_ASRC3_CON6;
++	unsigned int REG_AFE_ASRC3_CON7;
++	unsigned int REG_AFE_ASRC3_CON8;
++	unsigned int REG_AFE_ASRC3_CON9;
++	unsigned int REG_AFE_ASRC3_CON10;
++	unsigned int REG_AFE_ASRC3_CON11;
++	unsigned int REG_AFE_ASRC3_CON12;
++	unsigned int REG_AFE_ASRC3_CON13;
++	unsigned int REG_AFE_ASRC3_CON14;
++	/*
++	 *unsigned int REG_AFE_ADDA4_TOP_CON0;
++	 *unsigned int REG_AFE_ADDA4_UL_SRC_CON0;
++	 *unsigned int REG_AFE_ADDA4_UL_SRC_CON1;
++	 *unsigned int REG_AFE_ADDA4_NEWIF_CFG0;
++	 *unsigned int REG_AFE_ADDA4_NEWIF_CFG1;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_02_01;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_04_03;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_06_05;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_08_07;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_10_09;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_12_11;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_14_13;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_16_15;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_18_17;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_20_19;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_22_21;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_24_23;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_26_25;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_28_27;
++	 *unsigned int REG_AFE_ADDA4_ULCF_CFG_30_29;
++	 */
++};
++
++/*
++ *  mUser is record for User
++ *    using substream pointer as reach user
++ */
++struct audio_sram_block {
++	bool mValid;
++	void *mUser;
++	unsigned int mLength;
++	dma_addr_t msram_phys_addr;
++	void *msram_virt_addr;
++};
++
++/*
++ * use memory interface number as block number
++ * todo ?
++ */
++
++struct audio_sram_manager {
++	dma_addr_t msram_phys_addr;
++	void *msram_virt_addr;
++	unsigned int mSramLength;
++	unsigned int mBlockSize;
++	unsigned int mBlocknum;
++	struct audio_sram_block *mAud_Sram_Block;
++	enum audio_sram_mode sram_mode;
++};
++
++/*
++ * IRQ Manager
++ */
++#define IRQ_MIN_RATE 48000
++#define IRQ_MAX_RATE 260000
++#define IRQ_TOLERANCE_US 10 /* irq period difference that can be tolerated */
++
++struct irq_user {
++	const void *user;
++	unsigned int request_rate;
++	unsigned int request_count;
++	struct list_head list;
++};
++
++struct irq_manager {
++	bool is_on;
++	unsigned int rate;
++	unsigned int count;
++	struct list_head users;
++	const struct irq_user *selected_user;
++};
++
++/*
++ * Ultrasound
++ */
++
++struct voice_ultra_info {
++	/* voice dl with ultra --> playback */
++	unsigned int dl_size;
++	unsigned int dl_rate;
++	unsigned char *dl_dma_area;
++	dma_addr_t dl_dma_addr;
++	/* voice dl --> memif ul to dsp */
++	unsigned int voice_dl_size;
++	unsigned int voice_dl_rate;
++	unsigned char *voice_dl_dma_area;
++	dma_addr_t voice_dl_dma_addr;
++	/* ultra record --> memif ul to dsp */
++	unsigned int ultra_ul_size;
++	unsigned int ultra_ul_rate;
++	unsigned char *ultra_ul_dma_area;
++	dma_addr_t ultra_ul_dma_addr;
++
++	unsigned int memif_period_count;
++	unsigned int memif_byte;
++
++	bool playback_info_ready;
++	bool capture_info_ready;
++};
++
++struct memif_lpbk {
++	struct device *dev;
++
++	enum soc_aud_digital_block dl_memif;
++	enum soc_aud_digital_block ul_memif;
++
++	unsigned int rate;
++	unsigned int channel;
++	unsigned int format;
++
++	unsigned int delay_us;
++
++	/* below variable updated by API only */
++	/* -- DMA -- */
++	unsigned char *dma_area; /* DMA area */
++	dma_addr_t dma_addr; /* physical bus address (not accessible from main
++			      * CPU)
++			      */
++	size_t dma_bytes;    /* size of DMA area */
++
++	bool use_dram;
++
++	bool enable;
++	unsigned int elapsed_time_us;
++};
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-soc-pcm-common.h
+@@ -0,0 +1,168 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/******************************************************************************
++ *
++ *
++ * Filename:
++ * ---------
++ *   mtk-soc-pcm-common
++ *
++ * Project:
++ * --------
++ *   mtk-soc-pcm-common function
++ *
++ * Description:
++ * ------------
++ *   Common function
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang (MTK02308)
++ *
++ *---------------------------------------------------------------------------
++---
++ *
++
++*******************************************************************************/
++
++#ifndef AUDIO_MT_SOC_COMMON_H
++#define AUDIO_MT_SOC_COMMON_H
++
++#include <asm/div64.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/dma-mapping.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/irq.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/proc_fs.h>
++#include <linux/sched.h>
++#include <linux/semaphore.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <linux/vmalloc.h>
++#include <linux/wait.h>
++#include "mtk-soc-pcm-platform.h"
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <sound/core.h>
++#include <sound/jack.h>
++#include <sound/soc.h>
++#include <sound/soc-dapm.h>
++
++/*
++ * define for PCM settings
++ */
++#define MAX_PCM_DEVICES 4
++#define MAX_PCM_SUBSTREAMS 128
++#define MAX_MIDI_DEVICES
++
++#define SND_SOC_ADV_MT_FMTS                                                    \
++	(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S16_BE |                   \
++	 SNDRV_PCM_FMTBIT_U16_LE | SNDRV_PCM_FMTBIT_U16_BE |                   \
++	 SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S24_BE |                   \
++	 SNDRV_PCM_FMTBIT_U24_LE | SNDRV_PCM_FMTBIT_U24_BE |                   \
++	 SNDRV_PCM_FMTBIT_S32_LE | SNDRV_PCM_FMTBIT_S32_BE |                   \
++	 SNDRV_PCM_FMTBIT_U32_LE | SNDRV_PCM_FMTBIT_U32_BE)
++
++#define SND_SOC_STD_MT_FMTS                                                    \
++	(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S16_BE |                   \
++	 SNDRV_PCM_FMTBIT_U16_LE | SNDRV_PCM_FMTBIT_U16_BE)
++
++#define SOC_NORMAL_USE_RATE                                                    \
++	(SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000)
++#define SOC_NORMAL_USE_RATE_MIN 8000
++#define SOC_NORMAL_USE_RATE_MAX 48000
++#define SOC_NORMAL_USE_CHANNELS_MIN 1
++#define SOC_NORMAL_USE_CHANNELS_MAX 2
++#define SOC_NORMAL_USE_PERIODS_MIN 1
++#define SOC_NORMAL_USE_PERIODS_MAX 16
++#define SOC_NORMAL_USE_BUFFERSIZE_MAX                                          \
++	(48 * 1024) /* TODO: KC: need to reserve 4k for md32 */
++
++#define SOC_HIFI_BUFFER_SIZE (Dl1_MAX_BUFFER_SIZE * 4)
++
++#ifdef Dl1_DATA2_MAX_BUFFER_SIZE
++#define SOC_HIFI_DEEP_BUFFER_SIZE (Dl1_DATA2_MAX_BUFFER_SIZE * 4)
++#else
++#define SOC_HIFI_DEEP_BUFFER_SIZE (Dl1_MAX_BUFFER_SIZE * 4)
++#endif
++
++#define SOC_HIGH_USE_RATE                                                      \
++	(SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_192000)
++#define SOC_HIGH_USE_RATE_MIN 8000
++#define SOC_HIGH_USE_RATE_MAX 260000
++#define SOC_HIGH_USE_CHANNELS_MIN 1
++#define SOC_HIGH_USE_CHANNELS_MAX 8
++
++/*#ifdef AUDIO_ALLOCATE_SMP_RATE_DECLARE*/
++#if 1
++/* Conventional and unconventional sample rate supported */
++static const unsigned int soc_fm_supported_sample_rates[3] = {32000, 44100,
++							      48000};
++
++static const unsigned int soc_btdai_supported_sample_rates[2] = {8000, 16000};
++
++static const unsigned int soc_voice_supported_sample_rates[4] = {8000, 16000,
++								 32000, 48000};
++
++/* Conventional and unconventional sample rate supported */
++static const unsigned int soc_normal_supported_sample_rates[9] = {
++	8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000};
++
++/* Conventional and unconventional sample rate supported */
++static const unsigned int soc_high_supported_sample_rates[14] = {
++	8000,  11025, 12000, 16000, 22050,  24000,  32000,
++	44100, 48000, 88200, 96000, 176400, 192000, 260000};
++
++/* Conventional and unconventional channels supported */
++static const unsigned int soc_multiple_supported_channels[3] = {1, 2, 4};
++
++#else
++extern const unsigned int soc_fm_supported_sample_rates[3];
++extern const unsigned int soc_voice_supported_sample_rates[3];
++extern const unsigned int soc_normal_supported_sample_rates[9];
++extern const unsigned int soc_high_supported_sample_rates[13];
++#endif
++
++unsigned long audio_frame_to_bytes(struct snd_pcm_substream *substream,
++				   unsigned long count);
++unsigned long audio_bytes_to_frame(struct snd_pcm_substream *substream,
++				   unsigned long count);
++
++extern void *AFE_BASE_ADDRESS;
++
++extern int mtk_soc_always_hd;
++extern int extcodec_echoref_control;
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/common_int/mtk-soc-speaker-amp.h
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (C) 2018 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _MTK_SP_SPK_AMP_H
++#define _MTK_SP_SPK_AMP_H
++
++struct mtk_spk_i2c_ctrl {
++	int (*i2c_probe)(struct i2c_client *,
++			 const struct i2c_device_id *);
++	int (*i2c_remove)(struct i2c_client *);
++	void (*i2c_shutdown)(struct i2c_client *);
++	const char *codec_dai_name;
++	const char *codec_name;
++};
++
++enum mtk_spk_type {
++	MTK_SPK_NOT_SMARTPA = 0,
++	MTK_SPK_RICHTEK_RT5509,
++	MTK_SPK_TI_TAS5782M,
++	MTK_SPK_MEDIATEK_MT6660,
++	MTK_SPK_TYPE_NUM
++};
++
++int mtk_spk_get_type(void);
++int mtk_spk_update_dai_link(struct snd_soc_dai_link *mtk_spk_dai_link,
++			    struct platform_device *pdev);
++
++#endif
++
+--- /dev/null
++++ b/sound/soc/mediatek/mt6771/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0
++# MediaTek 4.14 audio, MT6771 AFE.
+--- /dev/null
++++ b/sound/soc/mediatek/mt6771/mtk-auddrv-afe.h
+@@ -0,0 +1,571 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++/*******************************************************************************
++ *
++ * Filename:
++ * ---------
++ *   AudioAfe.h
++ *
++ * Project:
++ * --------
++ *   MT6757  Audio Driver Afe Register setting
++ *
++ * Description:
++ * ------------
++ *   Audio register
++ *
++ * Author:
++ * -------
++ *   Ir Lian (mtk00976)
++ *   Harvey Huang (mtk03996)
++ *   Chipeng Chang (mtk02308)
++ *
++ *------------------------------------------------------------------------------
++ *
++ *
++ ******************************************************************************/
++
++#ifndef _AUDDRV_AFE_H_
++#define _AUDDRV_AFE_H_
++
++#include "mtk-auddrv-common.h"
++#include "mtk-auddrv-def.h"
++#include "mtk-soc-digital-type.h"
++#include <linux/types.h>
++
++/*****************************************************************************
++ *                     C O M P I L E R   F L A G S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                E X T E R N A L   R E F E R E N C E S
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                         D A T A   T Y P E S
++ *****************************************************************************/
++
++enum audio_sdm_level {
++	AUDIO_SDM_LEVEL_MUTE = 0,
++	AUDIO_SDM_LEVEL_NORMAL = 0x1d,
++	/* if you change level normal */
++	/* you need to change formula of hp impedance and dc trim too */
++};
++
++/*****************************************************************************
++ *                          C O N S T A N T S
++ *****************************************************************************/
++#define AUDIO_HW_PHYSICAL_BASE  (0x11220000L)
++#define AUDIO_CLKCFG_PHYSICAL_BASE  (0x10000000L)
++/* need enable this register before access all register */
++#define AUDIO_POWER_TOP (0x1000629cL)
++
++#define APMIXEDSYS_BASE (0x1000C000L)
++/* Register TOP */
++/* We need to write AP_PLL_CON5 to set mux,
++ * thus we can set APLL Tuner in AFE setting
++ */
++#define AP_PLL_CON5 (0x0014)
++
++#define AFE_BASE                (0L)
++
++/* Internal sram */
++#define AFE_INTERNAL_SRAM_PHY_BASE  (0x11221000L)
++#define AFE_INTERNAL_SRAM_NORMAL_SIZE (0x9000) /* 36k, for normal mode */
++#define AFE_INTERNAL_SRAM_COMPACT_SIZE (0xc000) /* 48k, for compact mode */
++#define AFE_INTERNAL_SRAM_SIZE AFE_INTERNAL_SRAM_COMPACT_SIZE
++
++/* APLL clock base */
++#define APLL_44K_BASE (180633600)
++#define APLL_48K_BASE (196608000)
++
++/*****************************************************************************
++ *                         M A C R O
++ *****************************************************************************/
++
++/*****************************************************************************
++ *                  R E G I S T E R       D E F I N I T I O N
++ *****************************************************************************/
++
++/* apmixed sys */
++#define APLL1_CON0 0x02a0
++#define APLL1_CON1 0x02a4
++#define APLL1_CON2 0x02a8
++#define APLL1_CON3 0x02ac
++
++#define APLL2_CON0 0x02b4
++#define APLL2_CON1 0x02b8
++#define APLL2_CON2 0x02bc
++#define APLL2_CON3 0x02c0
++
++/* move to clksys */
++#define CLK_AUDDIV_0              (0x0320)
++#define CLK_AUDDIV_1              (0x0324)
++#define CLK_AUDDIV_2              (0x0328)
++#define CLK_AUDDIV_3              (0x0334)
++
++/* audiosys */
++#define AUDIO_TOP_CON0              (AFE_BASE + 0x0000)
++#define AUDIO_TOP_CON1              (AFE_BASE + 0x0004)
++#define AUDIO_TOP_CON3              (AFE_BASE + 0x000c)
++#define AFE_DAC_CON0                (AFE_BASE + 0x0010)
++#define AFE_DAC_CON1                (AFE_BASE + 0x0014)
++#define AFE_I2S_CON                 (AFE_BASE + 0x0018)
++#define AFE_DAIBT_CON0              (AFE_BASE + 0x001c)
++#define AFE_CONN0                   (AFE_BASE + 0x0020)
++#define AFE_CONN1                   (AFE_BASE + 0x0024)
++#define AFE_CONN2                   (AFE_BASE + 0x0028)
++#define AFE_CONN3                   (AFE_BASE + 0x002c)
++#define AFE_CONN4                   (AFE_BASE + 0x0030)
++#define AFE_I2S_CON1                (AFE_BASE + 0x0034)
++#define AFE_I2S_CON2                (AFE_BASE + 0x0038)
++#define AFE_MRGIF_CON               (AFE_BASE + 0x003c)
++#define AFE_DL1_BASE                (AFE_BASE + 0x0040)
++#define AFE_DL1_CUR                 (AFE_BASE + 0x0044)
++#define AFE_DL1_END                 (AFE_BASE + 0x0048)
++#define AFE_I2S_CON3                (AFE_BASE + 0x004c)
++#define AFE_DL2_BASE                (AFE_BASE + 0x0050)
++#define AFE_DL2_CUR                 (AFE_BASE + 0x0054)
++#define AFE_DL2_END                 (AFE_BASE + 0x0058)
++#define AFE_CONN5                   (AFE_BASE + 0x005c)
++#define AFE_CONN_24BIT              (AFE_BASE + 0x006c)
++#define AFE_AWB_BASE                (AFE_BASE + 0x0070)
++#define AFE_AWB_END                 (AFE_BASE + 0x0078)
++#define AFE_AWB_CUR                 (AFE_BASE + 0x007c)
++#define AFE_VUL_BASE                (AFE_BASE + 0x0080)
++#define AFE_VUL_END                 (AFE_BASE + 0x0088)
++#define AFE_VUL_CUR                 (AFE_BASE + 0x008c)
++#define AFE_DAI_BASE                (AFE_BASE + 0x0090)
++#define AFE_DAI_END                 (AFE_BASE + 0x0098)
++#define AFE_DAI_CUR                 (AFE_BASE + 0x009c)
++#define AFE_CONN6                   (AFE_BASE + 0x00bc)
++#define AFE_MEMIF_MSB               (AFE_BASE + 0x00cc)
++#define AFE_MEMIF_MON0              (AFE_BASE + 0x00d0)
++#define AFE_MEMIF_MON1              (AFE_BASE + 0x00d4)
++#define AFE_MEMIF_MON2              (AFE_BASE + 0x00d8)
++#define AFE_MEMIF_MON3              (AFE_BASE + 0x00dc)
++#define AFE_MEMIF_MON4              (AFE_BASE + 0x00e0)
++#define AFE_MEMIF_MON5              (AFE_BASE + 0x00e4)
++#define AFE_MEMIF_MON6              (AFE_BASE + 0x00e8)
++#define AFE_MEMIF_MON7              (AFE_BASE + 0x00ec)
++#define AFE_MEMIF_MON8              (AFE_BASE + 0x00f0)
++#define AFE_MEMIF_MON9              (AFE_BASE + 0x00f4)
++#define AFE_ADDA_DL_SRC2_CON0       (AFE_BASE + 0x0108)
++#define AFE_ADDA_DL_SRC2_CON1       (AFE_BASE + 0x010c)
++#define AFE_ADDA_UL_SRC_CON0        (AFE_BASE + 0x0114)
++#define AFE_ADDA_UL_SRC_CON1        (AFE_BASE + 0x0118)
++#define AFE_ADDA_TOP_CON0           (AFE_BASE + 0x0120)
++#define AFE_ADDA_UL_DL_CON0         (AFE_BASE + 0x0124)
++#define AFE_ADDA_SRC_DEBUG          (AFE_BASE + 0x012c)
++#define AFE_ADDA_SRC_DEBUG_MON0     (AFE_BASE + 0x0130)
++#define AFE_ADDA_SRC_DEBUG_MON1     (AFE_BASE + 0x0134)
++#define AFE_ADDA_UL_SRC_MON0        (AFE_BASE + 0x0148)
++#define AFE_ADDA_UL_SRC_MON1        (AFE_BASE + 0x014c)
++#define AFE_SIDETONE_DEBUG          (AFE_BASE + 0x01d0)
++#define AFE_SIDETONE_MON            (AFE_BASE + 0x01d4)
++#define AFE_SGEN_CON2               (AFE_BASE + 0x01dc)
++#define AFE_SIDETONE_CON0           (AFE_BASE + 0x01e0)
++#define AFE_SIDETONE_COEFF          (AFE_BASE + 0x01e4)
++#define AFE_SIDETONE_CON1           (AFE_BASE + 0x01e8)
++#define AFE_SIDETONE_GAIN           (AFE_BASE + 0x01ec)
++#define AFE_SGEN_CON0               (AFE_BASE + 0x01f0)
++#define AFE_TOP_CON0                (AFE_BASE + 0x0200)
++#define AFE_BUS_CFG                 (AFE_BASE + 0x0240)
++#define AFE_BUS_MON0                (AFE_BASE + 0x0244)
++#define AFE_ADDA_PREDIS_CON0        (AFE_BASE + 0x0260)
++#define AFE_ADDA_PREDIS_CON1        (AFE_BASE + 0x0264)
++#define AFE_MRGIF_MON0              (AFE_BASE + 0x0270)
++#define AFE_MRGIF_MON1              (AFE_BASE + 0x0274)
++#define AFE_MRGIF_MON2              (AFE_BASE + 0x0278)
++#define AFE_I2S_MON                 (AFE_BASE + 0x027c)
++#define AFE_ADDA_IIR_COEF_02_01     (AFE_BASE + 0x0290)
++#define AFE_ADDA_IIR_COEF_04_03     (AFE_BASE + 0x0294)
++#define AFE_ADDA_IIR_COEF_06_05     (AFE_BASE + 0x0298)
++#define AFE_ADDA_IIR_COEF_08_07     (AFE_BASE + 0x029c)
++#define AFE_ADDA_IIR_COEF_10_09     (AFE_BASE + 0x02a0)
++#define AFE_DAC_CON2                (AFE_BASE + 0x02e0)
++#define AFE_IRQ_MCU_CON1            (AFE_BASE + 0x02e4)
++#define AFE_IRQ_MCU_CON2            (AFE_BASE + 0x02e8)
++#define AFE_DAC_MON                 (AFE_BASE + 0x02ec)
++#define AFE_VUL2_BASE               (AFE_BASE + 0x02f0)
++#define AFE_VUL2_END                (AFE_BASE + 0x02f8)
++#define AFE_VUL2_CUR                (AFE_BASE + 0x02fc)
++#define AFE_IRQ_MCU_CNT0            (AFE_BASE + 0x0300)
++#define AFE_IRQ_MCU_CNT6            (AFE_BASE + 0x0304)
++#define AFE_IRQ_MCU_EN1             (AFE_BASE + 0x030c)
++#define AFE_IRQ0_MCU_CNT_MON        (AFE_BASE + 0x0310)
++#define AFE_IRQ6_MCU_CNT_MON        (AFE_BASE + 0x0314)
++#define AFE_MOD_DAI_BASE            (AFE_BASE + 0x0330)
++#define AFE_MOD_DAI_END             (AFE_BASE + 0x0338)
++#define AFE_MOD_DAI_CUR             (AFE_BASE + 0x033c)
++#define AFE_VUL_D2_BASE             (AFE_BASE + 0x0350)
++#define AFE_VUL_D2_END              (AFE_BASE + 0x0358)
++#define AFE_VUL_D2_CUR              (AFE_BASE + 0x035c)
++#define AFE_DL3_BASE                (AFE_BASE + 0x0360)
++#define AFE_DL3_CUR                 (AFE_BASE + 0x0364)
++#define AFE_DL3_END                 (AFE_BASE + 0x0368)
++#define AFE_HDMI_OUT_CON0           (AFE_BASE + 0x0370)
++#define AFE_HDMI_OUT_BASE           (AFE_BASE + 0x0374)
++#define AFE_HDMI_OUT_CUR            (AFE_BASE + 0x0378)
++#define AFE_HDMI_OUT_END            (AFE_BASE + 0x037c)
++#define AFE_IRQ3_MCU_CNT_MON        (AFE_BASE + 0x0398)
++#define AFE_IRQ4_MCU_CNT_MON        (AFE_BASE + 0x039c)
++#define AFE_IRQ_MCU_CON0            (AFE_BASE + 0x03a0)
++#define AFE_IRQ_MCU_STATUS          (AFE_BASE + 0x03a4)
++#define AFE_IRQ_MCU_CLR             (AFE_BASE + 0x03a8)
++#define AFE_IRQ_MCU_CNT1            (AFE_BASE + 0x03ac)
++#define AFE_IRQ_MCU_CNT2            (AFE_BASE + 0x03b0)
++#define AFE_IRQ_MCU_EN              (AFE_BASE + 0x03b4)
++#define AFE_IRQ_MCU_MON2            (AFE_BASE + 0x03b8)
++#define AFE_IRQ_MCU_CNT5            (AFE_BASE + 0x03bc)
++#define AFE_IRQ1_MCU_CNT_MON        (AFE_BASE + 0x03c0)
++#define AFE_IRQ2_MCU_CNT_MON        (AFE_BASE + 0x03c4)
++#define AFE_IRQ1_MCU_EN_CNT_MON     (AFE_BASE + 0x03c8)
++#define AFE_IRQ5_MCU_CNT_MON        (AFE_BASE + 0x03cc)
++#define AFE_MEMIF_MINLEN            (AFE_BASE + 0x03d0)
++#define AFE_MEMIF_MAXLEN            (AFE_BASE + 0x03d4)
++#define AFE_MEMIF_PBUF_SIZE         (AFE_BASE + 0x03d8)
++#define AFE_IRQ_MCU_CNT7            (AFE_BASE + 0x03dc)
++#define AFE_IRQ7_MCU_CNT_MON        (AFE_BASE + 0x03e0)
++#define AFE_IRQ_MCU_CNT3            (AFE_BASE + 0x03e4)
++#define AFE_IRQ_MCU_CNT4            (AFE_BASE + 0x03e8)
++#define AFE_IRQ_MCU_CNT11           (AFE_BASE + 0x03ec)
++#define AFE_APLL1_TUNER_CFG         (AFE_BASE + 0x03f0)
++#define AFE_APLL2_TUNER_CFG         (AFE_BASE + 0x03f4)
++#define AFE_MEMIF_HD_MODE           (AFE_BASE + 0x03f8)
++#define AFE_MEMIF_HDALIGN           (AFE_BASE + 0x03fc)
++#define AFE_CONN33                  (AFE_BASE + 0x0408)
++#define AFE_IRQ_MCU_CNT12           (AFE_BASE + 0x040c)
++#define AFE_GAIN1_CON0              (AFE_BASE + 0x0410)
++#define AFE_GAIN1_CON1              (AFE_BASE + 0x0414)
++#define AFE_GAIN1_CON2              (AFE_BASE + 0x0418)
++#define AFE_GAIN1_CON3              (AFE_BASE + 0x041c)
++#define AFE_CONN7                   (AFE_BASE + 0x0420)
++#define AFE_GAIN1_CUR               (AFE_BASE + 0x0424)
++#define AFE_GAIN2_CON0              (AFE_BASE + 0x0428)
++#define AFE_GAIN2_CON1              (AFE_BASE + 0x042c)
++#define AFE_GAIN2_CON2              (AFE_BASE + 0x0430)
++#define AFE_GAIN2_CON3              (AFE_BASE + 0x0434)
++#define AFE_CONN8                   (AFE_BASE + 0x0438)
++#define AFE_GAIN2_CUR               (AFE_BASE + 0x043c)
++#define AFE_CONN9                   (AFE_BASE + 0x0440)
++#define AFE_CONN10                  (AFE_BASE + 0x0444)
++#define AFE_CONN11                  (AFE_BASE + 0x0448)
++#define AFE_CONN12                  (AFE_BASE + 0x044c)
++#define AFE_CONN13                  (AFE_BASE + 0x0450)
++#define AFE_CONN14                  (AFE_BASE + 0x0454)
++#define AFE_CONN15                  (AFE_BASE + 0x0458)
++#define AFE_CONN16                  (AFE_BASE + 0x045c)
++#define AFE_CONN17                  (AFE_BASE + 0x0460)
++#define AFE_CONN18                  (AFE_BASE + 0x0464)
++#define AFE_CONN19                  (AFE_BASE + 0x0468)
++#define AFE_CONN20                  (AFE_BASE + 0x046c)
++#define AFE_CONN21                  (AFE_BASE + 0x0470)
++#define AFE_CONN22                  (AFE_BASE + 0x0474)
++#define AFE_CONN23                  (AFE_BASE + 0x0478)
++#define AFE_CONN24                  (AFE_BASE + 0x047c)
++#define AFE_CONN_RS                 (AFE_BASE + 0x0494)
++#define AFE_CONN_DI                 (AFE_BASE + 0x0498)
++#define AFE_CONN25                  (AFE_BASE + 0x04b0)
++#define AFE_CONN26                  (AFE_BASE + 0x04b4)
++#define AFE_CONN27                  (AFE_BASE + 0x04b8)
++#define AFE_CONN28                  (AFE_BASE + 0x04bc)
++#define AFE_CONN29                  (AFE_BASE + 0x04c0)
++#define AFE_CONN30                  (AFE_BASE + 0x04c4)
++#define AFE_CONN31                  (AFE_BASE + 0x04c8)
++#define AFE_CONN32                  (AFE_BASE + 0x04cc)
++#define AFE_SRAM_DELSEL_CON0        (AFE_BASE + 0x04f0)
++#define AFE_SRAM_DELSEL_CON2        (AFE_BASE + 0x04f8)
++#define AFE_SRAM_DELSEL_CON3        (AFE_BASE + 0x04fc)
++#define AFE_ASRC_2CH_CON12          (AFE_BASE + 0x0528)
++#define AFE_ASRC_2CH_CON13          (AFE_BASE + 0x052c)
++#define PCM_INTF_CON1               (AFE_BASE + 0x0530)
++#define PCM_INTF_CON2               (AFE_BASE + 0x0538)
++#define PCM2_INTF_CON               (AFE_BASE + 0x053c)
++#define AFE_TDM_CON1                (AFE_BASE + 0x0548)
++#define AFE_TDM_CON2                (AFE_BASE + 0x054c)
++#define AFE_CONN34                  (AFE_BASE + 0x0580)
++#define FPGA_CFG0                   (AFE_BASE + 0x05b0)
++#define FPGA_CFG1                   (AFE_BASE + 0x05b4)
++#define FPGA_CFG2                   (AFE_BASE + 0x05c0)
++#define FPGA_CFG3                   (AFE_BASE + 0x05c4)
++#define AUDIO_TOP_DBG_CON           (AFE_BASE + 0x05c8)
++#define AUDIO_TOP_DBG_MON0          (AFE_BASE + 0x05cc)
++#define AUDIO_TOP_DBG_MON1          (AFE_BASE + 0x05d0)
++#define AFE_IRQ8_MCU_CNT_MON        (AFE_BASE + 0x05e4)
++#define AFE_IRQ11_MCU_CNT_MON       (AFE_BASE + 0x05e8)
++#define AFE_IRQ12_MCU_CNT_MON       (AFE_BASE + 0x05ec)
++#define AFE_GENERAL_REG0            (AFE_BASE + 0x0800)
++#define AFE_GENERAL_REG1            (AFE_BASE + 0x0804)
++#define AFE_GENERAL_REG2            (AFE_BASE + 0x0808)
++#define AFE_GENERAL_REG3            (AFE_BASE + 0x080c)
++#define AFE_GENERAL_REG4            (AFE_BASE + 0x0810)
++#define AFE_GENERAL_REG5            (AFE_BASE + 0x0814)
++#define AFE_GENERAL_REG6            (AFE_BASE + 0x0818)
++#define AFE_GENERAL_REG7            (AFE_BASE + 0x081c)
++#define AFE_GENERAL_REG8            (AFE_BASE + 0x0820)
++#define AFE_GENERAL_REG9            (AFE_BASE + 0x0824)
++#define AFE_GENERAL_REG10           (AFE_BASE + 0x0828)
++#define AFE_GENERAL_REG11           (AFE_BASE + 0x082c)
++#define AFE_GENERAL_REG12           (AFE_BASE + 0x0830)
++#define AFE_GENERAL_REG13           (AFE_BASE + 0x0834)
++#define AFE_GENERAL_REG14           (AFE_BASE + 0x0838)
++#define AFE_GENERAL_REG15           (AFE_BASE + 0x083c)
++#define AFE_CBIP_CFG0               (AFE_BASE + 0x0840)
++#define AFE_CBIP_MON0               (AFE_BASE + 0x0844)
++#define AFE_CBIP_SLV_MUX_MON0       (AFE_BASE + 0x0848)
++#define AFE_CBIP_SLV_DECODER_MON0   (AFE_BASE + 0x084c)
++#define AFE_CONN0_1                 (AFE_BASE + 0x0900)
++#define AFE_CONN1_1                 (AFE_BASE + 0x0904)
++#define AFE_CONN2_1                 (AFE_BASE + 0x0908)
++#define AFE_CONN3_1                 (AFE_BASE + 0x090c)
++#define AFE_CONN4_1                 (AFE_BASE + 0x0910)
++#define AFE_CONN5_1                 (AFE_BASE + 0x0914)
++#define AFE_CONN6_1                 (AFE_BASE + 0x0918)
++#define AFE_CONN7_1                 (AFE_BASE + 0x091c)
++#define AFE_CONN8_1                 (AFE_BASE + 0x0920)
++#define AFE_CONN9_1                 (AFE_BASE + 0x0924)
++#define AFE_CONN10_1                (AFE_BASE + 0x0928)
++#define AFE_CONN11_1                (AFE_BASE + 0x092c)
++#define AFE_CONN12_1                (AFE_BASE + 0x0930)
++#define AFE_CONN13_1                (AFE_BASE + 0x0934)
++#define AFE_CONN14_1                (AFE_BASE + 0x0938)
++#define AFE_CONN15_1                (AFE_BASE + 0x093c)
++#define AFE_CONN16_1                (AFE_BASE + 0x0940)
++#define AFE_CONN17_1                (AFE_BASE + 0x0944)
++#define AFE_CONN18_1                (AFE_BASE + 0x0948)
++#define AFE_CONN19_1                (AFE_BASE + 0x094c)
++#define AFE_CONN20_1                (AFE_BASE + 0x0950)
++#define AFE_CONN21_1                (AFE_BASE + 0x0954)
++#define AFE_CONN22_1                (AFE_BASE + 0x0958)
++#define AFE_CONN23_1                (AFE_BASE + 0x095c)
++#define AFE_CONN24_1                (AFE_BASE + 0x0960)
++#define AFE_CONN25_1                (AFE_BASE + 0x0964)
++#define AFE_CONN26_1                (AFE_BASE + 0x0968)
++#define AFE_CONN27_1                (AFE_BASE + 0x096c)
++#define AFE_CONN28_1                (AFE_BASE + 0x0970)
++#define AFE_CONN29_1                (AFE_BASE + 0x0974)
++#define AFE_CONN30_1                (AFE_BASE + 0x0978)
++#define AFE_CONN31_1                (AFE_BASE + 0x097c)
++#define AFE_CONN32_1                (AFE_BASE + 0x0980)
++#define AFE_CONN33_1                (AFE_BASE + 0x0984)
++#define AFE_CONN34_1                (AFE_BASE + 0x0988)
++#define AFE_CONN_RS_1               (AFE_BASE + 0x098c)
++#define AFE_CONN_DI_1               (AFE_BASE + 0x0990)
++#define AFE_CONN_24BIT_1            (AFE_BASE + 0x0994)
++#define AFE_CONN_REG                (AFE_BASE + 0x0998)
++#define AFE_CONN35                  (AFE_BASE + 0x09a0)
++#define AFE_CONN36                  (AFE_BASE + 0x09a4)
++#define AFE_CONN37                  (AFE_BASE + 0x09a8)
++#define AFE_CONN38                  (AFE_BASE + 0x09ac)
++#define AFE_CONN35_1                (AFE_BASE + 0x09b0)
++#define AFE_CONN36_1                (AFE_BASE + 0x09b4)
++#define AFE_CONN37_1                (AFE_BASE + 0x09b8)
++#define AFE_CONN38_1                (AFE_BASE + 0x09bc)
++#define AFE_CONN39                  (AFE_BASE + 0x09c0)
++#define AFE_CONN40                  (AFE_BASE + 0x09c4)
++#define AFE_CONN41                  (AFE_BASE + 0x09c8)
++#define AFE_CONN42                  (AFE_BASE + 0x09cc)
++#define AFE_CONN39_1                (AFE_BASE + 0x09e0)
++#define AFE_CONN40_1                (AFE_BASE + 0x09e4)
++#define AFE_CONN41_1                (AFE_BASE + 0x09e8)
++#define AFE_CONN42_1                (AFE_BASE + 0x09ec)
++#define AFE_I2S_CON4                (AFE_BASE + 0x09f8)
++#define AFE_ADDA6_TOP_CON0          (AFE_BASE + 0x0a80)
++#define AFE_ADDA6_UL_SRC_CON0       (AFE_BASE + 0x0a84)
++#define AFE_ADD6_UL_SRC_CON1        (AFE_BASE + 0x0a88)
++#define AFE_ADDA6_SRC_DEBUG         (AFE_BASE + 0x0a8c)
++#define AFE_ADDA6_SRC_DEBUG_MON0    (AFE_BASE + 0x0a90)
++#define AFE_ADDA6_ULCF_CFG_02_01    (AFE_BASE + 0x0aa0)
++#define AFE_ADDA6_ULCF_CFG_04_03    (AFE_BASE + 0x0aa4)
++#define AFE_ADDA6_ULCF_CFG_06_05    (AFE_BASE + 0x0aa8)
++#define AFE_ADDA6_ULCF_CFG_08_07    (AFE_BASE + 0x0aac)
++#define AFE_ADDA6_ULCF_CFG_10_09    (AFE_BASE + 0x0ab0)
++#define AFE_ADDA6_ULCF_CFG_12_11    (AFE_BASE + 0x0ab4)
++#define AFE_ADDA6_ULCF_CFG_14_13    (AFE_BASE + 0x0ab8)
++#define AFE_ADDA6_ULCF_CFG_16_15    (AFE_BASE + 0x0abc)
++#define AFE_ADDA6_ULCF_CFG_18_17    (AFE_BASE + 0x0ac0)
++#define AFE_ADDA6_ULCF_CFG_20_19    (AFE_BASE + 0x0ac4)
++#define AFE_ADDA6_ULCF_CFG_22_21    (AFE_BASE + 0x0ac8)
++#define AFE_ADDA6_ULCF_CFG_24_23    (AFE_BASE + 0x0acc)
++#define AFE_ADDA6_ULCF_CFG_26_25    (AFE_BASE + 0x0ad0)
++#define AFE_ADDA6_ULCF_CFG_28_27    (AFE_BASE + 0x0ad4)
++#define AFE_ADDA6_ULCF_CFG_30_29    (AFE_BASE + 0x0ad8)
++#define AFE_ADD6A_UL_SRC_MON0       (AFE_BASE + 0x0ae4)
++#define AFE_ADDA6_UL_SRC_MON1       (AFE_BASE + 0x0ae8)
++#define AFE_CONN43                  (AFE_BASE + 0x0af8)
++#define AFE_CONN43_1                (AFE_BASE + 0x0afc)
++#define AFE_DL1_BASE_MSB            (AFE_BASE + 0x0b00)
++#define AFE_DL1_CUR_MSB             (AFE_BASE + 0x0b04)
++#define AFE_DL1_END_MSB             (AFE_BASE + 0x0b08)
++#define AFE_DL2_BASE_MSB            (AFE_BASE + 0x0b10)
++#define AFE_DL2_CUR_MSB             (AFE_BASE + 0x0b14)
++#define AFE_DL2_END_MSB             (AFE_BASE + 0x0b18)
++#define AFE_AWB_BASE_MSB            (AFE_BASE + 0x0b20)
++#define AFE_AWB_END_MSB             (AFE_BASE + 0x0b28)
++#define AFE_AWB_CUR_MSB             (AFE_BASE + 0x0b2c)
++#define AFE_VUL_BASE_MSB            (AFE_BASE + 0x0b30)
++#define AFE_VUL_END_MSB             (AFE_BASE + 0x0b38)
++#define AFE_VUL_CUR_MSB             (AFE_BASE + 0x0b3c)
++#define AFE_VUL2_BASE_MSB           (AFE_BASE + 0x0b50)
++#define AFE_VUL2_END_MSB            (AFE_BASE + 0x0b58)
++#define AFE_VUL2_CUR_MSB            (AFE_BASE + 0x0b5c)
++#define AFE_MOD_DAI_BASE_MSB        (AFE_BASE + 0x0b60)
++#define AFE_MOD_DAI_END_MSB         (AFE_BASE + 0x0b68)
++#define AFE_MOD_DAI_CUR_MSB         (AFE_BASE + 0x0b6c)
++#define AFE_VUL_D2_BASE_MSB         (AFE_BASE + 0x0b80)
++#define AFE_VUL_D2_END_MSB          (AFE_BASE + 0x0b88)
++#define AFE_VUL_D2_CUR_MSB          (AFE_BASE + 0x0b8c)
++#define AFE_DL3_BASE_MSB            (AFE_BASE + 0x0b90)
++#define AFE_DL3_CUR_MSB             (AFE_BASE + 0x0b94)
++#define AFE_DL3_END_MSB             (AFE_BASE + 0x0b98)
++#define AFE_HDMI_OUT_BASE_MSB       (AFE_BASE + 0x0ba4)
++#define AFE_HDMI_OUT_CUR_MSB        (AFE_BASE + 0x0ba8)
++#define AFE_HDMI_OUT_END_MSB        (AFE_BASE + 0x0bac)
++#define AFE_AWB2_BASE               (AFE_BASE + 0x0bd0)
++#define AFE_AWB2_END                (AFE_BASE + 0x0bd8)
++#define AFE_AWB2_CUR                (AFE_BASE + 0x0bdc)
++#define AFE_AWB2_BASE_MSB           (AFE_BASE + 0x0be0)
++#define AFE_AWB2_END_MSB            (AFE_BASE + 0x0be8)
++#define AFE_AWB2_CUR_MSB            (AFE_BASE + 0x0bec)
++#define AFE_ADDA_DL_SDM_DCCOMP_CON  (AFE_BASE + 0x0c50)
++#define AFE_ADDA_DL_SDM_TEST        (AFE_BASE + 0x0c54)
++#define AFE_ADDA_DL_DC_COMP_CFG0    (AFE_BASE + 0x0c58)
++#define AFE_ADDA_DL_DC_COMP_CFG1    (AFE_BASE + 0x0c5c)
++#define AFE_ADDA_DL_SDM_FIFO_MON    (AFE_BASE + 0x0c60)
++#define AFE_ADDA_DL_SRC_LCH_MON     (AFE_BASE + 0x0c64)
++#define AFE_ADDA_DL_SRC_RCH_MON     (AFE_BASE + 0x0c68)
++#define AFE_ADDA_DL_SDM_OUT_MON     (AFE_BASE + 0x0c6c)
++#define AFE_CONNSYS_I2S_CON         (AFE_BASE + 0x0c78)
++#define AFE_CONNSYS_I2S_MON         (AFE_BASE + 0x0c7c)
++#define AFE_ASRC_CONNSYS_CON0       (AFE_BASE + 0x0c80)
++#define AFE_ASRC_2CH_CON1           (AFE_BASE + 0x0c84)
++#define AFE_ASRC_CONNSYS_CON13      (AFE_BASE + 0x0c88)
++#define AFE_ASRC_CONNSYS_CON14      (AFE_BASE + 0x0c8c)
++#define AFE_ASRC_CONNSYS_CON15      (AFE_BASE + 0x0c90)
++#define AFE_ASRC_CONNSYS_CON16      (AFE_BASE + 0x0c94)
++#define AFE_ASRC_CONNSYS_CON17      (AFE_BASE + 0x0c98)
++#define AFE_ASRC_CONNSYS_CON18      (AFE_BASE + 0x0c9c)
++#define AFE_ASRC_CONNSYS_CON19      (AFE_BASE + 0x0ca0)
++#define AFE_ASRC_CONNSYS_CON20      (AFE_BASE + 0x0ca4)
++#define AFE_ASRC_CONNSYS_CON21      (AFE_BASE + 0x0ca8)
++#define AFE_ADDA6_IIR_COEF_02_01    (AFE_BASE + 0x0ce0)
++#define AFE_ADDA6_IIR_COEF_04_03    (AFE_BASE + 0x0ce4)
++#define AFE_ADDA6_IIR_COEF_06_05    (AFE_BASE + 0x0ce8)
++#define AFE_ADDA6_IIR_COEF_08_07    (AFE_BASE + 0x0cec)
++#define AFE_ADDA6_IIR_COEF_10_09    (AFE_BASE + 0x0cf0)
++#define AFE_ADDA_PREDIS_CON2        (AFE_BASE + 0x0d40)
++#define AFE_ADDA_PREDIS_CON3        (AFE_BASE + 0x0d44)
++#define AFE_MEMIF_MON12             (AFE_BASE + 0x0d70)
++#define AFE_MEMIF_MON13             (AFE_BASE + 0x0d74)
++#define AFE_MEMIF_MON14             (AFE_BASE + 0x0d78)
++#define AFE_MEMIF_MON15             (AFE_BASE + 0x0d7c)
++#define AFE_MEMIF_MON16             (AFE_BASE + 0x0d80)
++#define AFE_MEMIF_MON17             (AFE_BASE + 0x0d84)
++#define AFE_MEMIF_MON18             (AFE_BASE + 0x0d88)
++#define AFE_MEMIF_MON19             (AFE_BASE + 0x0d8c)
++#define AFE_MEMIF_MON20             (AFE_BASE + 0x0d90)
++#define AFE_MEMIF_MON21             (AFE_BASE + 0x0d94)
++#define AFE_MEMIF_MON22             (AFE_BASE + 0x0d98)
++#define AFE_MEMIF_MON23             (AFE_BASE + 0x0d9c)
++#define AFE_MEMIF_MON24             (AFE_BASE + 0x0da0)
++#define AFE_HD_ENGEN_ENABLE         (AFE_BASE + 0x0dd0)
++#define AFE_ADDA_MTKAIF_CFG0        (AFE_BASE + 0x0e00)
++#define AFE_ADDA_MTKAIF_TX_CFG1     (AFE_BASE + 0x0e14)
++#define AFE_ADDA_MTKAIF_RX_CFG0     (AFE_BASE + 0x0e20)
++#define AFE_ADDA_MTKAIF_RX_CFG1     (AFE_BASE + 0x0e24)
++#define AFE_ADDA_MTKAIF_RX_CFG2     (AFE_BASE + 0x0e28)
++#define AFE_ADDA_MTKAIF_MON0        (AFE_BASE + 0x0e34)
++#define AFE_ADDA_MTKAIF_MON1        (AFE_BASE + 0x0e38)
++#define AFE_AUD_PAD_TOP_CFG         (AFE_BASE + 0x0e40)
++#define AFE_GENERAL1_ASRC_2CH_CON0  (AFE_BASE + 0x0e80)
++#define AFE_GENERAL1_ASRC_2CH_CON1  (AFE_BASE + 0x0e84)
++#define AFE_GENERAL1_ASRC_2CH_CON2  (AFE_BASE + 0x0e88)
++#define AFE_GENERAL1_ASRC_2CH_CON3  (AFE_BASE + 0x0e8c)
++#define AFE_GENERAL1_ASRC_2CH_CON4  (AFE_BASE + 0x0e90)
++#define AFE_GENERAL1_ASRC_2CH_CON5  (AFE_BASE + 0x0e94)
++#define AFE_GENERAL1_ASRC_2CH_CON6  (AFE_BASE + 0x0e98)
++#define AFE_GENERAL1_ASRC_2CH_CON7  (AFE_BASE + 0x0e9c)
++#define AFE_GENERAL1_ASRC_2CH_CON8  (AFE_BASE + 0x0ea0)
++#define AFE_GENERAL1_ASRC_2CH_CON9  (AFE_BASE + 0x0ea4)
++#define AFE_GENERAL1_ASRC_2CH_CON10 (AFE_BASE + 0x0ea8)
++#define AFE_GENERAL1_ASRC_2CH_CON12 (AFE_BASE + 0x0eb0)
++#define AFE_GENERAL1_ASRC_2CH_CON13 (AFE_BASE + 0x0eb4)
++#define GENERAL_ASRC_MODE           (AFE_BASE + 0x0eb8)
++#define GENERAL_ASRC_EN_ON          (AFE_BASE + 0x0ebc)
++#define AFE_GENERAL2_ASRC_2CH_CON0  (AFE_BASE + 0x0f00)
++#define AFE_GENERAL2_ASRC_2CH_CON1  (AFE_BASE + 0x0f04)
++#define AFE_GENERAL2_ASRC_2CH_CON2  (AFE_BASE + 0x0f08)
++#define AFE_GENERAL2_ASRC_2CH_CON3  (AFE_BASE + 0x0f0c)
++#define AFE_GENERAL2_ASRC_2CH_CON4  (AFE_BASE + 0x0f10)
++#define AFE_GENERAL2_ASRC_2CH_CON5  (AFE_BASE + 0x0f14)
++#define AFE_GENERAL2_ASRC_2CH_CON6  (AFE_BASE + 0x0f18)
++#define AFE_GENERAL2_ASRC_2CH_CON7  (AFE_BASE + 0x0f1c)
++#define AFE_GENERAL2_ASRC_2CH_CON8  (AFE_BASE + 0x0f20)
++#define AFE_GENERAL2_ASRC_2CH_CON9  (AFE_BASE + 0x0f24)
++#define AFE_GENERAL2_ASRC_2CH_CON10 (AFE_BASE + 0x0f28)
++#define AFE_GENERAL2_ASRC_2CH_CON12 (AFE_BASE + 0x0f30)
++#define AFE_GENERAL2_ASRC_2CH_CON13 (AFE_BASE + 0x0f34)
++
++#define AFE_MAXLENGTH             (AFE_BASE + 0x0f34)
++#define AFE_REG_UNDEFINED          (AFE_MAXLENGTH + 0x1)
++
++/* do afe register ioremap */
++int Auddrv_Reg_map(struct device *pdev);
++
++void Afe_Set_Reg_Val(unsigned int offset, unsigned int value);
++void Afe_Set_Reg(unsigned int offset, unsigned int value, unsigned int mask);
++unsigned int Afe_Get_Reg(unsigned int offset);
++
++/* function to apmixed */
++unsigned int GetApmixedCfg(unsigned int offset);
++void SetApmixedCfg(unsigned int offset, unsigned int value, unsigned int mask);
++
++/* function to get/set clksys register */
++unsigned int clksys_get_reg(unsigned int offset);
++void clksys_set_reg(unsigned int offset, unsigned int value, unsigned int mask);
++
++/* for debug usage */
++void Afe_Log_Print(void);
++
++/* function to get pointer */
++unsigned int Get_Afe_Sram_Length(void);
++dma_addr_t Get_Afe_Sram_Phys_Addr(void);
++dma_addr_t Get_Afe_Sram_Capture_Phys_Addr(void);
++void *Get_Afe_SramBase_Pointer(void);
++void *Get_Afe_SramCaptureBase_Pointer(void);
++
++void *Get_Afe_Powertop_Pointer(void);
++void *Get_AudClk_Pointer(void);
++void *Get_Afe_Infra_Pointer(void);
++
++void SetChipModemPcmConfig(int modem_index,
++			   struct audio_digital_pcm p_modem_pcm_attribute);
++bool SetChipModemPcmEnable(int modem_index, bool modem_pcm_on);
++
++bool EnableSideToneFilter(bool stf_on);
++bool CleanPreDistortion(void);
++bool SetDLSrc2(unsigned int rate);
++
++bool SetSampleRate(unsigned int Aud_block, unsigned int SampleRate);
++bool SetChannels(unsigned int Memory_Interface, unsigned int channel);
++int SetMemifMonoSel(unsigned int Memory_Interface, bool mono_use_r_ch);
++
++bool SetMemDuplicateWrite(unsigned int InterfaceType, int dupwrite);
++
++ssize_t AudDrv_Reg_Dump(char *buffer, int size);
++
++void SetSdmLevel(unsigned int level);
++
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/mt6771/mtk-soc-pcm-platform.h
+@@ -0,0 +1,158 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.
++ * If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/******************************************************************************
++ *
++ *
++ * Filename:
++ * ---------
++ *   mt_soc_pcm_platform
++ *
++ * Project:
++ * --------
++ *   mt_soc_pcm_platform function
++ *
++ * Description:
++ * ------------
++ *   Common function
++ *
++ * Author:
++ * -------
++ *   Chipeng Chang (MTK02308)
++ *
++ *-------------------------------------------------------------------------
++ *
++ ******************************************************************************/
++
++#ifndef AUDIO_MT6797_SOUND_H
++#define AUDIO_MT6797_SOUND_H
++
++#include "mtk-auddrv-common.h"
++#include "mtk-soc-pcm-common.h"
++#include "mtk-auddrv-def.h"
++#include "mtk-auddrv-afe.h"
++#include "mtk-auddrv-ana.h"
++#include "mtk-auddrv-clk.h"
++#include "mtk-auddrv-kernel.h"
++#include "mtk-soc-afe-control.h"
++#include "mtk-soc-pcm-platform.h"
++#include "mtk-auddrv-common-func.h"
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/slab.h>
++#include <linux/fs.h>
++#include <linux/completion.h>
++#include <linux/mm.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/dma-mapping.h>
++#include <linux/vmalloc.h>
++#include <linux/platform_device.h>
++#include <linux/miscdevice.h>
++#include <linux/wait.h>
++#include <linux/spinlock.h>
++#include <linux/sched.h>
++#include <linux/semaphore.h>
++#include <linux/jiffies.h>
++#include <linux/proc_fs.h>
++#include <linux/string.h>
++#include <linux/mutex.h>
++#include <linux/uaccess.h>
++#include <linux/irq.h>
++#include <linux/io.h>
++#include <asm/div64.h>
++//#include <mt-plat/aee.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <sound/core.h>
++#include <sound/soc.h>
++#include <sound/soc-dapm.h>
++#include <sound/pcm.h>
++#include <sound/jack.h>
++
++
++/*
++ *    PCM buffer size and period size setting
++ */
++#define BT_DAI_MAX_BUFFER_SIZE     (16*1024)
++#define BT_DAI_MIN_PERIOD_SIZE     1
++#define BT_DAI_MAX_PERIOD_SIZE     BT_DAI_MAX_BUFFER_SIZE
++
++#define Dl1_MAX_BUFFER_SIZE     (48*1024)
++#define Dl1_MIN_PERIOD_SIZE       1
++#define Dl1_MAX_PERIOD_SIZE     Dl1_MAX_BUFFER_SIZE
++
++#define SCPDL1_MAX_BUFFER_SIZE     (48*1024)
++#define SCPDL1_MIN_PERIOD_SIZE       1
++#define SCPDL1_MAX_PERIOD_SIZE     SCPDL1_MAX_BUFFER_SIZE
++#define Dl2_MAX_BUFFER_SIZE     (48*1024)
++#define Dl2_MIN_PERIOD_SIZE       1
++#define Dl2_MAX_PERIOD_SIZE     Dl2_MAX_BUFFER_SIZE
++
++#define Dl3_MAX_BUFFER_SIZE     (32*1024)
++#define Dl3_MIN_PERIOD_SIZE       1
++#define Dl3_MAX_PERIOD_SIZE     Dl3_MAX_BUFFER_SIZE
++
++#define MAX_BUFFER_SIZE     (32*1024)
++#define MIN_PERIOD_SIZE       1
++#define MAX_PERIOD_SIZE     MAX_BUFFER_SIZE
++
++#define UL1_MAX_BUFFER_SIZE     (48*1024)
++#define UL1_MIN_PERIOD_SIZE       1
++#define UL1_MAX_PERIOD_SIZE     UL1_MAX_BUFFER_SIZE
++
++#define UL2_MAX_BUFFER_SIZE     (48*1024)
++#define UL2_MIN_PERIOD_SIZE       1
++#define UL2_MAX_PERIOD_SIZE     UL2_MAX_BUFFER_SIZE
++
++#define AWB_MAX_BUFFER_SIZE     (64*1024)
++#define AWB_MIN_PERIOD_SIZE       1
++#define AWB_MAX_PERIOD_SIZE     AWB_MAX_BUFFER_SIZE
++
++#define MOD_DAI_MAX_BUFFER_SIZE     (16*1024)
++#define MOD_DAI_MIN_PERIOD_SIZE       (1)
++#define MOD_DAI_MAX_PERIOD_SIZE     MOD_DAI_MAX_BUFFER_SIZE
++
++#define HDMI_MAX_BUFFER_SIZE     (384*1024)
++#define HDMI_MIN_PERIOD_SIZE       1
++#define HDMI_MAX_PERIODBYTE_SIZE     HDMI_MAX_BUFFER_SIZE
++#define HDMI_MAX_2CH_16BIT_PERIOD_SIZE     (HDMI_MAX_PERIODBYTE_SIZE/(2*2))
++#define HDMI_MAX_8CH_16BIT_PERIOD_SIZE     (HDMI_MAX_PERIODBYTE_SIZE/(8*2))
++#define HDMI_MAX_2CH_24BIT_PERIOD_SIZE     (HDMI_MAX_PERIODBYTE_SIZE/(2*2*2))
++#define HDMI_MAX_8CH_24BIT_PERIOD_SIZE     (HDMI_MAX_PERIODBYTE_SIZE/(8*2*2))
++
++#define MRGRX_MAX_BUFFER_SIZE     (64*1024)
++#define MRGRX_MIN_PERIOD_SIZE       1
++#define MRGRX_MAX_PERIOD_SIZE     MRGRX_MAX_BUFFER_SIZE
++
++#define FM_I2S_MAX_BUFFER_SIZE     (64*1024)
++#define FM_I2S_MIN_PERIOD_SIZE       1
++#define FM_I2S_MAX_PERIOD_SIZE     MRGRX_MAX_BUFFER_SIZE
++
++#define AUDIO_SRAM_PLAYBACK_FULL_SIZE	Dl1_MAX_BUFFER_SIZE
++#define AUDIO_SRAM_PLAYBACK_PARTIAL_SIZE	Dl1_MAX_BUFFER_SIZE
++#define AUDIO_DRAM_PLAYBACK_SIZE	(1024 * 40)
++
++#define AUDIO_SRAM_CAPTURE_SIZE	(1024 * 32)
++#define AUDIO_DRAM_CAPTURE_SIZE	(1024 * 32)
++#endif
+--- /dev/null
++++ b/drivers/misc/mediatek/base/power/include/mtk_spm_resource_req.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ */
++
++#ifndef __MTK_SPM_RESOURCE_REQ_H__
++#define __MTK_SPM_RESOURCE_REQ_H__
++
++/* 5.10 carries spm_v4 only (MT6771). */
++#include "spm_v4/mtk_spm_resource_req.h"
++
++#endif /* __MTK_SPM_RESOURCE_REQ_H__ */
+--- /dev/null
++++ b/drivers/misc/mediatek/base/power/include/spm_v4/mtk_spm_resource_req.h
+@@ -0,0 +1,45 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ */
++
++#ifndef __SPM_V4__MTK_SPM_RESOURCE_REQ_H__
++#define __SPM_V4__MTK_SPM_RESOURCE_REQ_H__
++
++#include <linux/types.h>
++
++enum {
++	SPM_RESOURCE_RELEASE = 0,
++	SPM_RESOURCE_MAINPLL = 1 << 0,
++	SPM_RESOURCE_DRAM    = 1 << 1,
++	SPM_RESOURCE_CK_26M  = 1 << 2,
++	SPM_RESOURCE_AXI_BUS = 1 << 3,
++	SPM_RESOURCE_CPU     = 1 << 4,
++	NF_SPM_RESOURCE = 5,
++
++	SPM_RESOURCE_ALL = (1 << NF_SPM_RESOURCE) - 1
++};
++
++enum {
++	SPM_RESOURCE_USER_SPM = 0,
++	SPM_RESOURCE_USER_UFS,
++	SPM_RESOURCE_USER_SSUSB,
++	SPM_RESOURCE_USER_AUDIO,
++	SPM_RESOURCE_USER_UART,
++	SPM_RESOURCE_USER_CONN,
++	SPM_RESOURCE_USER_MSDC,
++	SPM_RESOURCE_USER_SCP,
++	NF_SPM_RESOURCE_USER
++};
++
++/*
++ * Stub. Stock records which users need the main PLL, DRAM, 26 MHz, bus and CPU kept up
++ * through SPM deep idle and SODI. 5.10 has no SPM idle (spm_v4/mtk_spm_hooks.c only keeps
++ * the notifier and flags), so there is nothing to hold and the request always succeeds.
++ */
++static inline bool spm_resource_req(unsigned int user, unsigned int req_mask)
++{
++	return user < NF_SPM_RESOURCE_USER;
++}
++
++#endif /* __SPM_V4__MTK_SPM_RESOURCE_REQ_H__ */

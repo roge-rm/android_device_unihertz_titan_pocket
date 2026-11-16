@@ -1,0 +1,29 @@
+# Power HAL (libperfmgr, powerhint.json). Started at late-fs, before the stock vendor
+# mtkpower service (class hal, on boot); see service.cpp for how it keeps IPower/default.
+on late-fs
+    chown system system /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq
+    chown system system /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq
+    chmod 0664 /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq
+    chmod 0664 /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq
+    chown system system /dev/cpuctl/top-app/cpu.uclamp.min
+    chown system system /dev/cpuctl/top-app/cpu.uclamp.max
+    chown system system /dev/cpuctl/foreground/cpu.uclamp.max
+    chown system system /dev/cpuctl/background/cpu.uclamp.max
+    chmod 0664 /dev/cpuctl/top-app/cpu.uclamp.min
+    chmod 0664 /dev/cpuctl/top-app/cpu.uclamp.max
+    chmod 0664 /dev/cpuctl/foreground/cpu.uclamp.max
+    chmod 0664 /dev/cpuctl/background/cpu.uclamp.max
+    start system.power-hal-pocket
+
+# Stock vendor mtkpower (libpowerhal) falls back to scaling_min/max_freq on 5.10 and
+# pins both, e.g. for the VP9 decoder. With this off its perfLock calls do nothing,
+# and its HIDL service still runs for camera and audio. Read once when it starts
+# (class hal, on boot). See evidence/power/mtkpower-cpufreq.md.
+on early-boot
+    setprop persist.vendor.powerhal.enable 0
+
+service system.power-hal-pocket /system_ext/bin/hw/android.hardware.power-service.pocket
+    class hal
+    user system
+    group system
+    priority -20

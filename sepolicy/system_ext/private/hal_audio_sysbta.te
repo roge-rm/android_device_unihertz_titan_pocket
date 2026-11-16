@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# System-side Bluetooth audio HAL (bluetooth-audio/). One process serves the AIDL
+# IBluetoothAudioProviderFactory/sysbta for the Bluetooth stack and the HIDL audio 6.0
+# IDevicesFactory/sysbta for audioserver, so both share the same session. hal_audio's
+# vndbinder and /proc rules skip coredomain (tools/stage-pocket-audiopolicy.py).
+type hal_audio_sysbta, domain, coredomain;
+hal_server_domain(hal_audio_sysbta, hal_audio)
+
+type hal_audio_sysbta_exec, exec_type, system_file_type, file_type;
+init_daemon_domain(hal_audio_sysbta)
+
+hal_client_domain(hal_audio_sysbta, hal_allocator)
+
+# audioserver dumps the HAL through a pipe it owns.
+allow hal_audio_sysbta audioserver:fifo_file write;
+
+# Reads a vendor_default_prop property; the default is fine, and allowing it fails a neverallow.
+dontaudit hal_audio_sysbta vendor_property_type:file { read open getattr map };

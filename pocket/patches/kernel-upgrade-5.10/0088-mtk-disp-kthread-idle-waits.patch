@@ -1,0 +1,120 @@
+--- a/drivers/misc/mediatek/video/mt6771/dispsys/ddp_irq.c
++++ b/drivers/misc/mediatek/video/mt6771/dispsys/ddp_irq.c
+@@ -40,8 +40,7 @@
+ #include "ddp_manager.h"
+ #include "primary_display.h"
+ 
+-/* IRQ log print kthread */
+-static struct task_struct *disp_irq_log_task;
++/* IRQ log wait queue; nothing waits on it as the log thread is not built */
+ static wait_queue_head_t disp_irq_log_wq;
+ static int disp_irq_log_module;
+ 
+@@ -524,24 +523,6 @@
+ 	return IRQ_HANDLED;
+ }
+ 
+-static int disp_irq_log_kthread_func(void *data)
+-{
+-	unsigned int i = 0;
+-
+-	while (1) {
+-		wait_event_interruptible(disp_irq_log_wq, disp_irq_log_module);
+-		DDPMSG("%s: dump intr register: disp_irq_log_module=%d\n",
+-		       __func__, disp_irq_log_module);
+-
+-		for (i = 0; i < DISP_MODULE_NUM; i++) {
+-			if (disp_irq_log_module & (1 << i))
+-				ddp_dump_reg(i);
+-		}
+-		disp_irq_log_module = 0;
+-	}
+-	return 0;
+-}
+-
+ int disp_init_irq(void)
+ {
+ 	if (irq_init)
+@@ -550,14 +531,12 @@
+ 	irq_init = 1;
+ 	DDPMSG("%s\n", __func__);
+ 
+-	/* create irq log thread */
++	/*
++	 * MTK creates an IRQ log thread here but never wakes it, so it sat in
++	 * kthread()'s uninterruptible first sleep and added 1 to the load
++	 * average. It is left out; nothing ever ran it.
++	 */
+ 	init_waitqueue_head(&disp_irq_log_wq);
+-	disp_irq_log_task = kthread_create(disp_irq_log_kthread_func,
+-					   NULL, "ddp_irq_log_kthread");
+-	if (IS_ERR(disp_irq_log_task))
+-		DDPPR_ERR(" can not create disp_irq_log_task kthread\n");
+-
+-	/* wake_up_process(disp_irq_log_task); */
+ 	return 0;
+ }
+ unsigned int get_display_ut_status(void)
+--- a/drivers/misc/mediatek/video/mt6771/videox/disp_lowpower.c
++++ b/drivers/misc/mediatek/video/mt6771/videox/disp_lowpower.c
+@@ -1131,8 +1131,8 @@
+ 
+ 		if (primary_get_state() != DISP_ALIVE) {
+ 			primary_display_manual_unlock();
+-			primary_display_wait_state(DISP_ALIVE,
+-						   MAX_SCHEDULE_TIMEOUT);
++			primary_display_idle_wait_state(DISP_ALIVE,
++							MAX_SCHEDULE_TIMEOUT);
+ 			continue;
+ 		}
+ 
+--- a/drivers/misc/mediatek/video/mt6771/videox/disp_recovery.c
++++ b/drivers/misc/mediatek/video/mt6771/videox/disp_recovery.c
+@@ -458,7 +458,8 @@
+ 	sched_setscheduler(current, SCHED_RR, &param);
+ 
+ 	while (1) {
+-		msleep(2000); /* 2s */
++		/* interruptible so the 2 s nap does not count as load */
++		msleep_interruptible(2000);
+ 		ret = wait_event_interruptible(_check_task_wq,
+ 					atomic_read(&_check_task_wakeup));
+ 		if (ret < 0) {
+--- a/drivers/misc/mediatek/video/mt6771/videox/primary_display.c
++++ b/drivers/misc/mediatek/video/mt6771/videox/primary_display.c
+@@ -590,6 +590,13 @@
+ 	return ret;
+ }
+ 
++/* As primary_display_wait_state, but sleeps in TASK_IDLE for kernel threads */
++long primary_display_idle_wait_state(enum DISP_POWER_STATE state, long timeout)
++{
++	return wait_event_idle_timeout(display_state_wait_queue,
++				       primary_get_state() == state, timeout);
++}
++
+ long primary_display_wait_not_state(enum DISP_POWER_STATE state, long timeout)
+ {
+ 	long ret;
+@@ -6277,8 +6284,8 @@
+ 	sched_setscheduler(current, SCHED_RR, &param);
+ 
+ 	while (1) {
+-		wait_event(decouple_trigger_wq,
+-			   atomic_read(&decouple_trigger_event));
++		wait_event_idle(decouple_trigger_wq,
++				atomic_read(&decouple_trigger_event));
+ 		dpmgr_wait_event(pgc->dpmgr_handle, DISP_PATH_EVENT_IF_VSYNC);
+ 
+ 		_primary_path_lock(__func__);
+--- a/drivers/misc/mediatek/video/mt6771/videox/primary_display.h
++++ b/drivers/misc/mediatek/video/mt6771/videox/primary_display.h
+@@ -427,6 +427,8 @@
+ void _cmdq_insert_wait_frame_done_token_mira(void *handle);
+ int primary_display_get_max_layer(void);
+ long primary_display_wait_state(enum DISP_POWER_STATE state, long timeout);
++long primary_display_idle_wait_state(enum DISP_POWER_STATE state,
++				     long timeout);
+ int do_primary_display_switch_mode(int sess_mode, unsigned int session,
+ 				   int need_lock, struct cmdqRecStruct *handle,
+ 				   int block);

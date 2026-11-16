@@ -1,0 +1,11 @@
+--- a/drivers/soc/mediatek/mtk-cmdq-helper.c
++++ b/drivers/soc/mediatek/mtk-cmdq-helper.c
+@@ -595,7 +595,7 @@
+ 
+ 	if (unlikely(!pkt->avail_buf_size))
+ 		if (cmdq_pkt_add_cmd_buffer(pkt) < 0)
+-			return -ENOMEM;
++			return ERR_PTR(-ENOMEM);
+ 
+ 	buf = list_last_entry(&pkt->buf, typeof(*buf), list_entry);
+ 

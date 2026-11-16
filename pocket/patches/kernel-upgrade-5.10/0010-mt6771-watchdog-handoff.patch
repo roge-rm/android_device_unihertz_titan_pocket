@@ -1,0 +1,286 @@
+--- a/drivers/watchdog/mtk_wdt.c
++++ b/drivers/watchdog/mtk_wdt.c
+@@ -22,6 +22,7 @@
+ #include <linux/of_device.h>
+ #include <linux/platform_device.h>
+ #include <linux/reset-controller.h>
++#include <linux/soc/mediatek/mtk-wdt.h>
+ #include <linux/types.h>
+ #include <linux/watchdog.h>
+ 
+@@ -31,6 +32,7 @@
+ 
+ #define WDT_LENGTH		0x04
+ #define WDT_LENGTH_KEY		0x8
++#define WDT_LENGTH_MASK		0xffe0
+ 
+ #define WDT_RST			0x08
+ #define WDT_RST_RELOAD		0x1971
+@@ -51,11 +53,25 @@
+ #define WDT_SWSYSRST		0x18U
+ #define WDT_SWSYS_RST_KEY	0x88000000
+ 
++/* T's wdt_v2 mtk_wdt.h, for the SPM suspend handover */
++#define WDT_STA			0x0c
++#define WDT_NONRST_REG2		0x24
++#define WDT_NONRST2_SUSPEND_DIS	(1 << 14)
++#define WDT_REQ_MODE		0x30
++#define WDT_REQ_MODE_KEY	0x33000000
++#define WDT_REQ_IRQ_EN		0x34
++#define WDT_REQ_IRQ_KEY		0x44000000
++#define WDT_REQ_SPM_SCPSYS	(1 << 1)	/* MODE_SPM_SCPSYS and IRQ_SPM_SCPSYS_EN */
++
+ #define DRV_NAME		"mtk-wdt"
+ #define DRV_VERSION		"1.0"
+ 
+ static bool nowayout = WATCHDOG_NOWAYOUT;
+ static unsigned int timeout;
++
++/* The mt6771 TOPRGU, for mtk_wdt_spm_suspend and resume; set at probe */
++static struct mtk_wdt_dev *spm_wdt;
++static bool spm_wdt_was_on;
+ 
+ struct mtk_wdt_dev {
+ 	struct watchdog_device wdt_dev;
+@@ -66,6 +82,12 @@
+ 
+ struct mtk_wdt_data {
+ 	int toprgu_sw_rst_num;
++	bool adopt_boot_watchdog;
++};
++
++/* MT6771 uses the vendor common-v2 RGU layout, not an mt6589 alias. */
++static const struct mtk_wdt_data mt6771_data = {
++	.adopt_boot_watchdog = true,
+ };
+ 
+ static const struct mtk_wdt_data mt2712_data = {
+@@ -234,6 +256,50 @@
+ 	return 0;
+ }
+ 
++static int mtk_wdt_boot_handoff(struct watchdog_device *wdt_dev, bool adopt)
++{
++	struct mtk_wdt_dev *mtk_wdt = watchdog_get_drvdata(wdt_dev);
++	void __iomem *base = mtk_wdt->wdt_base;
++	u32 mode;
++
++	if (!adopt)
++		return mtk_wdt_stop(wdt_dev);
++
++	mode = readl(base + WDT_MODE);
++	dev_info(wdt_dev->parent, "Boot watchdog mode=%#x length=%#x\n",
++		 mode, readl(base + WDT_LENGTH));
++	if (!(mode & WDT_MODE_EN)) {
++		dev_info(wdt_dev->parent, "Boot watchdog is off; leaving it off\n");
++		return 0;
++	}
++
++	/* Leave the running timer as a rescue if setup cannot complete. */
++	if (!IS_ENABLED(CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED))
++		return -EINVAL;
++	if (wdt_dev->timeout < WDT_MIN_TIMEOUT ||
++	    wdt_dev->timeout > WDT_MAX_TIMEOUT)
++		return -EINVAL;
++
++	mtk_wdt_ping(wdt_dev);
++	mtk_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
++	if ((readl(base + WDT_LENGTH) & WDT_LENGTH_MASK) !=
++	    WDT_LENGTH_TIMEOUT(wdt_dev->timeout << 6))
++		return -EIO;
++
++	/* No IRQ handler is installed. Preserve EXTRA_CNT, DDR and routing bits. */
++	mode &= ~(WDT_MODE_IRQ_EN | WDT_MODE_DUAL_EN);
++	writel(mode | WDT_MODE_KEY, base + WDT_MODE);
++	if ((readl(base + WDT_MODE) &
++	     (WDT_MODE_EN | WDT_MODE_IRQ_EN | WDT_MODE_DUAL_EN)) != WDT_MODE_EN)
++		return -EIO;
++
++	/* watchdog_dev.c feeds this timer until userspace opens the device. */
++	set_bit(WDOG_HW_RUNNING, &wdt_dev->status);
++	dev_info(wdt_dev->parent, "Adopted boot watchdog (timeout=%u sec)\n",
++		 wdt_dev->timeout);
++	return 0;
++}
++
+ static const struct watchdog_info mtk_wdt_info = {
+ 	.identity	= DRV_NAME,
+ 	.options	= WDIOF_SETTIMEOUT |
+@@ -262,6 +328,7 @@
+ 		return -ENOMEM;
+ 
+ 	platform_set_drvdata(pdev, mtk_wdt);
++	spin_lock_init(&mtk_wdt->lock);
+ 
+ 	mtk_wdt->wdt_base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(mtk_wdt->wdt_base))
+@@ -274,13 +341,21 @@
+ 	mtk_wdt->wdt_dev.min_timeout = WDT_MIN_TIMEOUT;
+ 	mtk_wdt->wdt_dev.parent = dev;
+ 
+-	watchdog_init_timeout(&mtk_wdt->wdt_dev, timeout, dev);
++	wdt_data = of_device_get_match_data(dev);
++	err = watchdog_init_timeout(&mtk_wdt->wdt_dev, timeout, dev);
++	if (err && wdt_data && wdt_data->adopt_boot_watchdog)
++		return err;
+ 	watchdog_set_nowayout(&mtk_wdt->wdt_dev, nowayout);
+ 	watchdog_set_restart_priority(&mtk_wdt->wdt_dev, 128);
+ 
+ 	watchdog_set_drvdata(&mtk_wdt->wdt_dev, mtk_wdt);
+ 
+-	mtk_wdt_stop(&mtk_wdt->wdt_dev);
++	err = mtk_wdt_boot_handoff(&mtk_wdt->wdt_dev,
++				   wdt_data && wdt_data->adopt_boot_watchdog);
++	if (err) {
++		dev_err(dev, "Watchdog boot handoff failed: %d\n", err);
++		return err;
++	}
+ 
+ 	watchdog_stop_on_reboot(&mtk_wdt->wdt_dev);
+ 	err = devm_watchdog_register_device(dev, &mtk_wdt->wdt_dev);
+@@ -289,9 +364,10 @@
+ 
+ 	dev_info(dev, "Watchdog enabled (timeout=%d sec, nowayout=%d)\n",
+ 		 mtk_wdt->wdt_dev.timeout, nowayout);
+-
+-	wdt_data = of_device_get_match_data(dev);
+-	if (wdt_data) {
++	if (wdt_data == &mt6771_data)
++		WRITE_ONCE(spm_wdt, mtk_wdt);
++
++	if (wdt_data && wdt_data->toprgu_sw_rst_num > 0) {
+ 		err = toprgu_register_reset_controller(pdev,
+ 						       wdt_data->toprgu_sw_rst_num);
+ 		if (err)
+@@ -300,6 +376,70 @@
+ 	return 0;
+ }
+ 
++/*
++ * SPM deep suspend's enter, on CPU0 with IRQs off. T's
++ * spmwdt_mode_config(WD_REQ_EN, WD_REQ_RST_MODE): a PCM WDT timeout resets
++ * the chip. Then its suspend_notify: the AP timer is turned off for the sleep,
++ * as nothing feeds it then, with NONRST_REG2 SUSPEND_DIS set, and pinged.
++ * Stock also sets IRQ, EXTEN and dual mode there; the other mode bits stay
++ * as the boot handoff left them here.
++ */
++int mtk_wdt_spm_suspend(void)
++{
++	struct mtk_wdt_dev *wdt = READ_ONCE(spm_wdt);
++	void __iomem *base;
++	unsigned long flags;
++	u32 mode;
++
++	if (!wdt)
++		return -ENODEV;
++	base = wdt->wdt_base;
++	spin_lock_irqsave(&wdt->lock, flags);
++	writel(readl(base + WDT_REQ_MODE) | WDT_REQ_SPM_SCPSYS | WDT_REQ_MODE_KEY,
++	       base + WDT_REQ_MODE);
++	writel((readl(base + WDT_REQ_IRQ_EN) & ~WDT_REQ_SPM_SCPSYS) | WDT_REQ_IRQ_KEY,
++	       base + WDT_REQ_IRQ_EN);
++	mode = readl(base + WDT_MODE);
++	spm_wdt_was_on = mode & WDT_MODE_EN;
++	if (spm_wdt_was_on)
++		writel((mode & ~WDT_MODE_EN) | WDT_MODE_KEY, base + WDT_MODE);
++	writel(readl(base + WDT_NONRST_REG2) | WDT_NONRST2_SUSPEND_DIS,
++	       base + WDT_NONRST_REG2);
++	writel(WDT_RST_RELOAD, base + WDT_RST);
++	spin_unlock_irqrestore(&wdt->lock, flags);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mtk_wdt_spm_suspend);
++
++/*
++ * After SPM sleep, still with IRQs off: T's resume_notify (the AP timer back
++ * on if it was, SUSPEND_DIS cleared, a ping), then
++ * spmwdt_mode_config(WD_REQ_DIS, WD_REQ_RST_MODE).
++ */
++void mtk_wdt_spm_resume(void)
++{
++	struct mtk_wdt_dev *wdt = READ_ONCE(spm_wdt);
++	void __iomem *base;
++	unsigned long flags;
++
++	if (!wdt)
++		return;
++	base = wdt->wdt_base;
++	spin_lock_irqsave(&wdt->lock, flags);
++	writel(WDT_RST_RELOAD, base + WDT_RST);
++	if (spm_wdt_was_on)
++		writel(readl(base + WDT_MODE) | WDT_MODE_EN | WDT_MODE_KEY, base + WDT_MODE);
++	writel(readl(base + WDT_NONRST_REG2) & ~WDT_NONRST2_SUSPEND_DIS,
++	       base + WDT_NONRST_REG2);
++	writel(WDT_RST_RELOAD, base + WDT_RST);
++	writel((readl(base + WDT_REQ_MODE) & ~WDT_REQ_SPM_SCPSYS) | WDT_REQ_MODE_KEY,
++	       base + WDT_REQ_MODE);
++	writel((readl(base + WDT_REQ_IRQ_EN) & ~WDT_REQ_SPM_SCPSYS) | WDT_REQ_IRQ_KEY,
++	       base + WDT_REQ_IRQ_EN);
++	spin_unlock_irqrestore(&wdt->lock, flags);
++}
++EXPORT_SYMBOL_GPL(mtk_wdt_spm_resume);
++
+ #ifdef CONFIG_PM_SLEEP
+ static int mtk_wdt_suspend(struct device *dev)
+ {
+@@ -307,6 +447,13 @@
+ 
+ 	if (watchdog_active(&mtk_wdt->wdt_dev))
+ 		mtk_wdt_stop(&mtk_wdt->wdt_dev);
++	else if (watchdog_hw_running(&mtk_wdt->wdt_dev))
++		/*
++		 * Adopted boot watchdog with no opener: it keeps running. In s2idle
++		 * the timers run and the core keeps pinging; ping here so sleep
++		 * starts with the full timeout.
++		 */
++		mtk_wdt_ping(&mtk_wdt->wdt_dev);
+ 
+ 	return 0;
+ }
+@@ -318,6 +465,8 @@
+ 	if (watchdog_active(&mtk_wdt->wdt_dev)) {
+ 		mtk_wdt_start(&mtk_wdt->wdt_dev);
+ 		mtk_wdt_ping(&mtk_wdt->wdt_dev);
++	} else if (watchdog_hw_running(&mtk_wdt->wdt_dev)) {
++		mtk_wdt_ping(&mtk_wdt->wdt_dev);
+ 	}
+ 
+ 	return 0;
+@@ -327,6 +476,7 @@
+ static const struct of_device_id mtk_wdt_dt_ids[] = {
+ 	{ .compatible = "mediatek,mt2712-wdt", .data = &mt2712_data },
+ 	{ .compatible = "mediatek,mt6589-wdt" },
++	{ .compatible = "mediatek,mt6771-wdt", .data = &mt6771_data },
+ 	{ .compatible = "mediatek,mt8183-wdt", .data = &mt8183_data },
+ 	{ /* sentinel */ }
+ };
+@@ -343,6 +493,7 @@
+ 		.name		= DRV_NAME,
+ 		.pm		= &mtk_wdt_pm_ops,
+ 		.of_match_table	= mtk_wdt_dt_ids,
++		.suppress_bind_attrs = true,
+ 	},
+ };
+ 
+--- /dev/null
++++ b/include/linux/soc/mediatek/mtk-wdt.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * MT6771 TOPRGU calls for SPM deep suspend (drivers/watchdog/mtk_wdt.c), T's
++ * wd_api spmwdt_mode_config and suspend_notify and their resume pair.
++ */
++#ifndef __MTK_WDT_H__
++#define __MTK_WDT_H__
++
++#include <linux/errno.h>
++
++#if IS_BUILTIN(CONFIG_MEDIATEK_WATCHDOG)
++int mtk_wdt_spm_suspend(void);
++void mtk_wdt_spm_resume(void);
++#else
++static inline int mtk_wdt_spm_suspend(void) { return -ENODEV; }
++static inline void mtk_wdt_spm_resume(void) { }
++#endif
++
++#endif

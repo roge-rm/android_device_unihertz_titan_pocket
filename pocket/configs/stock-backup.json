@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "description": "What tools/pocket-stock-backup.py saves from the phone in our recovery and what pocket-stock-restore.py puts back.",
+  "owner_partitions": [
+    "nvram",
+    "nvdata",
+    "nvcfg",
+    "protect1",
+    "protect2",
+    "persist",
+    "proinfo"
+  ],
+  "bootloader_partitions": [
+    "boot",
+    "dtbo",
+    "vbmeta",
+    "vbmeta_system",
+    "vbmeta_vendor",
+    "recovery"
+  ],
+  "optional_partitions": [
+    "vbmeta_system",
+    "vbmeta_vendor"
+  ],
+  "logical_partitions": [
+    "vendor",
+    "system",
+    "product"
+  ],
+  "logical_if_room": [
+    "system",
+    "product"
+  ],
+  "by_name": "/dev/block/by-name",
+  "mapper": "/dev/block/mapper",
+  "stock_recovery": {
+    "note": "LK fastboot boot is not qualified (FASTBOOT_BOOT_AUDIT.md), so our recovery is flashed over stock recovery before the backup runs. Stock recovery comes from Unihertz's public firmware zip instead.",
+    "20240514": {
+      "zip_sha256": "e5362b867e23cf16e37f8881edbb83d6b236d908c83dbe1637df0f6db1e25660",
+      "member": "2024051420_g66v71c2k_dfl_tee/recovery.img",
+      "sha256": "120844f0fff3c61837166bfdbfd94530ee9d7b66313fdb854193046f92d29fed",
+      "bytes": 33554432
+    }
+  },
+  "camerapostalgo": {
+    "note": "Stock system service dropped from our system. Its files are copied from the phone's own stock system partition, never shipped. Same hashes in January 2023 and May 2024.",
+    "files": {
+      "system/bin/camerapostalgo": "c2d97dbf9595c91a184c99f1cb1688de0532dce5152b0f0d2c9fc3a7c923a21f",
+      "system/etc/init/camerapostalgo.rc": "2cb63d4f5d688524e42a13c1620104786b6ddbb8aef562500a8653d60411af0f",
+      "system/lib/libcamalgo_sys.autorama.so": "e607bef9aab9434efc86d15c6bfa6f5c271f18aa51c73b826b1a154a4f3a2d54",
+      "system/lib/libcamalgo_sys.cfb.so": "9bf05bfdf946f3da753175e60f9ddccef4dd799b08ddb47a972e3139c19cb165",
+      "system/lib/libcamalgo_sys.hdr.so": "5d07899f777b9f1aded3a20d1a9451902902d6e06116f54f91f8d8720dee2062",
+      "system/lib/libcampostalgo.so": "de3e8b6b29d3368f82a038f317f53222dcbbbc7b086f0190293cfbbb191178cc",
+      "system/lib/libcampostalgo_featurepipe.so": "ffbac49f0c02cbe713fb6575cd2c97aa5d8424743c466b8319a0705507472978",
+      "system/lib/libcampostalgo_interface.so": "30220dabfb23c10609970898b2b61c4f0d8935d1a5cf78d03a098d69d1182dca",
+      "system/lib/libged_sys.so": "1520c738a03cbc0f47f43de6fb860f7fd0e613a326c81731ad87796d783a8808",
+      "system/lib/libgralloc_extra_sys.so": "689b8bcadd77dfbf06f63654f763c8e9c2cf446a70fe05dc01c49334eb921c67",
+      "system/lib/libpostalgo.plugin.autorama.so": "769e7b45c0e5ccacabc35fb2ed76932a70e122b7012ff53621d2d816915a76ae",
+      "system/lib/libpostalgo.plugin.fb.so": "4ef9f1f4a12ca8f2badaee136f6f0050eefa0306a24bcfefb611d7352ef0a31b",
+      "system/lib/libpostalgo.plugin.hdr.so": "8b45677a62b57561c7d1700d8deac4ec692589ce8abdddab112795870423785b",
+      "system/lib/libpostalgo_3rdparty.core.so": "4cdf12ddc7cd766335f10cb77f8e8a947c5f66eb47856aab3ff949544b4f2ca2",
+      "system/lib/libpostalgo_3rdparty.customer.so": "df63d61390f80dfe718f8e1af96884dd88e9469430113891097537d27c2ca589",
+      "system/lib/libpostalgo_3rdparty.mtk.so": "d0b579a286d3e704480c8721b4e7dc6af85da39b3886d1e5d0f348e6ceac6dcd",
+      "system/lib/libpostalgo_3rdparty.plugin.features.so": "8419afd32a08aff1072c6f0b4654e16d3b1b2b1388e2470b9a167f27cdc4d615",
+      "system/lib/libpostalgo_3rdparty.so": "3d23a240856165d020215db3c7f68c4a3d8abe0daa4807894ec0458897bd8e3f",
+      "system/lib/libpostalgo_grallocutils.so": "2f73e7ab7203b851a250b20e8cb9d2fde6c86964ae81d0a646eb5b568699577a",
+      "system/lib/libpostalgo_imgbuf.so": "81b89429f8bd7aff57e0871603bf5c336a336a56f8df11d9c7500fbe5b56c2c0",
+      "system/lib/libpostalgo_metadata.so": "1bb84aed1cb220720997ada53151249d65f81d4238f9b3d4fa7397c7d57ebb62",
+      "system/lib/libpostalgo_stdutils.so": "eac4b6c643de0880f732b3fb9c1d525dc6eab5af497a1bd0f8e467f47d158027",
+      "system/lib/vendor.mediatek.hardware.mms@1.0.so": "b19167743f9276f6c9d112fdba1a766460f74531356a128ffbb21fd4ea9a1975",
+      "system/lib/vendor.mediatek.hardware.mms@1.1.so": "80c5a615c726a23229c389b1b7fe02588ce2a83111466461f3716b6d49aa7371",
+      "system/lib/vendor.mediatek.hardware.mms@1.2.so": "d4fb08e4b1c7643d0b62e5a9dd96c4582cb597e1cbbf2729b3fc1ec86d2c60f1",
+      "system/lib64/libcamalgo_sys.autorama.so": "c326ecfb00f9e057bc849033f869006761b5b717f676eb8b1e0b6d9a3151c6a6",
+      "system/lib64/libcamalgo_sys.cfb.so": "c1910816cb1bba3e5db0bb78d8d51f80133a44f4785f078288124180a43fcafe",
+      "system/lib64/libcamalgo_sys.hdr.so": "280f00cd84405600d3d23a4e9dca953b92ab084a63e10a18a0a1f4c68e9f19c6",
+      "system/lib64/libcampostalgo.so": "e0ff461e52901459b2d11979c73119078a3166fb71ee57f46c77a6fa0389d9fc",
+      "system/lib64/libcampostalgo_featurepipe.so": "e89535cacd4e3b4ca4c63e6ce6c2c2f255724d345e38dd2e5cb4598145d463e6",
+      "system/lib64/libcampostalgo_interface.so": "e14a5e709ccff47071461298e2e307d35540420d54ce3ce02e82a09f37828bce",
+      "system/lib64/libged_sys.so": "4b25b160379c9358f9900f750f19c2c9753a8b5ddabd81fc5a2224d6d1ae1ebf",
+      "system/lib64/libgralloc_extra_sys.so": "880430a5fd5fb40461346a48de3a449591d8059226bb6572f6712c39330cf5b9",
+      "system/lib64/libpostalgo.plugin.autorama.so": "9ce0b174f878d9966a2fc5471ce6524a07e371c41f8c3a5b97b1d5224320b1fd",
+      "system/lib64/libpostalgo.plugin.fb.so": "7d551334cbf8e0bd2957b91b6acb7eb965d0a55150b3b837d2073bf02a626384",
+      "system/lib64/libpostalgo.plugin.hdr.so": "5843fa0eb04d178bf4319f7b7b5c8ae2c14e5a49a59ebc9536a1c8216702b34e",
+      "system/lib64/libpostalgo_3rdparty.core.so": "8074c4f94201d00b564624023e478fe4f4ebcb14fa549d2ec1511ad265636bf6",
+      "system/lib64/libpostalgo_3rdparty.customer.so": "1c163de11d81a0f03bdf2b54c1e1d51dae4a4e3c8c4d2d10e2ad633f4735b8bb",
+      "system/lib64/libpostalgo_3rdparty.mtk.so": "583d9a8c7a84e657bca8e666bbc3a2c7a819a173aee92ab6717be37e2e0cb07e",
+      "system/lib64/libpostalgo_3rdparty.plugin.features.so": "2521a55ea1aff75a596fd43f60639d32b22b82133b97d23f03d385d93f9a3317",
+      "system/lib64/libpostalgo_3rdparty.so": "9238aacd605fddee9e158fbe972933a303e70d75461b21adfd55ebf3ceaba81f",
+      "system/lib64/libpostalgo_grallocutils.so": "abc310df03c963bc0ce64b20d120b2a048f6fbd2aefa0c396a9394cf4969fbf3",
+      "system/lib64/libpostalgo_imgbuf.so": "0bda907f1f7ff89ea1661ae188bc229aebb3839603b8b0e6f7b1cabcb50adbe0",
+      "system/lib64/libpostalgo_metadata.so": "5c9587ab09d6134aff87c639b8594073e0a2aa20822bddd2b304ba3098e5ed40",
+      "system/lib64/libpostalgo_stdutils.so": "cf7ed176a56e1844154f021d7208b68f90668bd80ee3c4c8d4b286bc5b714693",
+      "system/lib64/vendor.mediatek.hardware.mms@1.0.so": "d5162f89eb6bf333c7feebbb17043f2325aee01d542ed97b80ef45f3e89fdb1e",
+      "system/lib64/vendor.mediatek.hardware.mms@1.1.so": "08eb1508c191d4ea5a6ea35b6bc453bb0f3f6c1ba948a480207762b191f95881",
+      "system/lib64/vendor.mediatek.hardware.mms@1.2.so": "06d6a9107138b7ea5ef2b93321b86f6684cc718434a61e59d8fb38759874f3e6"
+    }
+  }
+}

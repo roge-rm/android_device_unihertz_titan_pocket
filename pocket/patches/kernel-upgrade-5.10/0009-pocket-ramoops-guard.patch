@@ -1,0 +1,129 @@
+--- a/fs/pstore/ram.c
++++ b/fs/pstore/ram.c
+@@ -23,6 +23,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of_reserved_mem.h>
+ #include "internal.h"
++#include "ram-pocket-diagnostic.h"
+ 
+ #define RAMOOPS_KERNMSG_HDR "===="
+ #define MIN_MEM_SIZE 4096UL
+@@ -714,6 +715,53 @@
+ 	return 0;
+ }
+ 
++/* A root-level diagnostic consumer leaves LK's generated nodes untouched.
++ * Validate the fresh reservation before any persistent RAM mapping/write.
++ */
++static int ramoops_pocket_guard(struct device *dev,
++			      const struct ramoops_platform_data *pdata)
++{
++	struct device_node *parent, *child;
++	struct resource res;
++	u32 address_cells, size_cells;
++	int length, matches = 0;
++	bool valid = false;
++
++	if (!of_device_is_compatible(dev_of_node(dev),
++			"unihertz,titan-pocket-ramoops-diagnostic"))
++		return 0;
++	if (!ramoops_pocket_layout_ok(pdata))
++		return -EINVAL;
++
++	parent = of_find_node_by_path("/reserved-memory");
++	if (!parent)
++		return -ENODEV;
++	if (!of_device_is_available(parent) ||
++	    of_property_read_u32(parent, "#address-cells", &address_cells) ||
++	    of_property_read_u32(parent, "#size-cells", &size_cells) ||
++	    address_cells != 2 || size_cells != 2 ||
++	    !of_find_property(parent, "ranges", &length) || length) {
++		of_node_put(parent);
++		return -EINVAL;
++	}
++	for_each_available_child_of_node(parent, child) {
++		if (!of_device_is_compatible(child, "mediatek,pstore"))
++			continue;
++		matches++;
++		if (!of_address_to_resource(child, 0, &res) &&
++		    ramoops_pocket_reservation_ok(res.start, resource_size(&res),
++			    of_property_read_bool(child, "no-map"),
++			    of_property_read_bool(child, "reusable")))
++			valid = true;
++	}
++	of_node_put(parent);
++	if (matches != 1 || !valid) {
++		dev_err(dev, "diagnostic pstore reservation missing or inconsistent\n");
++		return -EINVAL;
++	}
++	return 0;
++}
++
+ static int ramoops_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -748,6 +796,10 @@
+ 		err = -EINVAL;
+ 		goto fail_out;
+ 	}
++
++	err = ramoops_pocket_guard(dev, pdata);
++	if (err)
++		goto fail_out;
+ 
+ 	if (!pdata->mem_size || (!pdata->record_size && !pdata->console_size &&
+ 			!pdata->ftrace_size && !pdata->pmsg_size)) {
+@@ -915,6 +967,19 @@
+ 	dummy = NULL;
+ }
+ 
++/* Firmware module parameters must not bypass the guarded diagnostic node. */
++static bool ramoops_pocket_skip_dummy(void)
++{
++	struct device_node *node;
++
++	node = of_find_compatible_node(NULL, NULL,
++			"unihertz,titan-pocket-ramoops-diagnostic");
++	if (!node)
++		return false;
++	of_node_put(node);
++	return true;
++}
++
+ static void __init ramoops_register_dummy(void)
+ {
+ 	struct ramoops_platform_data pdata;
+@@ -926,6 +991,10 @@
+ 	 */
+ 	if (!mem_size)
+ 		return;
++	if (ramoops_pocket_skip_dummy()) {
++		pr_info("diagnostic DT node owns layout; ignoring module parameters\n");
++		return;
++	}
+ 
+ 	pr_info("using module parameters\n");
+ 
+--- /dev/null
++++ b/fs/pstore/ram-pocket-diagnostic.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _RAM_POCKET_DIAGNOSTIC_H
++#define _RAM_POCKET_DIAGNOSTIC_H
++
++/* One measured firmware profile. Never reinterpret the vendor tail as console. */
++static inline bool ramoops_pocket_layout_ok(const struct ramoops_platform_data *p)
++{
++	return p->mem_address == 0x54410000ULL && p->mem_size == 0x8f000 &&
++		p->record_size == 0x1000 && p->console_size == 0x40000 &&
++		!p->ftrace_size && !p->pmsg_size && !p->ecc_info.ecc_size &&
++		!p->flags && !p->mem_type;
++}
++
++static inline bool ramoops_pocket_reservation_ok(u64 base, u64 size,
++						bool no_map, bool reusable)
++{
++	return base == 0x54410000ULL && size == 0xe0000 &&
++		no_map && !reusable;
++}
++#endif

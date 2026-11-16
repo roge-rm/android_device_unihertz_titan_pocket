@@ -1,0 +1,33 @@
+--- a/drivers/firmware/psci/Kconfig
++++ b/drivers/firmware/psci/Kconfig
+@@ -1,6 +1,15 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ config ARM_PSCI_FW
+ 	bool
++
++config ARM_PSCI_NO_SYSTEM_SUSPEND
++	bool "Don't use PSCI SYSTEM_SUSPEND for suspend to RAM"
++	depends on ARM_PSCI_FW && SUSPEND
++	help
++	  Leave PSCI SYSTEM_SUSPEND unused even when the firmware lists it,
++	  so "mem" in /sys/power/state means suspend-to-idle (s2idle) only.
++	  For firmware whose system suspend needs a vendor kernel driver to
++	  set it up first, such as MediaTek SPM on MT6771.
+ 
+ config ARM_PSCI_CHECKER
+ 	bool "ARM PSCI checker"
+--- a/drivers/firmware/psci/psci.c
++++ b/drivers/firmware/psci/psci.c
+@@ -385,6 +385,12 @@
+ 
+ 	ret = psci_features(PSCI_FN_NATIVE(1_0, SYSTEM_SUSPEND));
+ 
++	if (IS_ENABLED(CONFIG_ARM_PSCI_NO_SYSTEM_SUSPEND)) {
++		pr_info("SYSTEM_SUSPEND %s by firmware, left unused (s2idle only)\n",
++			ret == PSCI_RET_NOT_SUPPORTED ? "not listed" : "listed");
++		return;
++	}
++
+ 	if (ret != PSCI_RET_NOT_SUPPORTED)
+ 		suspend_set_ops(&psci_suspend_ops);
+ }

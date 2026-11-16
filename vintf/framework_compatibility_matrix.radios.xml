@@ -1,0 +1,96 @@
+<!--
+    SPDX-License-Identifier: Apache-2.0
+    Stock MediaTek radio HALs that only vendor processes use (MTK audio HAL, mnld and
+    agpsd, connsys logging, MTK Wi-Fi extensions). The Lineage framework doesn't call
+    them; listing them keeps checkvintf from failing on the stock vendor manifest.
+    The modem part (MODEM_PORT.md, milestone 7) adds the radio em, se and ims instances,
+    ISap, radio config and mtkradioex, as the stock vendor manifest declares them.
+-->
+<compatibility-matrix version="1.0" type="framework">
+    <hal format="hidl">
+        <name>vendor.mediatek.hardware.bluetooth.audio</name>
+        <version>2.1</version>
+        <interface>
+            <name>IBluetoothAudioProvidersFactory</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.mediatek.hardware.lbs</name>
+        <version>1.0</version>
+        <interface>
+            <name>ILbs</name>
+            <regex-instance>.*</regex-instance>
+        </interface>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.mediatek.hardware.log</name>
+        <version>1.0</version>
+        <interface>
+            <name>ILog</name>
+            <instance>ATMWiFiHidlServer</instance>
+            <instance>ConnsysFWHidlServer</instance>
+        </interface>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.radio</name>
+        <version>1.5</version>
+        <interface>
+            <name>IRadio</name>
+            <instance>em1</instance>
+            <instance>em2</instance>
+            <instance>imsAospSlot1</instance>
+            <instance>imsAospSlot2</instance>
+            <instance>se1</instance>
+            <instance>se2</instance>
+        </interface>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.radio</name>
+        <version>1.2</version>
+        <interface>
+            <name>ISap</name>
+            <instance>slot1</instance>
+            <instance>slot2</instance>
+        </interface>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.radio.config</name>
+        <version>1.1</version>
+        <interface>
+            <name>IRadioConfig</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.mediatek.hardware.mtkradioex</name>
+        <version>2.2</version>
+        <interface>
+            <name>IMtkRadioEx</name>
+            <instance>imsSlot1</instance>
+            <instance>imsSlot2</instance>
+            <instance>mtkAssist1</instance>
+            <instance>mtkAssist2</instance>
+            <instance>mtkCap1</instance>
+            <instance>mtkCap2</instance>
+            <instance>mtkEm1</instance>
+            <instance>mtkEm2</instance>
+            <instance>mtkRcs1</instance>
+            <instance>mtkRcs2</instance>
+            <instance>mtkSe1</instance>
+            <instance>mtkSe2</instance>
+            <instance>mtkSlot1</instance>
+            <instance>mtkSlot2</instance>
+            <instance>mtkSmartRatSwitch1</instance>
+            <instance>mtkSmartRatSwitch2</instance>
+        </interface>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.mediatek.hardware.wifi.supplicant</name>
+        <version>2.0</version>
+        <interface>
+            <name>ISupplicant</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+</compatibility-matrix>

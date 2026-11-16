@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+// IMS and VoLTE (MODEM_PORT.md, milestone 8). Installed only through ims.mk.
+
+// Classes stock com.mediatek.ims needs that neither Android 16 nor mediatek-ims-base has.
+java_library {
+    name: "pocket-ims-compat",
+    installable: true,
+    // On /system/framework, as mediatek-ims-base (zygote's open-file allowlist).
+    use_generic_config: true,
+    srcs: ["compat/src/**/*.java"],
+}
+
+prebuilt_etc {
+    name: "init.pocket-ims.rc",
+    src: "init.pocket-ims.rc",
+    sub_dir: "init",
+    system_ext_specific: true,
+}
+
+prebuilt_etc {
+    name: "privapp-permissions-com.mediatek.ims.xml",
+    src: "privapp-permissions-com.mediatek.ims.xml",
+    sub_dir: "permissions",
+    system_ext_specific: true,
+}
+
+runtime_resource_overlay {
+    name: "PocketImsTelephonyOverlay",
+    resource_dirs: ["overlay/PocketImsTelephonyOverlay/res"],
+    manifest: "overlay/PocketImsTelephonyOverlay/AndroidManifest.xml",
+    product_specific: true,
+}
+
+runtime_resource_overlay {
+    name: "PocketImsFrameworkOverlay",
+    resource_dirs: ["overlay/PocketImsFrameworkOverlay/res"],
+    manifest: "overlay/PocketImsFrameworkOverlay/AndroidManifest.xml",
+    product_specific: true,
+}
+
+runtime_resource_overlay {
+    name: "PocketFidoVolteOverlay",
+    resource_dirs: ["overlay/PocketFidoVolteOverlay/res"],
+    manifest: "overlay/PocketFidoVolteOverlay/AndroidManifest.xml",
+    product_specific: true,
+    aaptflags: ["--keep-raw-values"],
+}

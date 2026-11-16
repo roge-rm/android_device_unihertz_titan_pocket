@@ -1,0 +1,69 @@
+--- a/drivers/power/supply/mediatek/charger/mtk_chg_type_det.c
++++ b/drivers/power/supply/mediatek/charger/mtk_chg_type_det.c
+@@ -159,6 +159,8 @@
+ 	#endif
+ 	bool chg_online; /* Has charger in or not */
+ 	enum charger_type chg_type;
++	/* held while a USB host (SDP/CDP) or non-standard charger is in */
++	struct wakeup_source *usb_ws;
+ };
+ 
+ static int mt_charger_online(struct mt_charger *mtk_chg)
+@@ -263,6 +265,10 @@
+ 			(mtk_chg->chg_type == CHARGING_HOST) ||
+ 			(mtk_chg->chg_type == NONSTANDARD_CHARGER)) {
+ 			mt_usb_connect();
++			/* stock mtu3 holds a wakelock in device mode; the
++			 * gadget-only 5.10 mtu3 doesn't, so hold it here
++			 */
++			__pm_stay_awake(mtk_chg->usb_ws);
+ 			#ifdef CONFIG_EXTCON_USB_CHG
+ 			info->vbus_state = 1;
+ 			#endif
+@@ -273,6 +279,11 @@
+ 			#endif
+ 		}
+ 	}
++	/* also when ignore_usb is set, after a Type-C role swap */
++	if (mtk_chg->chg_type != STANDARD_HOST &&
++	    mtk_chg->chg_type != CHARGING_HOST &&
++	    mtk_chg->chg_type != NONSTANDARD_CHARGER)
++		__pm_relax(mtk_chg->usb_ws);
+ 
+ 	queue_work(cti->chg_in_wq, &cti->chg_in_work);
+ 	#ifdef CONFIG_EXTCON_USB_CHG
+@@ -517,6 +528,8 @@
+ 	mt_chg->dev = &pdev->dev;
+ 	mt_chg->chg_online = false;
+ 	mt_chg->chg_type = CHARGER_UNKNOWN;
++	/* before the power supplies, which mt6370 can set at once */
++	mt_chg->usb_ws = wakeup_source_register(&pdev->dev, "usb_host");
+ 
+ 	mt_chg->chg_desc.name = "charger";
+ 	mt_chg->chg_desc.type = POWER_SUPPLY_TYPE_UNKNOWN;
+@@ -546,7 +559,7 @@
+ 		dev_notice(&pdev->dev, "Failed to register power supply: %ld\n",
+ 			PTR_ERR(mt_chg->chg_psy));
+ 		ret = PTR_ERR(mt_chg->chg_psy);
+-		return ret;
++		goto err_chg_psy;
+ 	}
+ 
+ 	mt_chg->ac_psy = power_supply_register(&pdev->dev, &mt_chg->ac_desc,
+@@ -635,6 +648,8 @@
+ 	power_supply_unregister(mt_chg->ac_psy);
+ err_ac_psy:
+ 	power_supply_unregister(mt_chg->chg_psy);
++err_chg_psy:
++	wakeup_source_unregister(mt_chg->usb_ws);
+ 	return ret;
+ }
+ 
+@@ -646,6 +661,7 @@
+ 	power_supply_unregister(mt_charger->chg_psy);
+ 	power_supply_unregister(mt_charger->ac_psy);
+ 	power_supply_unregister(mt_charger->usb_psy);
++	wakeup_source_unregister(mt_charger->usb_ws);
+ 
+ 	pr_info("%s\n", __func__);
+ 	if (cti->chgdet_task) {

@@ -1,0 +1,11 @@
+--- a/system/sepolicy/private/compat/30.0/30.0.compat.cil
++++ b/system/sepolicy/private/compat/30.0/30.0.compat.cil
+@@ -7,7 +7,7 @@
+ 
+ ;; TODO: Once 30.0 is no longer supported for vendor images,
+ ;; mlsvendorcompat can be completely from the system policy.
+-(typeattributeset mlsvendorcompat (and appdomain vendordomain))
++;; Pocket: no members, as domain.te forbids any.
+ (allow mlsvendorcompat app_data_file (dir (ioctl read write create getattr setattr lock rename open watch watch_reads add_name remove_name reparent search rmdir)))
+ (allow mlsvendorcompat app_data_file (file (ioctl read write create getattr setattr lock append map unlink rename open watch watch_reads)))
+ (allow mlsvendorcompat privapp_data_file (dir (ioctl read write create getattr setattr lock rename open watch watch_reads add_name remove_name reparent search rmdir)))

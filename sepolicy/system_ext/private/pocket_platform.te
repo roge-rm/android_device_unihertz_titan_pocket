@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Platform-side rules for the 5.10 kernel and stock vendor code under enforcing. Each
+# rule is listed in SELINUX_ENFORCING.md.
+
+# init.rc writes queue/discard_max_bytes through /dev/sys/block/by-name; the 5.10 UFS LUNs are
+# sysfs_devices_block (genfs_contexts).
+allow init sysfs_devices_block:file w_file_perms;
+
+# A stock vendor library loaded into SurfaceFlinger uses the HIDL memory mapper.
+allow surfaceflinger hidl_memory_hwservice:hwservice_manager find;
+
+# The stock gralloc mapper in these processes reads ro.vendor.smvr.p2batch.*, which nothing
+# sets; a denied read gives the same default. Apps stay audited.
+dontaudit { surfaceflinger cameraserver audioserver } vendor_default_prop:file { read open getattr map };
+
+# Lineage services we don't ship; an unlabelled name finds nothing either way.
+dontaudit { system_server system_app } default_android_service:service_manager find;
+
+# persist.service.agui.extmodule has a vendor rc trigger (start aguiextmodule), so vendor_init
+# has to read it. system_server and system_app set it.
+system_restricted_prop(pocket_agui_extmodule_prop)
+get_prop(vendor_init, pocket_agui_extmodule_prop)
+set_prop({ system_server system_app }, pocket_agui_extmodule_prop)
+
+# ART in com.android.se reads and writes its runtime app image in its own cache. AOSP's
+# seapp_contexts gives secure_element no data type, so that dir is system_data_file and ART
+# carries on without the image. Only the accesses seen in the permissive boots (evidence/power/trial-p13-20261111).
+dontaudit secure_element system_data_file:dir { create add_name remove_name };
+dontaudit secure_element system_data_file:file { create open write setattr rename unlink };

@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "platform_acquisition": "Existing shared LineageOS 23.2/Boston baseline, reused read-only for source audits",
+  "release": "bp4a",
+  "project_revisions": {
+    "build/make": "e5aaa62172df0f321e68133fa30f42316376bfe8",
+    "build/soong": "9aa045a2aef10b8089e32e847fed26d9aa3d61be",
+    "system/sepolicy": "885cc500f6078a766d1f6def5ce4c06c55841773",
+    "external/selinux": "085c131ad1b984bfa8ffdafee7a976e9d89f403c",
+    "packages/inputmethods/LatinIME": "4ff34e1668f1be9d5c170e82c63768213a00d343",
+    "hardware/lineage/compat": "4d124113ee007e7508cbd10515bea5eb0cd433ab",
+    "prebuilts/misc": "28b423bbc5d3aec93ba00f8ea05dcc2b3e5b4ad0",
+    "vendor/lineage": "ca37c450e98fefb0cd53b864c469c1a7d024c53f",
+    "kernel/motorola/sm6450": "9708121d5855e50a16df8787228d1edd6ed6f99c"
+  },
+  "full_resolved_manifest_sha256": "082c33d97ab439579e4d1a92c0e99b88a18cb206db81d136d70a5aaba08a48d5",
+  "kernel_donor": {
+    "repository": "https://github.com/evoxdl/android_kernel_motorola_sm6450",
+    "revision": "9708121d5855e50a16df8787228d1edd6ed6f99c"
+  },
+  "stock_kernel_reference": {
+    "repository": "https://github.com/some00/linux-unihertz-titan-pocket",
+    "revision": "4348b016b9ed41d2a8e4a77e08be72b24cc269ad"
+  },
+  "sdk": {
+    "api": 36,
+    "build_tools": "36.1.0"
+  },
+  "note": "Audit input pins only, not a resolved Titan product manifest or device qualification"
+}

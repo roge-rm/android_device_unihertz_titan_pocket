@@ -1,0 +1,36 @@
+--- a/drivers/regulator/core.c
++++ b/drivers/regulator/core.c
+@@ -6055,6 +6055,19 @@
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_DEBUG_KERNEL
++/* Diagnostic only: preserve unused rails in their bootloader-enabled state.
++ * Keep the flag after init: the cleanup callback runs as delayed work.
++ */
++static bool regulator_ignore_unused;
++static int __init regulator_ignore_unused_setup(char *__unused)
++{
++	regulator_ignore_unused = true;
++	return 1;
++}
++__setup("regulator_ignore_unused", regulator_ignore_unused_setup);
++#endif
++
+ static void regulator_init_complete_work_function(struct work_struct *work)
+ {
+ 	/*
+@@ -6066,6 +6079,13 @@
+ 	 */
+ 	class_for_each_device(&regulator_class, NULL, NULL,
+ 			      regulator_register_resolve_supply);
++
++#ifdef CONFIG_DEBUG_KERNEL
++	if (regulator_ignore_unused) {
++		pr_warn("regulator: Not disabling unused regulators\n");
++		return;
++	}
++#endif
+ 
+ 	/* If we have a full configuration then disable any regulators
+ 	 * we have permission to change the status for and which are

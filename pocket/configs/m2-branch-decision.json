@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "recorded_utc": "2026-10-29T13:38:28.545192+00:00",
+  "milestone": "M2",
+  "status": "open_not_passed",
+  "evaluated_shared_branch": "lineage-23.2",
+  "installed_kernel": "4.14.186",
+  "installed_vendor_api": 30,
+  "installed_fcm": 5,
+  "release_branch": null,
+  "unchanged_shared_platform_path": "no_go",
+  "engineering_candidate": {
+    "branch": "lineage-21.0",
+    "status": "fallback_or_diagnostic_only_not_qualified",
+    "reason": "Pinned FCM5 and Android-R/4.14 definitions remain; stock base and applicable boolean conditional configurations match"
+  },
+  "demonstrated_results": [
+    "Host execution of exact current networking preflight rejects4.14 and4.19;5.4 passes this preflight only",
+    "Current FCM5 source has0 HAL entries and r5.4-only kernel requirements",
+    "Preserved VNDK30 payload extracted; modeled namespace positive/negative checks behave as expected",
+    "Vendor has required32-bit and64-bit native services",
+    "IMS and input apps have shared-UID/signing/framework integration boundaries"
+  ],
+  "open_gates": [
+    "Real target VNDK30/snapshot/APEX activation and LLNDK symbol/namespace closure",
+    "Actual target VINTF and enforcing policy compilation/kernel semantics",
+    "Kernel/BPF/cgroup adaptation for chosen platform",
+    "IMS MediaTek Java/native, signing and privileged-service integration",
+    "Chosen branch maintenance/security strategy",
+    "Hardware/target boot tests when user resumes"
+  ],
+  "scope_guards": {
+    "phone_tests": "paused; no phone connection in this audit",
+    "boston_checkout": "read_only",
+    "second_platform_checkout_started": false,
+    "large_additional_download_started": false,
+    "lineage21_acquisition": "Selected SHA-pinned text files only"
+  },
+  "reports": [
+    "M2_COMPATIBILITY_AUDIT.md",
+    "M2_VENDOR_CONTRACT.md",
+    "KERNEL_UPGRADE_STATUS.md"
+  ],
+  "evidence": [
+    "evidence/m2/platform-compatibility.json",
+    "evidence/m2/vendor-runtime-audit.json",
+    "evidence/m2/vndk-namespace-positive-negative.json",
+    "evidence/m2/lineage21-source-probes.json"
+  ],
+  "newer_kernel_route": {
+    "status": "user_selected_source_forward_port_in_progress",
+    "reference_available": "Isolated copy of pinned shared 5.10.257; Boston remains read-only",
+    "bounded_mt6771_default_branches_checked": 26,
+    "checked_versions": "4.4 or4.14; no newer ready-made Pocket base established",
+    "next_gate": "Resolve temporary boot setup or prepare an alternate controlled install/restore route; unchanged-stock control also reports lk_crash",
+    "report": "KERNEL_UPGRADE_STATUS.md",
+    "readable_makefiles": 23,
+    "checkpoint": "evidence/kernel-upgrade/prototype-checkpoint.json",
+    "verified": "Full 5.10 Image/vmlinux links with MT6771 pinctrl/clock/reset, PMIC handoff, UFS PHY and USB sources; 34 selected object checks; six replay-checked patches; focused mock/static checks; no device boot",
+    "feedback_needed": "No immediate phone action needed; any different device-write procedure must be prepared separately",
+    "transport_procedure": "KERNEL_BOOT_PROBE.md",
+    "diagnostic_connection": "Normal USB only; no UART/serial console available (owner confirmed)",
+    "transport_result": "FASTBOOT_BOOT_AUDIT.md"
+  }
+}

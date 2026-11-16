@@ -1,0 +1,934 @@
+--- a/drivers/i2c/busses/i2c-mt65xx.c
++++ b/drivers/i2c/busses/i2c-mt65xx.c
+@@ -26,6 +26,8 @@
+ #include <linux/sched.h>
+ #include <linux/slab.h>
+ 
++#include "i2c-mt65xx-ccu.h"
++
+ #define I2C_RS_TRANSFER			(1 << 4)
+ #define I2C_ARB_LOST			(1 << 3)
+ #define I2C_HS_NACKERR			(1 << 2)
+@@ -43,6 +45,7 @@
+ #define I2C_DELAY_LEN			0x0002
+ #define I2C_ST_START_CON		0x8001
+ #define I2C_FS_START_CON		0x1800
++#define I2C_FS_PLUS_START_CON		0x0a0f
+ #define I2C_TIME_CLR_VALUE		0x0000
+ #define I2C_TIME_DEFAULT_VALUE		0x0003
+ #define I2C_WRRD_TRANAC_VALUE		0x0002
+@@ -79,6 +82,29 @@
+ #define I2C_CONTROL_DMAACK_EN           (0x1 << 8)
+ #define I2C_CONTROL_ASYNC_MODE          (0x1 << 9)
+ #define I2C_CONTROL_WRAPPER             (0x1 << 0)
++
++/* MT6771 v2 controller extras, from the vendor i2c-mtk.h */
++#define I2C_BUS_ERR			(1 << 8)
++#define I2C_IBI				(1 << 7)
++#define I2C_HW_TIMEOUT			(1 << 5)
++#define I2C_INTR_ALL			0x01ff
++#define I2C_RESUME_ARBIT		(1 << 1)
++#define I2C_FIFO_ADDR_CLR_MCH		0x0004
++#define I2C_MCU_INTR_EN			0x0001
++#define I2C_V2_MCU_INTR			0x40
++#define I2C_FIFO_MAX_LEN		8
++
++/*
++ * Values the vendor driver writes to a channel. DELAY_LEN is the vendor
++ * I2C_DELAY_LEN, EXT_CONF is ext_time_config from the stock DT i2c_common,
++ * TIMEOUT_EN is OR'd into TIMING on v2, and HW_TIMEOUT (0x4c) counts SCL low
++ * for MAX_SCL_LOW_TIME ms.
++ */
++#define I2C_CHAN_DELAY_LEN		0x000a
++#define I2C_CHAN_EXT_CONF		0x1801
++#define I2C_CHAN_TIMEOUT_EN		0x0001
++#define I2C_V2_HW_TIMEOUT		0x4c
++#define I2C_CHAN_SCL_LOW_MS		2
+ 
+ #define I2C_DRV_NAME		"i2c-mt65xx"
+ 
+@@ -213,6 +239,8 @@
+ 	unsigned char dma_sync: 1;
+ 	unsigned char ltiming_adjust: 1;
+ 	unsigned char apdma_sync: 1;
++	/* Program CLOCK_DIV from the DT clock-div, as the MT6771 vendor driver does. */
++	unsigned char dt_clk_div: 1;
+ 	unsigned char max_dma_support;
+ };
+ 
+@@ -236,6 +264,13 @@
+ 
+ 	/* set in i2c probe */
+ 	void __iomem *base;		/* i2c base addr */
++	/*
++	 * Transfer registers. On a multi-channel MT6771 bus this is the AP
++	 * channel at base + ch_offset and base is the shadow bank used for
++	 * reset and init. Elsewhere it is base.
++	 */
++	void __iomem *chan;
++	u32 ch_offset;
+ 	void __iomem *pdmabase;		/* dma base address*/
+ 	struct clk *clk_main;		/* main clock for i2c bus */
+ 	struct clk *clk_dma;		/* DMA clock for i2c via DMA */
+@@ -243,6 +278,11 @@
+ 	struct clk *clk_arb;		/* Arbitrator clock for i2c */
+ 	bool have_pmic;			/* can use i2c pins from PMIC */
+ 	bool use_push_pull;		/* IO config push-pull mode */
++	/*
++	 * Vendor mediatek,hs_only on an MT6771 bus above 1 MHz: no HS master
++	 * code, TIMING and LTIMING worked out for the bus speed itself, HS 0.
++	 */
++	bool hs_only;
+ 
+ 	u16 irq_stat;			/* interrupt status */
+ 	unsigned int clk_src_div;
+@@ -251,10 +291,26 @@
+ 	u16 timing_reg;
+ 	u16 high_speed_reg;
+ 	u16 ltiming_reg;
++	/* Channel TIMING, LTIMING and HW_TIMEOUT worked out as the vendor does */
++	u16 chan_timing;
++	u16 chan_ltiming;
++	u16 chan_hw_timeout;
+ 	unsigned char auto_restart;
+ 	bool ignore_restart_irq;
+ 	struct mtk_i2c_ac_timing ac_timing;
+ 	const struct mtk_i2c_compatible *dev_comp;
++	/*
++	 * CCU channel of a multi-channel MT6771 bus: the
++	 * vendor DT controller id (the bus number the CCU and the camera HAL
++	 * use), the register window size, a coherent page the CCU sends its
++	 * sensor commands from (the vendor dma_buf's second page) and whether
++	 * the CCU holds the clocks.
++	 */
++	int hw_id;
++	resource_size_t reg_size;
++	void *ccu_buf;
++	dma_addr_t ccu_buf_pa;
++	bool ccu_on;
+ };
+ 
+ /**
+@@ -405,10 +461,31 @@
+ 	.max_dma_support = 36,
+ };
+ 
++/*
++ * MT6771 uses the v2 register map with 33-bit AP DMA. Its vendor driver sets
++ * DMAACK and ASYNC in CONTROL but writes the DMA CON register plain, and divides
++ * the 124.8 MHz i2c_sel clock in the controller by the DT clock-div.
++ */
++static const struct mtk_i2c_compatible mt6771_compat = {
++	.quirks = &mt8183_i2c_quirks,
++	.regs = mt_i2c_regs_v2,
++	.pmic_i2c = 0,
++	.dcm = 0,
++	.auto_restart = 1,
++	.aux_len_reg = 1,
++	.timing_adjust = 1,
++	.dma_sync = 1,
++	.ltiming_adjust = 1,
++	.apdma_sync = 0,
++	.dt_clk_div = 1,
++	.max_dma_support = 33,
++};
++
+ static const struct of_device_id mtk_i2c_of_match[] = {
+ 	{ .compatible = "mediatek,mt2712-i2c", .data = &mt2712_compat },
+ 	{ .compatible = "mediatek,mt6577-i2c", .data = &mt6577_compat },
+ 	{ .compatible = "mediatek,mt6589-i2c", .data = &mt6589_compat },
++	{ .compatible = "mediatek,mt6771-i2c", .data = &mt6771_compat },
+ 	{ .compatible = "mediatek,mt7622-i2c", .data = &mt7622_compat },
+ 	{ .compatible = "mediatek,mt8173-i2c", .data = &mt8173_compat },
+ 	{ .compatible = "mediatek,mt8183-i2c", .data = &mt8183_compat },
+@@ -419,11 +496,22 @@
+ 
+ static u16 mtk_i2c_readw(struct mtk_i2c *i2c, enum I2C_REGS_OFFSET reg)
+ {
+-	return readw(i2c->base + i2c->dev_comp->regs[reg]);
++	return readw(i2c->chan + i2c->dev_comp->regs[reg]);
+ }
+ 
+ static void mtk_i2c_writew(struct mtk_i2c *i2c, u16 val,
+ 			   enum I2C_REGS_OFFSET reg)
++{
++	writew(val, i2c->chan + i2c->dev_comp->regs[reg]);
++}
++
++static u16 mtk_i2c_readw_shadow(struct mtk_i2c *i2c, enum I2C_REGS_OFFSET reg)
++{
++	return readw(i2c->base + i2c->dev_comp->regs[reg]);
++}
++
++static void mtk_i2c_writew_shadow(struct mtk_i2c *i2c, u16 val,
++				  enum I2C_REGS_OFFSET reg)
+ {
+ 	writew(val, i2c->base + i2c->dev_comp->regs[reg]);
+ }
+@@ -477,11 +565,79 @@
+ 	clk_disable_unprepare(i2c->clk_dma);
+ }
+ 
++/*
++ * Multi-channel MT6771 bus: reset and init go to the shadow bank only, as the
++ * vendor mt_i2c_init_hw does. No SDA_TIMING or SCL_MIS_COMP write, the vendor
++ * v2 map has neither. The channel is set up at each transfer.
++ */
++static void mtk_i2c_init_hw_shadow(struct mtk_i2c *i2c)
++{
++	u16 intr_stat_reg;
++
++	mtk_i2c_writew_shadow(i2c, 0, OFFSET_INTR_MASK);
++	intr_stat_reg = mtk_i2c_readw_shadow(i2c, OFFSET_INTR_STAT);
++	mtk_i2c_writew_shadow(i2c, intr_stat_reg, OFFSET_INTR_STAT);
++	mtk_i2c_writew_shadow(i2c, I2C_SOFT_RST, OFFSET_SOFTRESET);
++	mtk_i2c_writew_shadow(i2c, i2c->use_push_pull ?
++			      I2C_IO_CONFIG_PUSH_PULL :
++			      I2C_IO_CONFIG_OPEN_DRAIN, OFFSET_IO_CONFIG);
++	mtk_i2c_writew_shadow(i2c, i2c->chan_timing | I2C_CHAN_TIMEOUT_EN,
++			      OFFSET_TIMING);
++	mtk_i2c_writew_shadow(i2c, i2c->chan_ltiming, OFFSET_LTIMING);
++	mtk_i2c_writew_shadow(i2c, i2c->ac_timing.hs, OFFSET_HS);
++	writel(I2C_DMA_WARM_RST, i2c->pdmabase + OFFSET_RST);
++	udelay(5);
++}
++
++/*
++ * Per-transfer channel or hs_only bus setup, as the vendor mt_i2c_do_transfer
++ * does. Above 1 MHz the vendor EXT_CONF is I2C_FS_PLUS_START_CON. A control
++ * of -1 leaves CONTROL alone, otherwise it goes after CLOCK_DIV, in the
++ * vendor order.
++ */
++static void mtk_i2c_writew_at(struct mtk_i2c *i2c, void __iomem *chan, u16 val,
++			      enum I2C_REGS_OFFSET reg)
++{
++	writew(val, chan + i2c->dev_comp->regs[reg]);
++}
++
++/* The setup on the channel at chan: the AP channel, or the CCU's in mtk_i2c_ccu_enable(). */
++static void mtk_i2c_setup_chan_at(struct mtk_i2c *i2c, void __iomem *chan,
++				  int control)
++{
++	if (i2c->chan_hw_timeout)
++		writew(i2c->chan_hw_timeout, chan + I2C_V2_HW_TIMEOUT);
++	mtk_i2c_writew_at(i2c, chan, i2c->ac_timing.inter_clk_div,
++			  OFFSET_CLOCK_DIV);
++	if (control >= 0)
++		mtk_i2c_writew_at(i2c, chan, control, OFFSET_CONTROL);
++	mtk_i2c_writew_at(i2c, chan, i2c->hs_only ? I2C_FS_PLUS_START_CON :
++			  I2C_CHAN_EXT_CONF, OFFSET_EXT_CONF);
++	mtk_i2c_writew_at(i2c, chan, I2C_CHAN_DELAY_LEN, OFFSET_DELAY_LEN);
++	mtk_i2c_writew_at(i2c, chan, i2c->use_push_pull ?
++			  I2C_IO_CONFIG_PUSH_PULL : I2C_IO_CONFIG_OPEN_DRAIN,
++			  OFFSET_IO_CONFIG);
++	mtk_i2c_writew_at(i2c, chan, i2c->chan_timing | I2C_CHAN_TIMEOUT_EN,
++			  OFFSET_TIMING);
++	mtk_i2c_writew_at(i2c, chan, i2c->chan_ltiming, OFFSET_LTIMING);
++	mtk_i2c_writew_at(i2c, chan, i2c->ac_timing.hs, OFFSET_HS);
++}
++
++static void mtk_i2c_setup_chan(struct mtk_i2c *i2c, int control)
++{
++	mtk_i2c_setup_chan_at(i2c, i2c->chan, control);
++}
++
+ static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
+ {
+ 	u16 control_reg;
+ 	u16 intr_stat_reg;
+ 	u16 ext_conf_val;
++
++	if (i2c->ch_offset) {
++		mtk_i2c_init_hw_shadow(i2c);
++		return;
++	}
+ 
+ 	mtk_i2c_writew(i2c, I2C_CHN_CLR_FLAG, OFFSET_START);
+ 	intr_stat_reg = mtk_i2c_readw(i2c, OFFSET_INTR_STAT);
+@@ -525,7 +681,11 @@
+ 	else
+ 		ext_conf_val = I2C_FS_START_CON;
+ 
+-	if (i2c->dev_comp->timing_adjust) {
++	if (i2c->hs_only) {
++		/* The vendor never writes SCL_MIS_COMP or SDA_TIMING. */
++		mtk_i2c_setup_chan(i2c, -1);
++		ext_conf_val = I2C_FS_PLUS_START_CON;
++	} else if (i2c->dev_comp->timing_adjust) {
+ 		ext_conf_val = i2c->ac_timing.ext;
+ 		mtk_i2c_writew(i2c, i2c->ac_timing.inter_clk_div,
+ 			       OFFSET_CLOCK_DIV);
+@@ -767,8 +927,86 @@
+ 	return 0;
+ }
+ 
++/*
++ * Step and sample count as the vendor mtk_i2c_calculate_speed works them out
++ * with the stock DT i2c_common (cnt_constraint set). Above 400 kHz the vendor
++ * limits step to 8, which also applies to its 45% duty high phase at 400 kHz.
++ */
++static int mtk_i2c_vendor_cnt(unsigned int clk_src, unsigned int speed,
++			      unsigned int *step, unsigned int *sample)
++{
++	unsigned int max_step = speed > I2C_MAX_FAST_MODE_FREQ ?
++				MAX_HS_STEP_CNT_DIV : MAX_STEP_CNT_DIV;
++	unsigned int khz = speed / 1000;
++	unsigned int hclk = clk_src / 1000;
++	unsigned int min_div, best, s, t;
++	unsigned int s_div = MAX_SAMPLE_CNT_DIV, t_div = max_step;
++
++	if (!khz)
++		return -EINVAL;
++	min_div = ((hclk >> 1) + khz - 1) / khz;
++	best = MAX_SAMPLE_CNT_DIV * max_step;
++	for (s = 1; s <= MAX_SAMPLE_CNT_DIV; s++) {
++		t = (min_div + s - 1) / s;
++		if (t > max_step)
++			continue;
++		if (t * s < best) {
++			best = t * s;
++			s_div = s;
++			t_div = t;
++			if (best == min_div)
++				break;
++		}
++	}
++	if (hclk / (2 * s_div * t_div) > khz)
++		return -EINVAL;
++
++	/* cnt_constraint: step only drops by one when sample stays above 0 */
++	*sample = s_div - 1;
++	*step = *sample ? t_div - 1 : t_div;
++	return 0;
++}
++
++/*
++ * Channel TIMING, LTIMING and HW_TIMEOUT as the vendor i2c_set_speed and
++ * mt_i2c_do_transfer set them for ST and FS (set_ltiming, 45% high duty above
++ * 100 kHz). At 24.96 MHz and 400 kHz this gives TIMING 0x405, LTIMING 0x23
++ * and HW_TIMEOUT 0x56b. An hs_only bus above 1 MHz takes the same path at 50%
++ * duty: 3.4 MHz gives TIMING 0x4, LTIMING 0x4 and HW_TIMEOUT 0x2700.
++ */
++static int mtk_i2c_chan_timing(struct mtk_i2c *i2c, unsigned int clk_src)
++{
++	unsigned int duty = 50;
++	unsigned int step, sample, l_step, l_sample;
++	int ret;
++
++	if (i2c->speed_hz > I2C_MAX_FAST_MODE_FREQ && !i2c->hs_only)
++		return -EINVAL;
++	if (i2c->speed_hz > I2C_MAX_STANDARD_MODE_FREQ &&
++	    i2c->speed_hz <= I2C_MAX_FAST_MODE_FREQ)
++		duty = 45;
++
++	ret = mtk_i2c_vendor_cnt(clk_src, i2c->speed_hz * 50 / duty,
++				 &step, &sample);
++	if (ret)
++		return ret;
++	ret = mtk_i2c_vendor_cnt(clk_src, i2c->speed_hz * 50 / (100 - duty),
++				 &l_step, &l_sample);
++	if (ret)
++		return ret;
++
++	i2c->chan_timing = (sample & 0x7) << 8 | (step & 0x3f);
++	i2c->chan_ltiming = (l_sample & 0x7) << 6 | (l_step & 0x3f);
++	i2c->chan_hw_timeout = DIV_ROUND_UP(clk_src / 1000 * I2C_CHAN_SCL_LOW_MS,
++					    ((l_step & 0x3f) + 1) *
++					    ((l_sample & 0x7) + 1)) & 0xffff;
++	return 0;
++}
++
+ static int mtk_i2c_set_speed(struct mtk_i2c *i2c, unsigned int parent_clk)
+ {
++	unsigned int main_clk = parent_clk;
++	bool fallback = false;
+ 	unsigned int clk_src;
+ 	unsigned int step_cnt;
+ 	unsigned int sample_cnt;
+@@ -782,7 +1020,30 @@
+ 	target_speed = i2c->speed_hz;
+ 	parent_clk /= i2c->clk_src_div;
+ 
+-	if (i2c->dev_comp->timing_adjust)
++	if (i2c->hs_only) {
++		if (i2c->clk_src_div > MAX_CLOCK_DIV)
++			return -EINVAL;
++		ret = mtk_i2c_chan_timing(i2c, parent_clk);
++		if (ret)
++			return ret;
++		i2c->timing_reg = i2c->chan_timing;
++		i2c->ltiming_reg = i2c->chan_ltiming;
++		i2c->high_speed_reg = I2C_TIME_CLR_VALUE;
++		i2c->ac_timing.htiming = i2c->chan_timing;
++		i2c->ac_timing.ltiming = i2c->chan_ltiming;
++		i2c->ac_timing.hs = I2C_TIME_CLR_VALUE;
++		i2c->ac_timing.ext = I2C_FS_PLUS_START_CON;
++		i2c->ac_timing.inter_clk_div = ((i2c->clk_src_div - 1) << 8) |
++					       (i2c->clk_src_div - 1);
++		dev_info(i2c->dev,
++			 "mt6771 hs_only clk main=%u Hz div=%u src=%u Hz timing=0x%x ltiming=0x%x hw_timeout=0x%x\n",
++			 main_clk, i2c->clk_src_div, parent_clk,
++			 i2c->chan_timing, i2c->chan_ltiming,
++			 i2c->chan_hw_timeout);
++		return 0;
++	}
++
++	if (i2c->dev_comp->timing_adjust && !i2c->dev_comp->dt_clk_div)
+ 		max_clk_div = MAX_CLOCK_DIV;
+ 	else
+ 		max_clk_div = 1;
+@@ -836,7 +1097,97 @@
+ 	}
+ 
+ 	i2c->ac_timing.inter_clk_div = clk_div - 1;
+-
++	if (i2c->dev_comp->dt_clk_div) {
++		if (i2c->clk_src_div > MAX_CLOCK_DIV)
++			return -EINVAL;
++		/* Both bytes hold the divider minus one, as on the vendor kernel. */
++		i2c->ac_timing.inter_clk_div = ((i2c->clk_src_div - 1) << 8) |
++					       (i2c->clk_src_div - 1);
++	}
++
++	if (i2c->ch_offset && mtk_i2c_chan_timing(i2c, parent_clk)) {
++		dev_warn(i2c->dev, "channel timing falls back to computed\n");
++		i2c->chan_timing = i2c->ac_timing.htiming;
++		i2c->chan_ltiming = i2c->ac_timing.ltiming;
++		i2c->chan_hw_timeout = 0;
++		fallback = true;
++	}
++
++	if (i2c->dev_comp->dt_clk_div) {
++		if (i2c->ch_offset)
++			dev_info(i2c->dev,
++				 "mt6771 clk main=%u Hz div=%u src=%u Hz timing=0x%x ltiming=0x%x hw_timeout=0x%x chan_fallback=%d\n",
++				 main_clk, i2c->clk_src_div, parent_clk,
++				 i2c->chan_timing, i2c->chan_ltiming,
++				 i2c->chan_hw_timeout, fallback);
++		else
++			dev_info(i2c->dev,
++				 "mt6771 clk main=%u Hz div=%u src=%u Hz timing=0x%x ltiming=0x%x\n",
++				 main_clk, i2c->clk_src_div, parent_clk,
++				 i2c->timing_reg, i2c->ltiming_reg);
++	}
++
++	return 0;
++}
++
++static void mtk_i2c_fifo_read(struct mtk_i2c *i2c, struct i2c_msg *msgs)
++{
++	struct i2c_msg *rd;
++	int i;
++
++	if (i2c->op == I2C_MASTER_WR)
++		return;
++	rd = i2c->op == I2C_MASTER_WRRD ? msgs + 1 : msgs;
++	for (i = 0; i < rd->len; i++)
++		rd->buf[i] = mtk_i2c_readw(i2c, OFFSET_DATA_PORT);
++}
++
++/*
++ * Ending of a channel transfer, after the vendor driver. A NACK only sets
++ * ACKERR beside TRANSAC_COMP and needs no reset. A timeout, bus error, lost
++ * arbitration or an interrupt with no status resets the shadow bank and hands
++ * the arbiter back with RESUME_ARBIT.
++ */
++static int mtk_i2c_chan_result(struct mtk_i2c *i2c, struct i2c_msg *msgs,
++			       int done, u16 intr_mask)
++{
++	u16 start_reg;
++
++	if (done == 0 || !i2c->irq_stat) {
++		start_reg = mtk_i2c_readw(i2c, OFFSET_START);
++		mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR_MCH | I2C_FIFO_ADDR_CLR,
++			       OFFSET_FIFO_ADDR_CLR);
++		dev_info(i2c->dev,
++			 "addr 0x%x channel %s, start 0x%x, shadow slave 0x%x\n",
++			 msgs->addr, done ? "irq stat 0" : "timeout", start_reg,
++			 mtk_i2c_readw_shadow(i2c, OFFSET_SLAVE_ADDR));
++		mtk_i2c_init_hw(i2c);
++		if (start_reg & I2C_RESUME_ARBIT)
++			mtk_i2c_writew_shadow(i2c, I2C_RESUME_ARBIT,
++					      OFFSET_START);
++		return done ? -EIO : -ETIMEDOUT;
++	}
++
++	if (i2c->irq_stat & (I2C_HS_NACKERR | I2C_ACKERR | I2C_HW_TIMEOUT |
++			     I2C_BUS_ERR | I2C_ARB_LOST | I2C_IBI)) {
++		dev_dbg(i2c->dev, "addr 0x%x, irq_stat 0x%x\n", msgs->addr,
++			i2c->irq_stat);
++		mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR_MCH | I2C_FIFO_ADDR_CLR,
++			       OFFSET_FIFO_ADDR_CLR);
++		if (!(i2c->irq_stat & I2C_TRANSAC_COMP) ||
++		    (i2c->irq_stat & I2C_BUS_ERR)) {
++			if ((i2c->irq_stat & intr_mask) > I2C_TRANSAC_COMP) {
++				mtk_i2c_init_hw(i2c);
++				mtk_i2c_writew_shadow(i2c, I2C_RESUME_ARBIT,
++						      OFFSET_START);
++			}
++		}
++		if (i2c->irq_stat & (I2C_HS_NACKERR | I2C_ACKERR))
++			return -ENXIO;
++		return -EIO;
++	}
++
++	mtk_i2c_fifo_read(i2c, msgs);
+ 	return 0;
+ }
+ 
+@@ -853,37 +1204,86 @@
+ 	u8 *dma_wr_buf = NULL;
+ 	dma_addr_t rpaddr = 0;
+ 	dma_addr_t wpaddr = 0;
++	u16 intr_mask;
++	bool fifo = false;
+ 	int ret;
++	int i;
+ 
+ 	i2c->irq_stat = 0;
+ 
+ 	if (i2c->auto_restart)
+ 		restart_flag = I2C_RS_TRANSFER;
+ 
++	/*
++	 * MT6771 moves 8 bytes or less each way through DATA_PORT, as the
++	 * vendor driver does. Only for a single message or a write-then-read.
++	 */
++	if (i2c->dev_comp->dt_clk_div &&
++	    (num == 1 || i2c->hs_only || i2c->op == I2C_MASTER_WRRD) &&
++	    msgs->len <= I2C_FIFO_MAX_LEN &&
++	    (i2c->op != I2C_MASTER_WRRD || (msgs + 1)->len <= I2C_FIFO_MAX_LEN))
++		fifo = true;
++
++	/* DMA through a channel was never used by the stock kernel. */
++	if (i2c->ch_offset && !fifo)
++		return -EOPNOTSUPP;
++
++	intr_mask = restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
++		    I2C_ARB_LOST | I2C_TRANSAC_COMP;
++	/* The vendor v2 mask: SCL low timeout and bus error as well. */
++	if (i2c->hs_only)
++		intr_mask |= I2C_BUS_ERR | I2C_HW_TIMEOUT;
++	/* The vendor driver leaves ACK errors out of the channel's mask. */
++	if (i2c->ch_offset)
++		intr_mask = restart_flag | I2C_BUS_ERR | I2C_HW_TIMEOUT |
++			    I2C_ARB_LOST | I2C_TRANSAC_COMP;
++
+ 	reinit_completion(&i2c->msg_complete);
+ 
+-	control_reg = mtk_i2c_readw(i2c, OFFSET_CONTROL) &
+-			~(I2C_CONTROL_DIR_CHANGE | I2C_CONTROL_RS);
++	if (i2c->ch_offset)
++		mtk_i2c_setup_chan(i2c, -1);
++
++	if (i2c->dev_comp->dt_clk_div) {
++		/* The vendor drops CLK_EXT_EN above 400 kHz. */
++		control_reg = I2C_CONTROL_ACKERR_DET_EN;
++		if (!i2c->hs_only)
++			control_reg |= I2C_CONTROL_CLK_EXT_EN;
++		if (!fifo)
++			control_reg |= I2C_CONTROL_DMA_EN |
++				       I2C_CONTROL_DMAACK_EN |
++				       I2C_CONTROL_ASYNC_MODE;
++	} else {
++		control_reg = mtk_i2c_readw(i2c, OFFSET_CONTROL) &
++				~(I2C_CONTROL_DIR_CHANGE | I2C_CONTROL_RS);
++	}
+ 	if ((i2c->speed_hz > I2C_MAX_FAST_MODE_PLUS_FREQ) || (left_num >= 1))
+ 		control_reg |= I2C_CONTROL_RS;
+ 
+ 	if (i2c->op == I2C_MASTER_WRRD)
+ 		control_reg |= I2C_CONTROL_DIR_CHANGE | I2C_CONTROL_RS;
+ 
+-	mtk_i2c_writew(i2c, control_reg, OFFSET_CONTROL);
++	if (i2c->hs_only)
++		mtk_i2c_setup_chan(i2c, control_reg);
++	else
++		mtk_i2c_writew(i2c, control_reg, OFFSET_CONTROL);
+ 
+ 	addr_reg = i2c_8bit_addr_from_msg(msgs);
+ 	mtk_i2c_writew(i2c, addr_reg, OFFSET_SLAVE_ADDR);
+ 
+ 	/* Clear interrupt status */
+-	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
+-			    I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_STAT);
+-
+-	mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR, OFFSET_FIFO_ADDR_CLR);
++	if (i2c->ch_offset) {
++		mtk_i2c_writew(i2c, I2C_INTR_ALL, OFFSET_INTR_STAT);
++		mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR_MCH | I2C_FIFO_ADDR_CLR,
++			       OFFSET_FIFO_ADDR_CLR);
++	} else {
++		mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
++				    I2C_ARB_LOST | I2C_TRANSAC_COMP,
++			       OFFSET_INTR_STAT);
++		mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR, OFFSET_FIFO_ADDR_CLR);
++	}
+ 
+ 	/* Enable interrupt */
+-	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
+-			    I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_MASK);
++	mtk_i2c_writew(i2c, intr_mask, OFFSET_INTR_MASK);
+ 
+ 	/* Set transfer and transaction len */
+ 	if (i2c->op == I2C_MASTER_WRRD) {
+@@ -898,7 +1298,8 @@
+ 		mtk_i2c_writew(i2c, I2C_WRRD_TRANAC_VALUE, OFFSET_TRANSAC_LEN);
+ 	} else {
+ 		mtk_i2c_writew(i2c, msgs->len, OFFSET_TRANSFER_LEN);
+-		mtk_i2c_writew(i2c, num, OFFSET_TRANSAC_LEN);
++		/* hs_only sends one message per transfer. */
++		mtk_i2c_writew(i2c, i2c->hs_only ? 1 : num, OFFSET_TRANSAC_LEN);
+ 	}
+ 
+ 	if (i2c->dev_comp->apdma_sync) {
+@@ -908,7 +1309,12 @@
+ 	}
+ 
+ 	/* Prepare buffer data to start transfer */
+-	if (i2c->op == I2C_MASTER_RD) {
++	if (fifo) {
++		if (i2c->op != I2C_MASTER_RD)
++			for (i = 0; i < msgs->len; i++)
++				mtk_i2c_writew(i2c, msgs->buf[i],
++					       OFFSET_DATA_PORT);
++	} else if (i2c->op == I2C_MASTER_RD) {
+ 		writel(I2C_DMA_INT_FLAG_NONE, i2c->pdmabase + OFFSET_INT_FLAG);
+ 		writel(I2C_DMA_CON_RX | dma_sync, i2c->pdmabase + OFFSET_CON);
+ 
+@@ -1007,7 +1413,11 @@
+ 		writel((msgs + 1)->len, i2c->pdmabase + OFFSET_RX_LEN);
+ 	}
+ 
+-	writel(I2C_DMA_START_EN, i2c->pdmabase + OFFSET_EN);
++	if (!fifo)
++		writel(I2C_DMA_START_EN, i2c->pdmabase + OFFSET_EN);
++
++	if (i2c->ch_offset)
++		writew(I2C_MCU_INTR_EN, i2c->chan + I2C_V2_MCU_INTR);
+ 
+ 	if (!i2c->auto_restart) {
+ 		start_reg = I2C_TRANSAC_START;
+@@ -1021,11 +1431,19 @@
+ 	ret = wait_for_completion_timeout(&i2c->msg_complete,
+ 					  i2c->adap.timeout);
+ 
+-	/* Clear interrupt mask */
+-	mtk_i2c_writew(i2c, ~(restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
+-			    I2C_ARB_LOST | I2C_TRANSAC_COMP), OFFSET_INTR_MASK);
+-
+-	if (i2c->op == I2C_MASTER_WR) {
++	/*
++	 * Clear interrupt mask. A channel is left with everything masked, as
++	 * the vendor irq handler leaves it.
++	 */
++	if (i2c->ch_offset) {
++		mtk_i2c_writew(i2c, (u16)~I2C_INTR_ALL, OFFSET_INTR_MASK);
++		return mtk_i2c_chan_result(i2c, msgs, ret, intr_mask);
++	}
++	mtk_i2c_writew(i2c, ~intr_mask, OFFSET_INTR_MASK);
++
++	if (fifo) {
++		/* Nothing mapped. */
++	} else if (i2c->op == I2C_MASTER_WR) {
+ 		dma_unmap_single(i2c->dev, wpaddr,
+ 				 msgs->len, DMA_TO_DEVICE);
+ 
+@@ -1057,6 +1475,19 @@
+ 		return -ENXIO;
+ 	}
+ 
++	/* As the vendor: clear the FIFO address, reset and return -EREMOTEIO. */
++	if (i2c->hs_only && (i2c->irq_stat & (I2C_BUS_ERR | I2C_HW_TIMEOUT))) {
++		dev_dbg(i2c->dev, "addr: %x, irq_stat 0x%x\n", msgs->addr,
++			i2c->irq_stat);
++		mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR_MCH | I2C_FIFO_ADDR_CLR,
++			       OFFSET_FIFO_ADDR_CLR);
++		mtk_i2c_init_hw(i2c);
++		return -EREMOTEIO;
++	}
++
++	if (fifo)
++		mtk_i2c_fifo_read(i2c, msgs);
++
+ 	return 0;
+ }
+ 
+@@ -1082,6 +1513,10 @@
+ 			write_then_read_en = true;
+ 		}
+ 	}
++
++	/* hs_only sends each message on its own, as the vendor does. */
++	if (i2c->hs_only)
++		i2c->auto_restart = 0;
+ 
+ 	if (i2c->auto_restart && num >= 2 &&
+ 		i2c->speed_hz > I2C_MAX_FAST_MODE_PLUS_FREQ)
+@@ -1137,6 +1572,18 @@
+ 	if (i2c->auto_restart)
+ 		restart_flag = I2C_RS_TRANSFER;
+ 
++	/*
++	 * A channel does as the vendor mt_i2c_irq: mask everything (0xfe00),
++	 * read and clear all status and wake the waiter on any interrupt.
++	 */
++	if (i2c->ch_offset) {
++		mtk_i2c_writew(i2c, (u16)~I2C_INTR_ALL, OFFSET_INTR_MASK);
++		i2c->irq_stat |= mtk_i2c_readw(i2c, OFFSET_INTR_STAT);
++		mtk_i2c_writew(i2c, I2C_INTR_ALL, OFFSET_INTR_STAT);
++		complete(&i2c->msg_complete);
++		return IRQ_HANDLED;
++	}
++
+ 	intr_stat = mtk_i2c_readw(i2c, OFFSET_INTR_STAT);
+ 	mtk_i2c_writew(i2c, intr_stat, OFFSET_INTR_STAT);
+ 
+@@ -1153,7 +1600,10 @@
+ 		mtk_i2c_writew(i2c, I2C_RS_MUL_CNFG | I2C_RS_MUL_TRIG |
+ 				    I2C_TRANSAC_START, OFFSET_START);
+ 	} else {
+-		if (i2c->irq_stat & (I2C_TRANSAC_COMP | restart_flag))
++		/* The vendor wakes on any interrupt; hs_only adds these two. */
++		if (i2c->irq_stat & (I2C_TRANSAC_COMP | restart_flag) ||
++		    (i2c->hs_only &&
++		     (i2c->irq_stat & (I2C_BUS_ERR | I2C_HW_TIMEOUT))))
+ 			complete(&i2c->msg_complete);
+ 	}
+ 
+@@ -1174,6 +1624,137 @@
+ 	.functionality = mtk_i2c_functionality,
+ };
+ 
++/*
++ * CCU channel, as the vendor i2c_ccu_enable() and
++ * i2c_ccu_disable() do it on this board: the CCU firmware drives a second
++ * channel of the multi-channel bus (base + 0x200) itself, with its interrupt
++ * routed to the CCU. The AP channel goes on as before; the controller
++ * arbitrates between the two. The camera drivers reach these through the
++ * i2c_shim's T names (i2c-mtk.h).
++ */
++static struct mtk_i2c *mtk_i2c_from_adap(struct i2c_adapter *adap)
++{
++	if (!adap || adap->algo != &mtk_i2c_algorithm)
++		return NULL;
++	return i2c_get_adapdata(adap);
++}
++
++int mtk_i2c_hw_id(struct i2c_adapter *adap)
++{
++	struct mtk_i2c *i2c = mtk_i2c_from_adap(adap);
++
++	return i2c ? i2c->hw_id : -ENODEV;
++}
++EXPORT_SYMBOL(mtk_i2c_hw_id);
++
++int mtk_i2c_ccu_dma_buf(struct i2c_adapter *adap, void **va, dma_addr_t *pa)
++{
++	struct mtk_i2c *i2c = mtk_i2c_from_adap(adap);
++
++	if (!i2c)
++		return -ENODEV;
++	if (!i2c->ccu_buf)
++		return -ENOMEM;
++	*va = i2c->ccu_buf;
++	*pa = i2c->ccu_buf_pa;
++	return 0;
++}
++EXPORT_SYMBOL(mtk_i2c_ccu_dma_buf);
++
++/*
++ * Turns the clocks on and keeps them on until mtk_i2c_ccu_disable(), then
++ * sets up the channel at ch_offset as the vendor's dummy CCU transfer does
++ * (a 1-byte read of address 1 that is never started): the AP channel's
++ * timing, CONTROL, slave address, status and FIFO cleared, the vendor
++ * channel interrupt mask and the lengths. The CCU starts its own transfers.
++ * Holds the bus lock while it writes, so no AP transfer runs meanwhile.
++ */
++int mtk_i2c_ccu_enable(struct i2c_adapter *adap, u16 ch_offset)
++{
++	struct mtk_i2c *i2c = mtk_i2c_from_adap(adap);
++	void __iomem *chan;
++	u16 control;
++	int ret;
++
++	if (!i2c)
++		return -ENODEV;
++	if (!i2c->ch_offset || !ch_offset || ch_offset == i2c->ch_offset ||
++	    ch_offset % 0x100 || ch_offset + 0x100 > i2c->reg_size)
++		return -EINVAL;
++	chan = i2c->base + ch_offset;
++
++	i2c_lock_bus(adap, I2C_LOCK_ROOT_ADAPTER);
++	if (i2c->ccu_on) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = mtk_i2c_clock_enable(i2c);
++	if (ret)
++		goto out;
++
++	/* The vendor drops CLK_EXT_EN above 400 kHz. */
++	control = I2C_CONTROL_ACKERR_DET_EN;
++	if (!i2c->hs_only)
++		control |= I2C_CONTROL_CLK_EXT_EN;
++	mtk_i2c_setup_chan_at(i2c, chan, control);
++	mtk_i2c_writew_at(i2c, chan, (0x1 << 1) | 0x1, OFFSET_SLAVE_ADDR);
++	mtk_i2c_writew_at(i2c, chan, I2C_INTR_ALL, OFFSET_INTR_STAT);
++	mtk_i2c_writew_at(i2c, chan, I2C_FIFO_ADDR_CLR_MCH | I2C_FIFO_ADDR_CLR,
++			  OFFSET_FIFO_ADDR_CLR);
++	mtk_i2c_writew_at(i2c, chan, I2C_BUS_ERR | I2C_HW_TIMEOUT |
++			  I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_MASK);
++	mtk_i2c_writew_at(i2c, chan, 1, OFFSET_TRANSFER_LEN);
++	mtk_i2c_writew_at(i2c, chan, 1, OFFSET_TRANSAC_LEN);
++	i2c->ccu_on = true;
++out:
++	i2c_unlock_bus(adap, I2C_LOCK_ROOT_ADAPTER);
++	return ret;
++}
++EXPORT_SYMBOL(mtk_i2c_ccu_enable);
++
++/*
++ * Waits up to 2 s (100 x 20 ms) for a transfer in flight to end, then turns
++ * the clocks off. As the vendor with no ch_offset_ccu in the DT (stock's
++ * case), it polls START in the shadow bank at base.
++ */
++int mtk_i2c_ccu_disable(struct i2c_adapter *adap)
++{
++	struct mtk_i2c *i2c = mtk_i2c_from_adap(adap);
++	int tmo = 100;
++
++	if (!i2c)
++		return -ENODEV;
++	if (!READ_ONCE(i2c->ccu_on))
++		return 0;
++
++	while ((mtk_i2c_readw_shadow(i2c, OFFSET_START) & I2C_TRANSAC_START) &&
++	       tmo--)
++		msleep(20);
++	if (mtk_i2c_readw_shadow(i2c, OFFSET_START) & I2C_TRANSAC_START)
++		dev_info(i2c->dev, "CCU transfer still running at disable\n");
++
++	i2c_lock_bus(adap, I2C_LOCK_ROOT_ADAPTER);
++	i2c->ccu_on = false;
++	mtk_i2c_clock_disable(i2c);
++	i2c_unlock_bus(adap, I2C_LOCK_ROOT_ADAPTER);
++	return 0;
++}
++EXPORT_SYMBOL(mtk_i2c_ccu_disable);
++
++/* A 16-bit register write in the bus window, for the CCU's MCU_INTR routing. */
++int mtk_i2c_ccu_writew(struct i2c_adapter *adap, u16 val, u16 offset)
++{
++	struct mtk_i2c *i2c = mtk_i2c_from_adap(adap);
++
++	if (!i2c)
++		return -ENODEV;
++	if (!i2c->ccu_on || offset % 2 || offset + 2 > i2c->reg_size)
++		return -EINVAL;
++	writew(val, i2c->base + offset);
++	return 0;
++}
++EXPORT_SYMBOL(mtk_i2c_ccu_writew);
++
+ static int mtk_i2c_parse_dt(struct device_node *np, struct mtk_i2c *i2c)
+ {
+ 	int ret;
+@@ -1192,6 +1773,10 @@
+ 	i2c->have_pmic = of_property_read_bool(np, "mediatek,have-pmic");
+ 	i2c->use_push_pull =
+ 		of_property_read_bool(np, "mediatek,use-push-pull");
++	/* Below 1 MHz the vendor hs_only changes nothing. */
++	i2c->hs_only = i2c->dev_comp->dt_clk_div &&
++		       i2c->speed_hz > I2C_MAX_FAST_MODE_PLUS_FREQ &&
++		       of_property_read_bool(np, "mediatek,hs_only");
+ 
+ 	return 0;
+ }
+@@ -1202,6 +1787,7 @@
+ 	struct mtk_i2c *i2c;
+ 	struct clk *clk;
+ 	struct resource *res;
++	u32 hw_id;
+ 	int irq;
+ 
+ 	i2c = devm_kzalloc(&pdev->dev, sizeof(*i2c), GFP_KERNEL);
+@@ -1212,6 +1798,7 @@
+ 	i2c->base = devm_ioremap_resource(&pdev->dev, res);
+ 	if (IS_ERR(i2c->base))
+ 		return PTR_ERR(i2c->base);
++	i2c->chan = i2c->base;
+ 
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+ 	i2c->pdmabase = devm_ioremap_resource(&pdev->dev, res);
+@@ -1241,6 +1828,21 @@
+ 	if (i2c->have_pmic && !i2c->dev_comp->pmic_i2c)
+ 		return -EINVAL;
+ 
++	/* AP channel offset of a multi-channel MT6771 bus (vendor ch_offset_default). */
++	if (i2c->dev_comp->dt_clk_div &&
++	    !of_property_read_u32(pdev->dev.of_node, "mediatek,ch-offset",
++				  &i2c->ch_offset) && i2c->ch_offset) {
++		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++		if (i2c->ch_offset % 0x100 ||
++		    i2c->ch_offset + 0x100 > resource_size(res))
++			return -EINVAL;
++		i2c->chan = i2c->base + i2c->ch_offset;
++	}
++	i2c->reg_size = resource_size(platform_get_resource(pdev, IORESOURCE_MEM, 0));
++	/* The vendor controller id; -1 where the DT has none. */
++	i2c->hw_id = of_property_read_u32(pdev->dev.of_node, "id", &hw_id) ?
++		     -1 : hw_id;
++
+ 	i2c->clk_main = devm_clk_get(&pdev->dev, "main");
+ 	if (IS_ERR(i2c->clk_main)) {
+ 		dev_err(&pdev->dev, "cannot get main clock\n");
+@@ -1291,6 +1893,17 @@
+ 	}
+ 	mtk_i2c_init_hw(i2c);
+ 	mtk_i2c_clock_disable(i2c);
++
++	/*
++	 * The CCU's command page on a multi-channel bus. The vendor gets it with
++	 * the AP DMA buffer and fails probe without it; here only the CCU loses it.
++	 */
++	if (i2c->ch_offset) {
++		i2c->ccu_buf = dmam_alloc_coherent(&pdev->dev, PAGE_SIZE,
++						   &i2c->ccu_buf_pa, GFP_KERNEL);
++		if (!i2c->ccu_buf)
++			dev_warn(&pdev->dev, "no CCU command page\n");
++	}
+ 
+ 	ret = devm_request_irq(&pdev->dev, irq, mtk_i2c_irq,
+ 			       IRQF_NO_SUSPEND | IRQF_TRIGGER_NONE,
+--- /dev/null
++++ b/drivers/i2c/busses/i2c-mt65xx-ccu.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * CCU channel calls of i2c-mt65xx on a multi-channel MT6771 bus
++ *. Each returns -ENODEV for an adapter that isn't an
++ * i2c-mt65xx bus.
++ *
++ * mtk_i2c_hw_id: the vendor DT controller id ("id"), -1 if the node has none.
++ * mtk_i2c_ccu_dma_buf: the CCU's coherent command page, PAGE_SIZE bytes.
++ * mtk_i2c_ccu_enable: clocks on and the channel at ch_offset set up for the
++ *   CCU, as the vendor i2c_ccu_enable(). 0, or -EINVAL for a bus with no AP
++ *   channel or a bad offset, -EBUSY if already on.
++ * mtk_i2c_ccu_disable: waits for a transfer in flight, clocks off.
++ * mtk_i2c_ccu_writew: a register write in the bus window while the CCU is on.
++ */
++#ifndef __I2C_MT65XX_CCU_H__
++#define __I2C_MT65XX_CCU_H__
++
++#include <linux/types.h>
++
++struct i2c_adapter;
++
++int mtk_i2c_hw_id(struct i2c_adapter *adap);
++int mtk_i2c_ccu_dma_buf(struct i2c_adapter *adap, void **va, dma_addr_t *pa);
++int mtk_i2c_ccu_enable(struct i2c_adapter *adap, u16 ch_offset);
++int mtk_i2c_ccu_disable(struct i2c_adapter *adap);
++int mtk_i2c_ccu_writew(struct i2c_adapter *adap, u16 val, u16 offset);
++
++#endif /* __I2C_MT65XX_CCU_H__ */

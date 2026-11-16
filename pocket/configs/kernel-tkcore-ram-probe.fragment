@@ -1,0 +1,10 @@
+# Overlay onto the existing RAM-only diagnostic config, not a product defconfig.
+# Real driver rootfs_initcall performs secure SHM negotiation and RoT SMC before init.
+# This is not a claim of a read-only secure-world boot. Review the probe contract.
+CONFIG_TRUSTKERNEL_TEE_SUPPORT=y
+CONFIG_TRUSTKERNEL_TEE_FP_SUPPORT=y
+# CONFIG_TRUSTKERNEL_TEE_RPMB_SUPPORT is not set
+# CONFIG_TEE is not set
+CONFIG_DMA_SHARED_BUFFER=y
+CONFIG_ARCH_KEEP_MEMBLOCK=y
+CONFIG_TRUSTKERNEL_TEE_RAM_DIAGNOSTIC=y

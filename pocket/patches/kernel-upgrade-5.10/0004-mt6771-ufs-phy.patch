@@ -1,0 +1,117 @@
+--- a/drivers/phy/mediatek/phy-mtk-ufs.c
++++ b/drivers/phy/mediatek/phy-mtk-ufs.c
+@@ -8,6 +8,7 @@
+ #include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
++#include <linux/of_device.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ 
+@@ -31,11 +32,28 @@
+ #define FRC_CDR_ISO_EN              BIT(19)
+ #define CDR_ISO_EN                  BIT(20)
+ 
++struct ufs_mtk_phy_data {
++	u32 pll_reg;
++	u32 cdr_reg;
++};
++
++static const struct ufs_mtk_phy_data mt8183_ufs_phy_data = {
++	.pll_reg = MP_GLB_DIG_8C,
++	.cdr_reg = MP_LN_RX_44,
++};
++
++/* Register offsets and suspend sequence from the MT6771 BSP. */
++static const struct ufs_mtk_phy_data mt6771_ufs_phy_data = {
++	.pll_reg = 0xA08C,
++	.cdr_reg = 0xA044,
++};
++
+ struct ufs_mtk_phy {
+ 	struct device *dev;
+ 	void __iomem *mmio;
+ 	struct clk *mp_clk;
+ 	struct clk *unipro_clk;
++	const struct ufs_mtk_phy_data *data;
+ };
+ 
+ static inline u32 mphy_readl(struct ufs_mtk_phy *phy, u32 reg)
+@@ -93,20 +111,20 @@
+ static void ufs_mtk_phy_set_active(struct ufs_mtk_phy *phy)
+ {
+ 	/* release DA_MP_PLL_PWR_ON */
+-	mphy_set_bit(phy, MP_GLB_DIG_8C, PLL_PWR_ON);
+-	mphy_clr_bit(phy, MP_GLB_DIG_8C, FRC_FRC_PWR_ON);
++	mphy_set_bit(phy, phy->data->pll_reg, PLL_PWR_ON);
++	mphy_clr_bit(phy, phy->data->pll_reg, FRC_FRC_PWR_ON);
+ 
+ 	/* release DA_MP_PLL_ISO_EN */
+-	mphy_clr_bit(phy, MP_GLB_DIG_8C, PLL_ISO_EN);
+-	mphy_clr_bit(phy, MP_GLB_DIG_8C, FRC_PLL_ISO_EN);
++	mphy_clr_bit(phy, phy->data->pll_reg, PLL_ISO_EN);
++	mphy_clr_bit(phy, phy->data->pll_reg, FRC_PLL_ISO_EN);
+ 
+ 	/* release DA_MP_CDR_PWR_ON */
+-	mphy_set_bit(phy, MP_LN_RX_44, CDR_PWR_ON);
+-	mphy_clr_bit(phy, MP_LN_RX_44, FRC_CDR_PWR_ON);
++	mphy_set_bit(phy, phy->data->cdr_reg, CDR_PWR_ON);
++	mphy_clr_bit(phy, phy->data->cdr_reg, FRC_CDR_PWR_ON);
+ 
+ 	/* release DA_MP_CDR_ISO_EN */
+-	mphy_clr_bit(phy, MP_LN_RX_44, CDR_ISO_EN);
+-	mphy_clr_bit(phy, MP_LN_RX_44, FRC_CDR_ISO_EN);
++	mphy_clr_bit(phy, phy->data->cdr_reg, CDR_ISO_EN);
++	mphy_clr_bit(phy, phy->data->cdr_reg, FRC_CDR_ISO_EN);
+ 
+ 	/* release DA_MP_RX0_SQ_EN */
+ 	mphy_set_bit(phy, MP_LN_DIG_RX_AC, RX_SQ_EN);
+@@ -129,20 +147,20 @@
+ 	mphy_clr_bit(phy, MP_LN_DIG_RX_AC, RX_SQ_EN);
+ 
+ 	/* force DA_MP_CDR_ISO_EN */
+-	mphy_set_bit(phy, MP_LN_RX_44, FRC_CDR_ISO_EN);
+-	mphy_set_bit(phy, MP_LN_RX_44, CDR_ISO_EN);
++	mphy_set_bit(phy, phy->data->cdr_reg, FRC_CDR_ISO_EN);
++	mphy_set_bit(phy, phy->data->cdr_reg, CDR_ISO_EN);
+ 
+ 	/* force DA_MP_CDR_PWR_ON */
+-	mphy_set_bit(phy, MP_LN_RX_44, FRC_CDR_PWR_ON);
+-	mphy_clr_bit(phy, MP_LN_RX_44, CDR_PWR_ON);
++	mphy_set_bit(phy, phy->data->cdr_reg, FRC_CDR_PWR_ON);
++	mphy_clr_bit(phy, phy->data->cdr_reg, CDR_PWR_ON);
+ 
+ 	/* force DA_MP_PLL_ISO_EN */
+-	mphy_set_bit(phy, MP_GLB_DIG_8C, FRC_PLL_ISO_EN);
+-	mphy_set_bit(phy, MP_GLB_DIG_8C, PLL_ISO_EN);
++	mphy_set_bit(phy, phy->data->pll_reg, FRC_PLL_ISO_EN);
++	mphy_set_bit(phy, phy->data->pll_reg, PLL_ISO_EN);
+ 
+ 	/* force DA_MP_PLL_PWR_ON */
+-	mphy_set_bit(phy, MP_GLB_DIG_8C, FRC_FRC_PWR_ON);
+-	mphy_clr_bit(phy, MP_GLB_DIG_8C, PLL_PWR_ON);
++	mphy_set_bit(phy, phy->data->pll_reg, FRC_FRC_PWR_ON);
++	mphy_clr_bit(phy, phy->data->pll_reg, PLL_PWR_ON);
+ }
+ 
+ static int ufs_mtk_phy_power_on(struct phy *generic_phy)
+@@ -209,6 +227,9 @@
+ 		return PTR_ERR(phy->mmio);
+ 
+ 	phy->dev = dev;
++	phy->data = of_device_get_match_data(dev);
++	if (!phy->data)
++		return -EINVAL;
+ 
+ 	ret = ufs_mtk_phy_clk_init(phy);
+ 	if (ret)
+@@ -226,7 +247,8 @@
+ }
+ 
+ static const struct of_device_id ufs_mtk_phy_of_match[] = {
+-	{.compatible = "mediatek,mt8183-ufsphy"},
++	{.compatible = "mediatek,mt8183-ufsphy", .data = &mt8183_ufs_phy_data},
++	{.compatible = "mediatek,mt6771-ufsphy", .data = &mt6771_ufs_phy_data},
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(of, ufs_mtk_phy_of_match);

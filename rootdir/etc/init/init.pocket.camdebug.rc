@@ -1,0 +1,7 @@
+# Trial builds only (POCKET_CAMERA_DEBUG=true): more logs from the stock mtkcam HAL.
+# libmtkcam_stdutils reads persist.vendor.mtk.camera.log_level once per process when it loads:
+# unset is 2 (error, warning, info), 3 adds debug lines, 4 adds verbose ones.
+# Set at early-init, before persistent properties load, so init keeps it in memory and never
+# writes it to /data. A value saved earlier with setprop still wins once /data loads.
+on early-init
+    setprop persist.vendor.mtk.camera.log_level 3

@@ -1,0 +1,927 @@
+{
+  "schema": 1,
+  "description": "Original reconstruction specification; generated stock-derived policy stays private. Dynamic assertion predicates retain original exclusions over modern domains; the grant-bearing app set is bounded to retained stock members.",
+  "source_policy_api": "30.0",
+  "cross_fragment_contracts": [
+    {
+      "symbol": "base_typeattr_184_30_0",
+      "definition": [
+        [
+          "and",
+          [
+            "appdomain"
+          ],
+          [
+            [
+              "not",
+              [
+                "isolated_app_30_0"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "kind": "retained_stock_app_grant_set",
+      "retained_members": [
+        "apmsrv_app",
+        "bluetooth",
+        "capability_app",
+        "em_app",
+        "emcamera_app",
+        "ephemeral_app",
+        "gmscore_app",
+        "mediaprovider",
+        "mediaprovider_app",
+        "mobicore_app",
+        "network_stack",
+        "nfc",
+        "permissioncontroller_app",
+        "platform_app",
+        "priv_app",
+        "radio",
+        "runas_app",
+        "secure_element",
+        "sensorhub_app",
+        "shared_relro",
+        "shell",
+        "simpleperf",
+        "system_app",
+        "teed_app",
+        "teeregistryd_app",
+        "traceur_app",
+        "untrusted_app",
+        "untrusted_app_25",
+        "untrusted_app_27",
+        "untrusted_app_29",
+        "vzwomatrigger_app"
+      ]
+    },
+    {
+      "symbol": "base_typeattr_376_30_0",
+      "definition": [
+        [
+          "and",
+          [
+            "domain"
+          ],
+          [
+            [
+              "not",
+              [
+                "hal_keymaster_server"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "kind": "modern_domain_assertion_predicate"
+    },
+    {
+      "symbol": "base_typeattr_405_30_0",
+      "definition": [
+        [
+          "and",
+          [
+            "domain"
+          ],
+          [
+            [
+              "not",
+              [
+                "hal_telephony_server"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "kind": "modern_domain_assertion_predicate"
+    },
+    {
+      "symbol": "base_typeattr_476_30_0",
+      "definition": [
+        [
+          "and",
+          [
+            "coredomain"
+          ],
+          [
+            [
+              "not",
+              [
+                "dumpstate_30_0",
+                "init_30_0"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "kind": "modern_domain_assertion_predicate"
+    },
+    {
+      "symbol": "base_typeattr_480_30_0",
+      "definition": [
+        [
+          "and",
+          [
+            "coredomain"
+          ],
+          [
+            [
+              "not",
+              [
+                "init_30_0"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "kind": "modern_domain_assertion_predicate"
+    },
+    {
+      "symbol": "base_typeattr_502_30_0",
+      "definition": [
+        [
+          "and",
+          [
+            "domain"
+          ],
+          [
+            [
+              "not",
+              [
+                "radio_30_0"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "kind": "modern_domain_assertion_predicate"
+    }
+  ],
+  "absent_domains": {
+    "dexoptanalyzer": {
+      "reason": "Absent from complete modern concrete domain declarations; its only OEM uses are an atomic neverallow subject and one assertion-only exclusion. Projecting this uninhabited domain to empty changes no permission or assertion over declared target types.",
+      "permitted_use_shapes": [
+        "atomic_neverallow_subject",
+        "assertion_only_negative_set_member"
+      ]
+    }
+  },
+  "external_platform_attribute_prefix": "pocket_platform_contract_",
+  "startup": "Use modern vold/keystore2 readiness/shared-secret ownership; no copied legacy HMAC helper",
+  "modern_default_roles": [
+    {
+      "type": "hal_health_default",
+      "attributes": [
+        "bpfdomain"
+      ],
+      "upstream": "system/sepolicy/vendor/hal_health_default.te",
+      "reason": "Modern generic health-server policy grants BPF prog_run and requires bpfdomain; matches current upstream default role."
+    },
+    {
+      "type": "hal_vehicle_default",
+      "attributes": [
+        "hal_can_bus",
+        "hal_can_bus_client",
+        "halclientdomain"
+      ],
+      "upstream": "system/sepolicy/vendor/hal_vehicle_default.te",
+      "reason": "Existing legacy CAN find grant is represented by current upstream HAL-client role; no service or hardware is enabled."
+    }
+  ],
+  "owner_permission_adaptations": [
+    {
+      "subject": "vold",
+      "target": "system_data_file",
+      "class": "dir",
+      "permissions": [
+        "rename",
+        "reparent"
+      ],
+      "reason": "Current FsCrypt.prepare_dir_with_policy prepares encrypted user directories under a temporary .new name and atomically renames them only after encryption policy and mode/ownership are ready. Current vold.te grants create_dir_perms for exactly this owner. Other domains/types/denied permissions remain constrained.",
+      "source_markers": {
+        "system/vold/FsCrypt.cpp": "rename(tmp_dir.c_str(), dir.c_str())",
+        "system/sepolicy/private/vold.te": "temporary name (\"10.new\")"
+      }
+    },
+    {
+      "subject": "vold_prepare_subdirs",
+      "target": "system_data_file",
+      "class": "dir",
+      "permissions": [
+        "create",
+        "ioctl",
+        "lock",
+        "relabelto",
+        "rename",
+        "reparent",
+        "setattr",
+        "watch",
+        "watch_reads"
+      ],
+      "reason": "Current vold_prepare_subdirs prepares per-user CE/DE/APEX directories with fs_prepare_dir, derives their target labels with selabel_lookup and applies lsetfilecon when needed. Its dedicated modern policy grants create_dir_perms/relabelto for this owner. No other owner or file type is exempted.",
+      "source_markers": {
+        "system/vold/vold_prepare_subdirs.cpp": "lsetfilecon(path.c_str(), secontext.get())",
+        "system/sepolicy/private/vold_prepare_subdirs.te": "}:dir { create_dir_perms relabelto };"
+      }
+    },
+    {
+      "subject": "init",
+      "target": "debugfs",
+      "class": "dir",
+      "permissions": [
+        "mounton"
+      ],
+      "debug_only": true,
+      "reason": "Current upstream init mounts/unmounts debugfs in debug builds. Permit only init directory mounton while retaining all old content write and mutation restrictions; omitted for non-debuggable products.",
+      "source_markers": {
+        "system/sepolicy/private/init.te": "# allow init to mount and unmount debugfs in debug builds"
+      }
+    }
+  ],
+  "owner_predicate_adaptations": [
+    {
+      "predicate": "base_typeattr_pocket_oem_762",
+      "owner": "dexopt_chroot_setup",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "mounton"
+      ],
+      "expected_assertions": 2,
+      "reason": "Modern ART pre-reboot dexopt mounts an isolated chroot; permit only this dedicated mount setup owner to bind-mount the exact directory type, retaining all content mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/dexopt_chroot_setup.te": "# We recursively bind-mount directories"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_758",
+      "owner": "dexopt_chroot_setup",
+      "target": "system_data_file",
+      "class": "dir",
+      "permissions": [
+        "mounton"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern ART pre-reboot dexopt mounts an isolated chroot; permit only this dedicated mount setup owner to bind-mount the exact directory type, retaining all content mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/dexopt_chroot_setup.te": "# We recursively bind-mount directories"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_752",
+      "owner": "dexopt_chroot_setup",
+      "target": "debugfs",
+      "class": "dir",
+      "permissions": [
+        "mounton"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern ART pre-reboot dexopt mounts an isolated chroot; permit only this dedicated mount setup owner to bind-mount the exact directory type, retaining all content mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/dexopt_chroot_setup.te": "# We recursively bind-mount directories"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_752",
+      "owner": "dexopt_chroot_setup",
+      "target": "proc",
+      "class": "dir",
+      "permissions": [
+        "mounton"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern ART pre-reboot dexopt mounts an isolated chroot; permit only this dedicated mount setup owner to bind-mount the exact directory type, retaining all content mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/dexopt_chroot_setup.te": "# We recursively bind-mount directories"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_749",
+      "owner": "dexopt_chroot_setup",
+      "target": "sysfs",
+      "class": "dir",
+      "permissions": [
+        "mounton"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern ART pre-reboot dexopt mounts an isolated chroot; permit only this dedicated mount setup owner to bind-mount the exact directory type, retaining all content mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/dexopt_chroot_setup.te": "# We recursively bind-mount directories"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_758",
+      "owner": "artd",
+      "target": "system_data_file",
+      "class": "dir",
+      "permissions": [
+        "ioctl",
+        "read",
+        "lock",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern ART daemon enumerates user-data directory metadata to locate dex artifacts; no file content or directory mutation exception.",
+      "source_markers": {
+        "system/sepolicy/private/artd.te": "allow artd system_data_file:dir r_dir_perms;"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_761",
+      "owner": "apexd",
+      "target": "device",
+      "class": "blk_file",
+      "permissions": [
+        "getattr"
+      ],
+      "expected_assertions": 1,
+      "reason": "APEX daemon inspects block-device metadata to manage loop/device-mapper mounted APEXes; no block read/write exception.",
+      "source_markers": {
+        "system/sepolicy/private/apexd.te": "allow apexd dev_type:blk_file getattr;"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_761",
+      "owner": "apexd",
+      "target": "socket_device",
+      "class": "blk_file",
+      "permissions": [
+        "getattr"
+      ],
+      "expected_assertions": 1,
+      "reason": "Same modern dev_type metadata grant; no socket, device-content or write permission added.",
+      "source_markers": {
+        "system/sepolicy/private/apexd.te": "allow apexd dev_type:blk_file getattr;"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_762",
+      "owner": "apexd",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "ioctl",
+        "read",
+        "lock",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 2,
+      "reason": "APEX daemon enumerates block devices; preserve denial of directory mutation and all other domains.",
+      "source_markers": {
+        "system/sepolicy/private/apexd.te": "# Allow apexd to access /dev/block"
+      }
+    },
+    {
+      "predicate": "pocket_platform_contract_578",
+      "owner": "apexd",
+      "target": "sysfs",
+      "class": "file",
+      "permissions": [
+        "ioctl",
+        "read",
+        "getattr",
+        "lock",
+        "map",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 1,
+      "reason": "APEX daemon reads sysfs block topology to manage loop and device-mapper APEX backing devices; this exact generic label remains read-only.",
+      "source_markers": {
+        "system/sepolicy/private/apexd.te": "# Access to /sys/class/block"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_762",
+      "owner": "snapuserd",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "read",
+        "watch"
+      ],
+      "expected_assertions": 2,
+      "reason": "Snapshot update daemon watches only device-directory creation of ublk nodes; retain mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/snapuserd.te": "For inotify for WaitForFile"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_762",
+      "owner": "device_as_webcam",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "ioctl",
+        "read",
+        "lock",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 2,
+      "reason": "Modern USB webcam service enumerates device nodes; no directory mutation or device-content exception.",
+      "source_markers": {
+        "system/sepolicy/private/device_as_webcam.te": "# need to access /dev to list all devices"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_762",
+      "owner": "crosvm",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "read",
+        "open"
+      ],
+      "expected_assertions": 2,
+      "reason": "Modern virtual-machine process enumerates the device directory for its paravirtualized display; no host node content or write exception.",
+      "source_markers": {
+        "system/sepolicy/private/crosvm.te": "# Allow crosvm to draw screen in the surface"
+      }
+    },
+    {
+      "predicate": "base_typeattr_pocket_oem_776",
+      "owner": "hal_drm",
+      "target": "system_data_file",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern DRM contract permits reading already-open data descriptors, but not opening generic data files. Preserve every mutation and open denial.",
+      "source_markers": {
+        "system/sepolicy/private/hal_drm.te": "# Read files already opened under /data"
+      }
+    },
+    {
+      "predicate": "pocket_platform_contract_578",
+      "owner": "vfio_handler",
+      "target": "sysfs",
+      "class": "file",
+      "permissions": [
+        "ioctl",
+        "read",
+        "write",
+        "getattr",
+        "lock",
+        "append",
+        "map",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 1,
+      "optional_current_owner": true,
+      "reason": "Selected modern VFIO helper owns platform-device binding. Its code checks platform-device paths then writes driver/unbind, driver_override and drivers_probe; existing modern policy grants rw_file_perms on generic sysfs. Preserve this exact trusted owner operation while retaining every other core/vendor domain denial and no create/unlink/execute exemption. This does not qualify VFIO hardware support.",
+      "source_markers": {
+        "system/sepolicy/private/vfio_handler.te": "# Allow vfio_handler to bind/unbind platform devices",
+        "packages/modules/Virtualization/android/virtualizationservice/vfio_handler/src/aidl.rs": "if !path.starts_with(SYSFS_PLATFORM_DEVICES_PATH) {"
+      }
+    }
+  ],
+  "protected_owner_grant_restrictions": [
+    {
+      "legacy_target": "proc_net_30_0",
+      "protected_type": "proc_bpf",
+      "class": "file",
+      "permissions": [
+        "write"
+      ],
+      "expected_grants": 9,
+      "reason": "Only modern bpfloader may change protected BPF sysctls. Old proc_net mapping broadens to this newly separated type; retain legacy network control access but revoke writes to BPF controls.",
+      "source_markers": {
+        "system/sepolicy/private/bpfloader.te": "neverallow { domain -bpfloader } proc_bpf:file write;"
+      }
+    },
+    {
+      "legacy_target": "media_rw_data_file_30_0",
+      "protected_type": "media_userdir_file",
+      "class": "dir",
+      "permissions": [
+        "write",
+        "add_name",
+        "remove_name"
+      ],
+      "expected_grants": 9,
+      "reason": "Only encryption owner vold manages top-level per-user media containers. Preserve logger writes below containers and metadata reads, revoke mutation of encrypted user-container entries.",
+      "source_markers": {
+        "system/sepolicy/private/vold.te": "# Only vold and init should ever set file-based encryption policies."
+      }
+    }
+  ],
+  "legacy_mls_role_scope": {
+    "excluded_domains": [
+      "emcamera_app",
+      "mobicore_app",
+      "sensorhub_app",
+      "vzwomatrigger_app"
+    ],
+    "unselected_packages": [
+      "com.mediatek.emcamera",
+      "com.trustonic.tuiservice",
+      "com.mediatek.sensorhub.ui"
+    ],
+    "reason": "Canonical old MLS compatibility derivation must not confer bypass to modern framework-owned vzwomatrigger_app or the three unselected engineering/wrong-TEE vendor APK domains. Keep their real types and retained vendor seapp/mac/rule references intact; future package selection reopens this exact closed-world proof. This does not qualify carrier or sensor hardware."
+  },
+  "obsolete_framework_grants": [
+    {
+      "subject": "system_server_30_0",
+      "target": "self",
+      "class": "capability",
+      "permissions": [
+        "sys_module"
+      ],
+      "reason": "Selected current framework system_server deliberately lacks CAP_SYS_MODULE in DAC and SELinux because it is exposed to untrusted code. No stock system_server/framework APK/native integration is selected. Old vendor contribution cannot confer module loading on this modern owner; preserve init/vendor module loading policy.",
+      "source_markers": {
+        "system/sepolicy/private/system_server.te": "# system_server should not be able to load kernel modules. system_server"
+      }
+    },
+    {
+      "subject": "audioserver_30_0",
+      "target": "vendor_default_prop_30_0",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "crash_dump_30_0",
+      "target": "vendor_default_prop_30_0",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "mobile_log_d_30_0",
+      "target": "vendor_default_prop_30_0",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "system_app_30_0",
+      "target": "vendor_default_prop_30_0",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "atci_service_sys_30_0",
+      "target": "vendor_default_prop_30_0",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "bootanim_30_0",
+      "target": "vendor_default_prop_30_0",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    }
+  ],
+  "property_owner_classifications": [
+    {
+      "type": "agui_network_manager_prop",
+      "owner": "vendor",
+      "scope": "public",
+      "property_name": "vendor.com.agui.networkmanager.policy.set",
+      "context_path": "firmware/installed-20230105/rootfs/system/system/system_ext/etc/selinux/system_ext_property_contexts",
+      "reason": "Exact vendor-namespaced property has existing system_app setter/read access and extended-core compatibility. Classify its owner explicitly as required by modern taxonomy; do not introduce any new allow or classify generic default properties."
+    }
+  ],
+  "generic_label_assertion_rebindings": [
+    {
+      "subject": "base_typeattr_628_30_0",
+      "legacy_target": "sysfs_30_0",
+      "current_target": "sysfs",
+      "class": "file",
+      "reason": "Reconstruct the original generic root-path label constraint at its stock singleton identity. API30 descendant relabel mappings are grant compatibility, not ownership of newly introduced typed descendant paths; every modern descendant-label assertion is preserved. Generic target and all original denied permissions/subjects remain constrained."
+    },
+    {
+      "subject": "base_typeattr_629_30_0",
+      "legacy_target": "proc_30_0",
+      "current_target": "proc",
+      "class": "file",
+      "reason": "Reconstruct the original generic root-path label constraint at its stock singleton identity. API30 descendant relabel mappings are grant compatibility, not ownership of newly introduced typed descendant paths; every modern descendant-label assertion is preserved. Generic target and all original denied permissions/subjects remain constrained."
+    },
+    {
+      "subject": "rild",
+      "legacy_target": "proc_30_0",
+      "current_target": "proc",
+      "class": "file",
+      "reason": "Reconstruct the original generic root-path label constraint at its stock singleton identity. API30 descendant relabel mappings are grant compatibility, not ownership of newly introduced typed descendant paths; every modern descendant-label assertion is preserved. Generic target and all original denied permissions/subjects remain constrained."
+    },
+    {
+      "subject": "base_typeattr_630_30_0",
+      "legacy_target": "proc_30_0",
+      "current_target": "proc",
+      "class": "lnk_file",
+      "reason": "Reconstruct the original generic root-path label constraint at its stock singleton identity. API30 descendant relabel mappings are grant compatibility, not ownership of newly introduced typed descendant paths; every modern descendant-label assertion is preserved. Generic target and all original denied permissions/subjects remain constrained."
+    },
+    {
+      "subject": "base_typeattr_633_30_0",
+      "legacy_target": "device_30_0",
+      "current_target": "device",
+      "class": "dir",
+      "reason": "Reconstruct the original generic root-path label constraint at its stock singleton identity. API30 descendant relabel mappings are grant compatibility, not ownership of newly introduced typed descendant paths; every modern descendant-label assertion is preserved. Generic target and all original denied permissions/subjects remain constrained."
+    }
+  ],
+  "vendor_owner_predicate_adaptations": [
+    {
+      "predicate": "base_typeattr_633_30_0",
+      "owner": "dexopt_chroot_setup",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "mounton"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern ART pre-reboot dexopt mounts an isolated chroot; permit only this dedicated mount setup owner to bind-mount the exact directory type, retaining all content mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/dexopt_chroot_setup.te": "# We recursively bind-mount directories"
+      }
+    },
+    {
+      "predicate": "base_typeattr_633_30_0",
+      "owner": "apexd",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "ioctl",
+        "read",
+        "lock",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 1,
+      "reason": "APEX daemon enumerates block devices; preserve denial of directory mutation and all other domains.",
+      "source_markers": {
+        "system/sepolicy/private/apexd.te": "# Allow apexd to access /dev/block"
+      }
+    },
+    {
+      "predicate": "base_typeattr_628_30_0",
+      "owner": "apexd",
+      "target": "sysfs",
+      "class": "file",
+      "permissions": [
+        "ioctl",
+        "read",
+        "getattr",
+        "lock",
+        "map",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 1,
+      "reason": "APEX daemon reads sysfs block topology to manage loop and device-mapper APEX backing devices; this exact generic label remains read-only.",
+      "source_markers": {
+        "system/sepolicy/private/apexd.te": "# Access to /sys/class/block"
+      }
+    },
+    {
+      "predicate": "base_typeattr_633_30_0",
+      "owner": "snapuserd",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "read",
+        "watch"
+      ],
+      "expected_assertions": 1,
+      "reason": "Snapshot update daemon watches only device-directory creation of ublk nodes; retain mutation denials.",
+      "source_markers": {
+        "system/sepolicy/private/snapuserd.te": "For inotify for WaitForFile"
+      }
+    },
+    {
+      "predicate": "base_typeattr_633_30_0",
+      "owner": "device_as_webcam",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "ioctl",
+        "read",
+        "lock",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern USB webcam service enumerates device nodes; no directory mutation or device-content exception.",
+      "source_markers": {
+        "system/sepolicy/private/device_as_webcam.te": "# need to access /dev to list all devices"
+      }
+    },
+    {
+      "predicate": "base_typeattr_633_30_0",
+      "owner": "crosvm",
+      "target": "device",
+      "class": "dir",
+      "permissions": [
+        "read",
+        "open"
+      ],
+      "expected_assertions": 1,
+      "reason": "Modern virtual-machine process enumerates the device directory for its paravirtualized display; no host node content or write exception.",
+      "source_markers": {
+        "system/sepolicy/private/crosvm.te": "# Allow crosvm to draw screen in the surface"
+      }
+    },
+    {
+      "predicate": "base_typeattr_628_30_0",
+      "owner": "vfio_handler",
+      "target": "sysfs",
+      "class": "file",
+      "permissions": [
+        "ioctl",
+        "read",
+        "write",
+        "getattr",
+        "lock",
+        "append",
+        "map",
+        "open",
+        "watch",
+        "watch_reads"
+      ],
+      "expected_assertions": 1,
+      "optional_current_owner": true,
+      "reason": "Selected modern VFIO helper owns platform-device binding. Its code checks platform-device paths then writes driver/unbind, driver_override and drivers_probe; existing modern policy grants rw_file_perms on generic sysfs. Preserve this exact trusted owner operation while retaining every other core/vendor domain denial and no create/unlink/execute exemption. This does not qualify VFIO hardware support.",
+      "source_markers": {
+        "system/sepolicy/private/vfio_handler.te": "# Allow vfio_handler to bind/unbind platform devices",
+        "packages/modules/Virtualization/android/virtualizationservice/vfio_handler/src/aidl.rs": "if !path.starts_with(SYSFS_PLATFORM_DEVICES_PATH) {"
+      }
+    }
+  ],
+  "obsolete_oem_property_grants": [
+    {
+      "subject": "emdlogger",
+      "target": "vendor_default_prop",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "netdiag",
+      "target": "vendor_default_prop",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "radio",
+      "target": "vendor_default_prop",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "system_server",
+      "target": "vendor_default_prop",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "em_app",
+      "target": "vendor_default_prop",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    },
+    {
+      "subject": "vtservice",
+      "target": "vendor_default_prop",
+      "class": "file",
+      "permissions": [
+        "read",
+        "getattr",
+        "map",
+        "open"
+      ],
+      "reason": "Revoke obsolete blanket access to generic vendor-internal properties from core domains. Retain every named/typed property grant. Any missing named property requires a separately observed/REA-backed typed context and consumer contract before hardware qualification; runtime effect is unverified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "vendor_internal_prop(vendor_default_prop)"
+      }
+    }
+  ],
+  "property_context_rebindings": [
+    {
+      "old_line": "ro.system.build.fingerprint u:object_r:exported_fingerprint_prop:s0 exact string",
+      "new_line": "ro.system.build.fingerprint u:object_r:fingerprint_prop:s0 exact string",
+      "reason": "Preserve the exact read-only system build identifier, using current fingerprint ownership instead of an unclassified obsolete placeholder. Canonical API30 exported_fingerprint_prop_30_0 already includes fingerprint_prop. No name/value or allow changes.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "system_restricted_prop(fingerprint_prop)",
+        "system/sepolicy/private/compat/30.0/30.0.cil": "(typeattributeset exported_fingerprint_prop_30_0 (exported_fingerprint_prop fingerprint_prop))"
+      }
+    },
+    {
+      "old_line": "ro.telephony.sim.count u:object_r:exported3_default_prop:s0 exact int",
+      "new_line": "ro.telephony.sim.count u:object_r:telephony_config_prop:s0 exact int",
+      "reason": "Keep the legacy exact integer telephony configuration name/value contract. Assign current telephony config owner, as for modern SIM-slot count, instead of unclassified generic exported3_default placeholder. Canonical API30 mapping includes telephony_config_prop; no allow is introduced. Consumer/runtime behavior remains unqualified.",
+      "source_markers": {
+        "system/sepolicy/public/property.te": "system_vendor_config_prop(telephony_config_prop)",
+        "system/sepolicy/private/property_contexts": "ro.telephony.sim_slots.count      u:object_r:telephony_config_prop:s0 exact int"
+      }
+    }
+  ]
+}

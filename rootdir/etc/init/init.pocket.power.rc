@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Kernel default is performance. After boot switch both clusters to schedutil (POWER_PORT.md P2).
+# Set persist.vendor.pocket.governor to use another governor, e.g. performance.
+on property:sys.boot_completed=1 && property:persist.vendor.pocket.governor=
+    write /sys/devices/system/cpu/cpufreq/policy0/scaling_governor schedutil
+    write /sys/devices/system/cpu/cpufreq/policy4/scaling_governor schedutil
+
+on property:sys.boot_completed=1 && property:persist.vendor.pocket.governor=*
+    write /sys/devices/system/cpu/cpufreq/policy0/scaling_governor ${persist.vendor.pocket.governor}
+    write /sys/devices/system/cpu/cpufreq/policy4/scaling_governor ${persist.vendor.pocket.governor}

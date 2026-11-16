@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Keyboard touchpad swipe scroll. The Pocket keyboard settings app sets
+# persist.sys.pocket.pad_scroll; it is unset (off) by default, as on stock.
+service pocket_padd /system_ext/bin/pocket_padd
+    class late_start
+    user system
+    group input uhid
+    disabled
+
+on property:persist.sys.pocket.pad_scroll=1
+    start pocket_padd
+
+on property:persist.sys.pocket.pad_scroll=0
+    stop pocket_padd
+
+# Clear the key guard if the daemon dies mid-drag.
+on property:init.svc.pocket_padd=stopped
+    setprop sys.pocket.pad_guard ""

@@ -1,0 +1,1240 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Combined v11: v9's probes (read-only partition hashes, runtime reserved memory,
+// ACM input hashing, USB connection state, I2C chip ID reads and the aw9523 keyboard
+// read) plus the first UFS writes, a bounded restore-on-exit write test on the last
+// 1 MiB of userdata, and a dm-linear read-only mount of super's system, vendor and
+// product, proven to write nothing by re-hashing all of super afterwards. Each probe
+// runs in a bounded child. The kernel configures UFS and negotiates secure SHM; the
+// boot is not read-only.
+#define _GNU_SOURCE
+#include <linux/gpio.h>
+#include <linux/i2c-dev.h>
+#include <linux/i2c.h>
+#include <linux/watchdog.h>
+#include <linux/fs.h>
+#include <linux/dm-ioctl.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <sys/statfs.h>
+#include <sys/uio.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include "../ram-probe/ufs-readonly.h"
+#include "../tkcore-probe/feature_query.h"
+#include "probes.h"
+#define PROBE_LABEL "TP510-RAM-V11"
+#define PROBE_PRODUCT "Titan Pocket 5.10 RAM diagnostic v11"
+#define PROBE_RETURN_SECONDS 300
+// Pinging stops this long after init starts, 30 s past the return timer, so
+// the watchdog still resets the phone (about one timeout later) if the timer's
+// restart never happens.
+#define PROBE_WATCHDOG_SECONDS (PROBE_RETURN_SECONDS + 30)
+// Partition reads stop here so the last log lines land well before the return timer.
+#define PROBE_HASH_DEADLINE_SECONDS 250
+#define PROBE_HASH_BUDGET_SECONDS 260
+#define PROBE_RMEM_BUDGET_SECONDS 20
+// USB state is sampled once per second until shortly before the return timer.
+#define PROBE_CABLE_SECONDS (PROBE_RETURN_SECONDS - 5)
+// ACM input is hashed for this long after the first received byte.
+#define PROBE_ECHO_SECONDS 60
+// Adapter lookup waits up to this long; each read is bounded by the adapter's own 2 s timeout.
+#define PROBE_I2C_WAIT_SECONDS 10
+#define PROBE_I2C_BUDGET_SECONDS 60
+#define PROBE_WORKLOAD "RAM diagnostic: bounded whole-UFS header reads, read-only partition hashes, I2C ID reads (register pointer then read), aw9523 reset pulse and touchpad (GPIO 9) reset pulse only after NACKs, one restore-on-exit write test confined to the last 1 MiB of userdata, and read-only dm-linear mounts of super's system/vendor/product; the only writable open is userdata, no TA sessions."
+static void report(const char *message);
+
+static int echo_hook(const char *data, ssize_t count);
+static int echo_timeout(void);
+static void echo_tick(void);
+#define PROBE_SERIAL_INPUT(data, count) echo_hook((data), (count))
+#define PROBE_POLL_TIMEOUT() echo_timeout()
+#define PROBE_POLL_TICK() echo_tick()
+
+static struct timespec probe_start;
+
+static double seconds_since(const struct timespec *start)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - start->tv_sec) + (now.tv_nsec - start->tv_nsec) / 1e9;
+}
+
+// Opens the boot-adopted watchdog before the core's open deadline and keeps it
+// alive. Never writes the magic close character, so the watchdog stays armed.
+static void watchdog_pinger(void)
+{
+    pid_t child = fork();
+    if (child < 0) { report("watchdog fork failed; hardware watchdog stays unpinged"); return; }
+    if (child) return;
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    char text[64], message[160];
+    dev_t expected;
+    int fd = -1;
+    for (int attempt = 0; attempt < 10 && fd < 0; attempt++) {
+        if (attempt) sleep(1);
+        if (tpufs_attribute("/sys/class/watchdog/watchdog0/dev", text, sizeof(text)) ||
+            tpufs_device_number(text, &expected)) continue;
+        // devtmpfs supplies the node. Never create a fallback guessed device.
+        int candidate = open("/dev/watchdog0", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        struct stat info;
+        if (candidate < 0) continue;
+        if (fstat(candidate, &info) || !S_ISCHR(info.st_mode) || info.st_rdev != expected) {
+            close(candidate);
+            report("watchdog node does not match sysfs; not opened");
+            _exit(1);
+        }
+        fd = candidate;
+    }
+    if (fd < 0) { report("watchdog0 not available; boot open deadline applies"); _exit(1); }
+    int timeout = 0;
+    if (ioctl(fd, WDIOC_GETTIMEOUT, &timeout) || timeout < 3) timeout = 3;
+    unsigned interval = (unsigned)timeout / 3;
+    snprintf(message, sizeof(message), "watchdog opened timeout=%d s ping=%u s until %d s after init",
+             timeout, interval, PROBE_WATCHDOG_SECONDS);
+    report(message);
+    unsigned failures = 0;
+    while (seconds_since(&start) < PROBE_WATCHDOG_SECONDS) {
+        if (ioctl(fd, WDIOC_KEEPALIVE, 0) && failures++ < 3) {
+            snprintf(message, sizeof(message), "watchdog keepalive failed: %s", strerror(errno));
+            report(message);
+        }
+        unsigned remaining = interval;
+        while (remaining) remaining = sleep(remaining);
+    }
+    report("watchdog pinging stopped; hardware watchdog will reset the phone");
+    for (;;) pause();
+}
+
+// Supervisor plus worker, as tpufs_start does. PID1 returns at once; the
+// supervisor kills the worker when its budget runs out.
+static void bounded_child(const char *name, unsigned budget, void (*work)(void))
+{
+    char message[160];
+    pid_t supervisor = fork();
+    if (supervisor < 0) { snprintf(message, sizeof(message), "%s supervisor fork failed", name); report(message); return; }
+    if (supervisor) return;
+    if (signal(SIGCHLD, SIG_DFL) == SIG_ERR) _exit(1);
+    pid_t worker = fork();
+    if (worker < 0) { snprintf(message, sizeof(message), "%s worker fork failed", name); report(message); _exit(1); }
+    if (!worker) { work(); _exit(0); }
+    for (unsigned second = 0; second < budget; ++second) {
+        int status;
+        pid_t done = waitpid(worker, &status, WNOHANG);
+        if (done == worker) _exit(0);
+        if (done < 0 && errno != EINTR) {
+            snprintf(message, sizeof(message), "%s wait failed; leaving worker to the return timer", name);
+            report(message);
+            _exit(1);
+        }
+        sleep(1);
+    }
+    snprintf(message, sizeof(message), "%s %u-second budget expired; terminating worker", name, budget);
+    report(message);
+    kill(worker, SIGKILL);
+    _exit(1);
+}
+
+// ---- 1. Read-only partition hashes ----
+// Super is hashed last, after the write and mount tests, so its hash also proves the
+// read-only mount wrote nothing. The rest are hashed first, as v9 did.
+static const char *const hash_targets[] = {"lk", "dtbo", "vbmeta", "boot", "recovery"};
+#define TP10_USERDATA_MIN_BYTES (64ull << 20)
+#define TP10_USERDATA_REGION (1ull << 20)   // last 1 MiB of userdata, 4 KiB aligned
+#define TP10_BLOCK 4096u
+#define TP10_WRITE_BUDGET ((2ull << 20) + TP10_BLOCK)
+
+// Opens the UFS whole disk that carries a valid GPT. Ownership and node
+// identity are checked the same way the v5 header reads do.
+static int open_gpt_disk(char *disk, size_t disk_length, unsigned *lbs, uint64_t *blocks)
+{
+    char path[PATH_MAX], controller[PATH_MAX], block[PATH_MAX], text[64];
+    if (!realpath("/sys/bus/platform/devices/11270000.ufshci", controller)) return -1;
+    DIR *directory = opendir("/sys/class/block");
+    if (!directory) return -1;
+    struct dirent *entry;
+    int found = -1;
+    unsigned inspected = 0;
+    while (found < 0 && inspected++ < 256 && (entry = readdir(directory))) {
+        const char *name = entry->d_name;
+        if (!tpufs_name(name) || tpufs_path(path, sizeof(path), "/sys/class/block", name, "") ||
+            !realpath(path, block) || !tpufs_owned(controller, block)) continue;
+        struct stat info;
+        if (tpufs_path(path, sizeof(path), block, "partition", "")) continue;
+        errno = 0;
+        if (!lstat(path, &info) || errno != ENOENT) continue;
+        dev_t expected;
+        unsigned long long sectors, size;
+        if (tpufs_path(path, sizeof(path), block, "dev", "") || tpufs_attribute(path, text, sizeof(text)) ||
+            tpufs_device_number(text, &expected)) continue;
+        if (tpufs_path(path, sizeof(path), block, "size", "") || tpufs_attribute(path, text, sizeof(text)) ||
+            tpufs_uint(text, &sectors)) continue;
+        if (tpufs_path(path, sizeof(path), block, "queue/logical_block_size", "") ||
+            tpufs_attribute(path, text, sizeof(text)) || tpufs_uint(text, &size) || size < 512 || size > 4096) continue;
+        if (tpufs_path(path, sizeof(path), "/dev", name, "")) continue;
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) continue;
+        if (fstat(fd, &info) || !tpufs_block_identity(&info, expected)) { close(fd); continue; }
+        unsigned char header[8];
+        if (pread(fd, header, sizeof(header), (off_t)size) != (ssize_t)sizeof(header) ||
+            memcmp(header, "EFI PART", 8)) { close(fd); continue; }
+        snprintf(disk, disk_length, "%s", name);
+        *lbs = (unsigned)size;
+        *blocks = sectors * 512 / size;
+        found = fd;
+    }
+    closedir(directory);
+    return found;
+}
+
+// Cross-checks the userspace GPT against the kernel's partition scan.
+static void kernel_partition_check(const char *disk, const struct tp8_gpt_part *part, unsigned lbs)
+{
+    char path[PATH_MAX], text[64], message[200];
+    unsigned long long start = 0, size = 0;
+    int n = snprintf(path, sizeof(path), "/sys/class/block/%s%u/start", disk, part->index);
+    int ok = n > 0 && (size_t)n < sizeof(path) && !tpufs_attribute(path, text, sizeof(text)) && !tpufs_uint(text, &start);
+    n = snprintf(path, sizeof(path), "/sys/class/block/%s%u/size", disk, part->index);
+    ok = ok && n > 0 && (size_t)n < sizeof(path) && !tpufs_attribute(path, text, sizeof(text)) && !tpufs_uint(text, &size);
+    int match = ok && start == part->first * (lbs / 512) && size == (part->last - part->first + 1) * (lbs / 512);
+    snprintf(message, sizeof(message), "part-hash name=%s kernel_partition=%s%u present=%d match=%d",
+             part->name, disk, part->index, ok, match);
+    report(message);
+}
+
+// pwritev2 is API 33 in bionic; the target is API 30, so call the syscall directly.
+// On arm64 the offset is passed low word first with a zero high word.
+static ssize_t tp10_pwritev2(int fd, const struct iovec *iov, int count, off_t offset, int flags)
+{
+    return syscall(__NR_pwritev2, fd, iov, (unsigned long)count, (unsigned long)offset, 0UL, (unsigned long)flags);
+}
+
+// Validates kernel partition <disk><index> against its GPT entry, the controller it sits
+// under and the expected PARTNAME, and fills its device number, /dev node path and byte
+// size. Returns 0 on a full match, -1 otherwise. Read-only: opens nothing.
+static int tp10_partition_node(const char *disk, const struct tp8_gpt_part *part, unsigned lbs,
+                               const char *controller, const char *expect_partname,
+                               char *node, size_t node_len, dev_t *dev, uint64_t *size_bytes)
+{
+    char path[PATH_MAX], real[PATH_MAX], text[256];
+    int n = snprintf(path, sizeof(path), "/sys/class/block/%s%u", disk, part->index);
+    if (n <= 0 || (size_t)n >= sizeof(path) || !realpath(path, real)) return -1;
+    size_t clen = strlen(controller);
+    if (strncmp(real, controller, clen) || real[clen] != '/') return -1;    // under 11270000.ufshci
+    unsigned long long value;
+    if (snprintf(path, sizeof(path), "/sys/class/block/%s%u/partition", disk, part->index) <= 0) return -1;
+    if (tpufs_attribute(path, text, sizeof(text)) || tpufs_uint(text, &value) || value != part->index) return -1;
+    snprintf(path, sizeof(path), "/sys/class/block/%s%u/start", disk, part->index);
+    if (tpufs_attribute(path, text, sizeof(text)) || tpufs_uint(text, &value) ||
+        value != part->first * (lbs / 512)) return -1;
+    snprintf(path, sizeof(path), "/sys/class/block/%s%u/size", disk, part->index);
+    if (tpufs_attribute(path, text, sizeof(text)) || tpufs_uint(text, &value) ||
+        value != (part->last - part->first + 1) * (lbs / 512)) return -1;
+    *size_bytes = value * 512;
+    snprintf(path, sizeof(path), "/sys/class/block/%s%u/dev", disk, part->index);
+    if (tpufs_attribute(path, text, sizeof(text)) || tpufs_device_number(text, dev)) return -1;
+    // PARTNAME must match in the kernel uevent.
+    snprintf(path, sizeof(path), "/sys/class/block/%s%u/uevent", disk, part->index);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char uevent[1024];
+    ssize_t got = read(fd, uevent, sizeof(uevent) - 1);
+    close(fd);
+    if (got <= 0) return -1;
+    uevent[got] = 0;
+    char want[64];
+    snprintf(want, sizeof(want), "PARTNAME=%s", expect_partname);
+    int matched = 0;
+    for (char *line = uevent, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        if (!strcmp(line, want)) matched = 1;
+    }
+    if (!matched) return -1;
+    if (snprintf(node, node_len, "/dev/%s%u", disk, part->index) <= 0) return -1;
+    return 0;
+}
+
+// ---- Userdata write test ----
+// The only writable open in init. Confined to the last 1 MiB of userdata, 4 KiB
+// aligned, with the original bytes restored on exit. Write budget 2 MiB + 4 KiB.
+// Write-test callbacks over the open userdata node. Every offset is relative to the
+// region start, so the step logic in probes.h can never reach outside the last 1 MiB.
+struct tp10_udata_ctx { int fd; uint64_t region_offset; };
+static ssize_t tp10_udata_pread(void *c, void *buf, size_t length, uint64_t off)
+{
+    struct tp10_udata_ctx *x = c;
+    return pread(x->fd, buf, length, (off_t)(x->region_offset + off));
+}
+static ssize_t tp10_udata_pwrite(void *c, const void *buf, size_t length, uint64_t off, int fua)
+{
+    struct tp10_udata_ctx *x = c;
+    if (fua) {
+        struct iovec iov = {.iov_base = (void *)buf, .iov_len = length};
+        return tp10_pwritev2(x->fd, &iov, 1, (off_t)(x->region_offset + off), RWF_DSYNC);
+    }
+    return pwrite(x->fd, buf, length, (off_t)(x->region_offset + off));
+}
+static int tp10_udata_sync(void *c) { return fdatasync(((struct tp10_udata_ctx *)c)->fd); }
+
+static void userdata_write_test(const char *disk, const struct tp8_gpt_part *part, unsigned lbs, const char *controller)
+{
+    char message[320], node[PATH_MAX];
+    dev_t dev;
+    uint64_t size_bytes = 0;
+    if (tp10_partition_node(disk, part, lbs, controller, "userdata", node, sizeof(node), &dev, &size_bytes)) {
+        report("userdata-write identity check failed; no write");
+        return;
+    }
+    if (size_bytes < TP10_USERDATA_MIN_BYTES) {
+        snprintf(message, sizeof(message), "userdata-write partition %llu bytes under 64 MiB; no write", (unsigned long long)size_bytes);
+        report(message);
+        return;
+    }
+    uint64_t region_offset = size_bytes - TP10_USERDATA_REGION;   // 4 KiB aligned: size and 1 MiB are multiples of 4 KiB
+    // The one writable open in init. O_NOFOLLOW on the devtmpfs node; O_DIRECT for FUA/FLUSH semantics.
+    int fd = open(node, O_RDWR | O_DIRECT | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        snprintf(message, sizeof(message), "userdata-write open %s errno=%d; no write", node, errno);
+        report(message);
+        return;
+    }
+    struct stat info;
+    if (fstat(fd, &info) || !tpufs_block_identity(&info, dev)) {
+        report("userdata-write node identity mismatch; no write");
+        close(fd);
+        return;
+    }
+    snprintf(message, sizeof(message), "userdata-write node=%s dev=%u:%u size=%llu region_offset=%llu region=%llu budget=%llu",
+             node, major(dev), minor(dev), (unsigned long long)size_bytes, (unsigned long long)region_offset,
+             (unsigned long long)TP10_USERDATA_REGION, (unsigned long long)TP10_WRITE_BUDGET);
+    report(message);
+    struct tp10_udata_ctx ctx = {fd, region_offset};
+    static const struct tp10_write_ops ops = {tp10_udata_pread, tp10_udata_pwrite, tp10_udata_sync};
+    (void)tp10_write_test(&ops, &ctx, (size_t)TP10_USERDATA_REGION, region_offset / 512, report);
+    close(fd);
+}
+
+// ---- Super read-only dm-linear mount test ----
+// Resolves /dev/<DEVNAME> for a dev number through its sysfs uevent.
+static int dm_node_path(dev_t dev, char *out, size_t length)
+{
+    char path[PATH_MAX], uevent[512];
+    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/uevent", major(dev), minor(dev));
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, uevent, sizeof(uevent) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    uevent[n] = 0;
+    for (char *line = uevent, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        if (!strncmp(line, "DEVNAME=", 8))
+            return snprintf(out, length, "/dev/%s", line + 8) > 0 ? 0 : -1;
+    }
+    return -1;
+}
+
+// Builds and resumes one read-only dm-linear device over the super partition node, mounts
+// it ext4 read-only, logs statfs, the top-dir entry count and build.prop's SHA256, then
+// unmounts and removes it. control is the dm control fd, super_dev the super partition's
+// device number.
+static void super_mount_one(int control, dev_t super_dev, const struct tp10_lp_partition *part,
+                            const char *build_prop_rel)
+{
+    char message[320], dmname[64], node[PATH_MAX], mountpoint[64];
+    snprintf(dmname, sizeof(dmname), "tp10-%s", part->name);
+    // DM_DEV_CREATE, read-only.
+    struct dm_ioctl create;
+    tp11_dm_header(&create, sizeof(create), dmname);
+    create.flags = DM_READONLY_FLAG;
+    if (ioctl(control, DM_DEV_CREATE, &create)) {
+        snprintf(message, sizeof(message), "super-mount %s DM_DEV_CREATE errno=%d", part->name, errno);
+        report(message);
+        return;
+    }
+    dev_t dm_dev = makedev(major((dev_t)create.dev), minor((dev_t)create.dev));
+    // DM_TABLE_LOAD: one linear target per extent.
+    static unsigned char buffer[8192];
+    size_t built = tp11_dm_build_table(buffer, sizeof(buffer), dmname, major(super_dev), minor(super_dev), part);
+    if (!built || ioctl(control, DM_TABLE_LOAD, buffer)) {
+        snprintf(message, sizeof(message), "super-mount %s DM_TABLE_LOAD built=%zu errno=%d", part->name, built, errno);
+        report(message);
+        struct dm_ioctl rm;
+        tp11_dm_header(&rm, sizeof(rm), dmname);
+        ioctl(control, DM_DEV_REMOVE, &rm);
+        return;
+    }
+    // DM_DEV_SUSPEND with no suspend flag resumes it, loading the inactive table.
+    struct dm_ioctl resume;
+    tp11_dm_header(&resume, sizeof(resume), dmname);
+    if (ioctl(control, DM_DEV_SUSPEND, &resume)) {
+        snprintf(message, sizeof(message), "super-mount %s DM_DEV_SUSPEND(resume) errno=%d", part->name, errno);
+        report(message);
+        struct dm_ioctl rm;
+        tp11_dm_header(&rm, sizeof(rm), dmname);
+        ioctl(control, DM_DEV_REMOVE, &rm);
+        return;
+    }
+    if (dm_node_path(dm_dev, node, sizeof(node))) {
+        report("super-mount dm node not found");
+        goto remove;
+    }
+    // BLKROSET on the dm node too, read-only policy.
+    {
+        int ro = 1, fd = open(node, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd >= 0) {
+            int rc = ioctl(fd, BLKROSET, &ro);
+            close(fd);
+            snprintf(message, sizeof(message), "super-mount %s dm=%s dev=%u:%u sectors=%llu blkroset=%d errno=%d",
+                     part->name, node, major(dm_dev), minor(dm_dev), (unsigned long long)part->sectors, rc, rc ? errno : 0);
+            report(message);
+        }
+    }
+    snprintf(mountpoint, sizeof(mountpoint), "/mnt/tp10-%s", part->name);
+    mkdir("/mnt", 0755);
+    mkdir(mountpoint, 0755);
+    // ext4, read-only, no journal recovery, no device/setuid/exec from the image.
+    if (mount(node, mountpoint, "ext4", MS_RDONLY | MS_NODEV | MS_NOSUID | MS_NOEXEC, "noload")) {
+        snprintf(message, sizeof(message), "super-mount %s mount errno=%d", part->name, errno);
+        report(message);
+        goto remove;
+    }
+    {
+        struct statfs sf;
+        if (!statfs(mountpoint, &sf))
+            snprintf(message, sizeof(message), "super-mount %s statfs type=0x%lx bsize=%ld blocks=%llu bfree=%llu files=%llu",
+                     part->name, (unsigned long)sf.f_type, (long)sf.f_bsize, (unsigned long long)sf.f_blocks,
+                     (unsigned long long)sf.f_bfree, (unsigned long long)sf.f_files);
+        else
+            snprintf(message, sizeof(message), "super-mount %s statfs errno=%d", part->name, errno);
+        report(message);
+    }
+    {
+        DIR *d = opendir(mountpoint);
+        unsigned entries = 0;
+        struct dirent *e;
+        while (d && entries < 256 && (e = readdir(d))) {
+            if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) ++entries;
+        }
+        if (d) closedir(d);
+        snprintf(message, sizeof(message), "super-mount %s top_entries=%u", part->name, entries);
+        report(message);
+    }
+    {
+        char prop[PATH_MAX];
+        snprintf(prop, sizeof(prop), "%s/%s", mountpoint, build_prop_rel);
+        int fd = open(prop, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) {
+            snprintf(message, sizeof(message), "super-mount %s build.prop=%s open errno=%d", part->name, build_prop_rel, errno);
+            report(message);
+        } else {
+            static unsigned char chunk[65536];
+            struct tp8_sha256 c;
+            tp8_sha256_init(&c);
+            uint64_t total = 0;
+            ssize_t got;
+            while (total < (1u << 20) && (got = read(fd, chunk, sizeof(chunk))) > 0) {
+                size_t take = total + (uint64_t)got > (1u << 20) ? (size_t)((1u << 20) - total) : (size_t)got;
+                tp8_sha256_update(&c, chunk, take);
+                total += take;
+            }
+            close(fd);
+            char hex[65];
+            tp8_sha256_hex(&c, hex);
+            snprintf(message, sizeof(message), "super-mount %s build.prop=%s bytes=%llu sha256=%s",
+                     part->name, build_prop_rel, (unsigned long long)total, hex);
+            report(message);
+        }
+    }
+    if (umount(mountpoint))
+        { snprintf(message, sizeof(message), "super-mount %s umount errno=%d", part->name, errno); report(message); }
+remove:
+    {
+        struct dm_ioctl rm;
+        tp11_dm_header(&rm, sizeof(rm), dmname);
+        int rc = ioctl(control, DM_DEV_REMOVE, &rm);
+        snprintf(message, sizeof(message), "super-mount %s DM_DEV_REMOVE=%d errno=%d", part->name, rc, rc ? errno : 0);
+        report(message);
+    }
+}
+
+static void super_mount_test(const char *disk, const struct tp8_gpt_part *part, unsigned lbs, const char *controller)
+{
+    char message[320], node[PATH_MAX];
+    dev_t dev;
+    uint64_t size_bytes = 0;
+    if (tp10_partition_node(disk, part, lbs, controller, "super", node, sizeof(node), &dev, &size_bytes)) {
+        report("super-mount identity check failed; no mount");
+        return;
+    }
+    // BLKROSET on the super node first, then read LP metadata through it, read-only.
+    int fd = open(node, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) { snprintf(message, sizeof(message), "super-mount open %s errno=%d", node, errno); report(message); return; }
+    int ro = 1, roset = ioctl(fd, BLKROSET, &ro);
+    snprintf(message, sizeof(message), "super-mount node=%s dev=%u:%u size=%llu blkroset=%d errno=%d",
+             node, major(dev), minor(dev), (unsigned long long)size_bytes, roset, roset ? errno : 0);
+    report(message);
+    static unsigned char head[1u << 20];
+    ssize_t rn = pread(fd, head, sizeof(head), 0);
+    close(fd);
+    if (rn != (ssize_t)sizeof(head)) {
+        snprintf(message, sizeof(message), "super-mount metadata read=%zd errno=%d", rn, rn < 0 ? errno : 0);
+        report(message);
+        return;
+    }
+    static struct tp10_lp lp;
+    const char *why = "";
+    int count = tp10_lp_parse(head, sizeof(head), &lp, &why);
+    snprintf(message, sizeof(message), "super-mount lp_partitions=%d lbs=%u first_logical_sector=%llu device_size=%llu%s%s",
+             count, lp.logical_block_size, (unsigned long long)lp.first_logical_sector,
+             (unsigned long long)lp.device_size, count < 0 ? " error=" : "", count < 0 ? why : "");
+    report(message);
+    if (count < 0) return;
+    // The dm control node. Opened read-only: the control ioctls need CAP_SYS_ADMIN, not write access,
+    // so the only writable open in init stays userdata.
+    int control = open("/dev/mapper/control", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (control < 0) control = open("/dev/device-mapper", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (control < 0) { snprintf(message, sizeof(message), "super-mount dm control open errno=%d", errno); report(message); return; }
+    struct dm_ioctl version;
+    tp11_dm_header(&version, sizeof(version), "");
+    if (!ioctl(control, DM_VERSION, &version))
+        snprintf(message, sizeof(message), "super-mount dm version=%u.%u.%u", version.version[0], version.version[1], version.version[2]);
+    else
+        snprintf(message, sizeof(message), "super-mount dm version ioctl errno=%d", errno);
+    report(message);
+    // Mount system, vendor and product, in that order.
+    static const struct { const char *name, *build_prop; } wanted[TP10_LP_STOCK_PARTITIONS] = {
+        {"system", "system/build.prop"}, {"vendor", "build.prop"}, {"product", "etc/build.prop"}};
+    for (unsigned w = 0; w < TP10_LP_STOCK_PARTITIONS; ++w) {
+        const struct tp10_lp_partition *lpp = NULL;
+        for (unsigned i = 0; i < lp.num_partitions; ++i)
+            if (!strcmp(lp.partitions[i].name, wanted[w].name)) lpp = &lp.partitions[i];
+        if (!lpp) continue;
+        super_mount_one(control, dev, lpp, wanted[w].build_prop);
+    }
+    close(control);
+    report("super-mount complete");
+}
+
+static void partition_hashes(void)
+{
+    char disk[32], message[256];
+    unsigned lbs = 0;
+    uint64_t blocks = 0;
+    int fd = -1;
+    for (unsigned second = 0; second < 30 && fd < 0; ++second) {
+        fd = open_gpt_disk(disk, sizeof(disk), &lbs, &blocks);
+        if (fd < 0) sleep(1);
+    }
+    if (fd < 0) { report("part-hash no UFS disk with a GPT within 30 s; no partition reads"); return; }
+    static struct tp8_gpt_part parts[TP8_GPT_MAX_ENTRIES];
+    const char *why = "";
+    int count = tp8_gpt_read(fd, lbs, blocks, parts, TP8_GPT_MAX_ENTRIES, &why);
+    snprintf(message, sizeof(message), "part-hash disk=%s logical_block=%u blocks=%llu gpt_entries=%d%s%s",
+             disk, lbs, (unsigned long long)blocks, count, count < 0 ? " error=" : "", count < 0 ? why : "");
+    report(message);
+    if (count < 0) { close(fd); return; }
+    double deadline = tp8_now() + (PROBE_HASH_DEADLINE_SECONDS - seconds_since(&probe_start));
+    for (size_t t = 0; t < sizeof(hash_targets) / sizeof(*hash_targets); ++t) {
+        const struct tp8_gpt_part *part = NULL;
+        for (int i = 0; i < count && !part; ++i)
+            if (!strcmp(parts[i].name, hash_targets[t])) part = &parts[i];
+        if (!part) {
+            snprintf(message, sizeof(message), "part-hash name=%s not_in_gpt", hash_targets[t]);
+            report(message); continue;
+        }
+        uint64_t bytes = (part->last - part->first + 1) * lbs;
+        snprintf(message, sizeof(message), "part-hash name=%s gpt_index=%u first_lba=%llu last_lba=%llu bytes=%llu",
+                 part->name, part->index, (unsigned long long)part->first, (unsigned long long)part->last,
+                 (unsigned long long)bytes);
+        report(message);
+        kernel_partition_check(disk, part, lbs);
+        if (tp8_hash_range(fd, part->name, part->first * lbs, bytes, deadline, report) && tp8_now() >= deadline) {
+            report("part-hash deadline reached; remaining partitions skipped");
+            break;
+        }
+    }
+    // The controller these partitions must sit under, for the write and mount identity checks.
+    char controller[PATH_MAX];
+    if (!realpath("/sys/bus/platform/devices/11270000.ufshci", controller)) {
+        report("part-hash controller realpath failed; no write or mount test");
+        close(fd);
+        return;
+    }
+    // 2. Userdata write test (restore-on-exit, last 1 MiB only).
+    const struct tp8_gpt_part *userdata = NULL, *super = NULL;
+    for (int i = 0; i < count; ++i) {
+        if (!strcmp(parts[i].name, "userdata")) userdata = &parts[i];
+        if (!strcmp(parts[i].name, "super")) super = &parts[i];
+    }
+    if (userdata) userdata_write_test(disk, userdata, lbs, controller);
+    else report("userdata-write userdata not in GPT; no write");
+    // 3. Super read-only dm-linear mount test.
+    if (super) super_mount_test(disk, super, lbs, controller);
+    else report("super-mount super not in GPT; no mount");
+    // 4. Hash all of super last, which also proves the mount wrote nothing.
+    if (super) {
+        uint64_t bytes = (super->last - super->first + 1) * lbs;
+        snprintf(message, sizeof(message), "part-hash name=super gpt_index=%u first_lba=%llu last_lba=%llu bytes=%llu",
+                 super->index, (unsigned long long)super->first, (unsigned long long)super->last, (unsigned long long)bytes);
+        report(message);
+        kernel_partition_check(disk, super, lbs);
+        tp8_hash_range(fd, "super", super->first * lbs, bytes, deadline, report);
+    }
+    close(fd);
+    report("part-hash complete; read-only partition workload ended");
+}
+
+// ---- 2. Runtime reserved memory ----
+static ssize_t read_file(const char *path, unsigned char *buffer, size_t length)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t used = 0;
+    while (used < length) {
+        ssize_t n = read(fd, buffer + used, length - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += (size_t)n;
+    }
+    close(fd);
+    return (ssize_t)used;
+}
+
+static unsigned property_u32(const char *node, const char *name, unsigned fallback)
+{
+    char path[PATH_MAX];
+    unsigned char value[4];
+    snprintf(path, sizeof(path), "%s/%s", node, name);
+    return read_file(path, value, sizeof(value)) == 4 ? tp8_be32(value) : fallback;
+}
+
+// Prints a property as cell pairs, a string list or a flag.
+static void property_text(const char *node, const char *name, unsigned ac, unsigned sc, char *out, size_t length)
+{
+    char path[PATH_MAX];
+    unsigned char value[4096];
+    snprintf(path, sizeof(path), "%s/%s", node, name);
+    ssize_t n = read_file(path, value, sizeof(value));
+    if (n < 0) { snprintf(out, length, "-"); return; }
+    if (!strcmp(name, "compatible") || !strcmp(name, "status")) {
+        size_t k = 0;
+        for (ssize_t i = 0; i < n && k + 1 < length; ++i)
+            out[k++] = value[i] ? (value[i] >= 32 && value[i] < 127 ? (char)value[i] : '?') : (i + 1 < n ? ';' : 0);
+        out[k < length ? k : length - 1] = 0;
+        return;
+    }
+    if (!n) { snprintf(out, length, "1"); return; }
+    if (tp8_cells(value, (size_t)n, ac, sc, out, length) < 0) snprintf(out, length, "raw%zd", n);
+}
+
+static void log_reserved_nodes(const char *base)
+{
+    char node[PATH_MAX], message[900];
+    snprintf(node, sizeof(node), "%s/reserved-memory", base);
+    unsigned ac = property_u32(node, "#address-cells", 2), sc = property_u32(node, "#size-cells", 2);
+    DIR *directory = opendir(node);
+    if (!directory) { report("rmem no /reserved-memory node in the runtime tree"); return; }
+    struct dirent *entry;
+    unsigned nodes = 0;
+    while (nodes < 96 && (entry = readdir(directory))) {
+        if (entry->d_name[0] == '.' || entry->d_type != DT_DIR) continue;
+        char child[PATH_MAX], compatible[96], reg[320], size[48], align[48], alloc[160], nomap[8], reusable[8], status[24];
+        if (snprintf(child, sizeof(child), "%s/%s", node, entry->d_name) >= (int)sizeof(child)) continue;
+        property_text(child, "compatible", ac, sc, compatible, sizeof(compatible));
+        property_text(child, "reg", ac, sc, reg, sizeof(reg));
+        property_text(child, "size", 0, sc, size, sizeof(size));
+        property_text(child, "alignment", 0, sc, align, sizeof(align));
+        property_text(child, "alloc-ranges", ac, sc, alloc, sizeof(alloc));
+        property_text(child, "no-map", ac, sc, nomap, sizeof(nomap));
+        property_text(child, "reusable", ac, sc, reusable, sizeof(reusable));
+        property_text(child, "status", ac, sc, status, sizeof(status));
+        snprintf(message, sizeof(message),
+                 "rmem node=%.63s compatible=%s reg=%s size=%s alignment=%s alloc-ranges=%s no-map=%s reusable=%s status=%s",
+                 entry->d_name, compatible, reg, size, align, alloc, nomap, reusable, status);
+        report(message);
+        ++nodes;
+    }
+    closedir(directory);
+    snprintf(message, sizeof(message), "rmem nodes=%u address-cells=%u size-cells=%u", nodes, ac, sc);
+    report(message);
+    // Memory nodes, so reservations can be placed against the RAM LK passed.
+    unsigned ac_root = property_u32(base, "#address-cells", 2), sc_root = property_u32(base, "#size-cells", 2);
+    directory = opendir(base);
+    if (!directory) return;
+    while ((entry = readdir(directory))) {
+        if (strncmp(entry->d_name, "memory", 6) || entry->d_type != DT_DIR) continue;
+        char child[PATH_MAX], reg[600];
+        if (snprintf(child, sizeof(child), "%s/%s", base, entry->d_name) >= (int)sizeof(child)) continue;
+        property_text(child, "reg", ac_root, sc_root, reg, sizeof(reg));
+        snprintf(message, sizeof(message), "rmem memory-node=%.63s reg=%s", entry->d_name, reg);
+        report(message);
+    }
+    closedir(directory);
+}
+
+static void log_memreserve(void)
+{
+    static unsigned char fdt[1u << 20];
+    char message[200], hex[65];
+    ssize_t n = read_file("/sys/firmware/fdt", fdt, sizeof(fdt));
+    if (n <= 0) { report("rmem /sys/firmware/fdt unavailable; no memreserve list"); return; }
+    struct tp8_sha256 c;
+    tp8_sha256_init(&c);
+    tp8_sha256_update(&c, fdt, (size_t)n);
+    tp8_sha256_hex(&c, hex);
+    uint64_t base[64], size[64];
+    int count = tp8_memreserve(fdt, (size_t)n, base, size, 64);
+    snprintf(message, sizeof(message), "rmem fdt bytes=%zd sha256=%s memreserve_entries=%d", n, hex, count);
+    report(message);
+    for (int i = 0; i < count; ++i) {
+        snprintf(message, sizeof(message), "rmem memreserve index=%d base=0x%llx size=0x%llx",
+                 i, (unsigned long long)base[i], (unsigned long long)size[i]);
+        report(message);
+    }
+}
+
+// /proc/iomem lists memblock nomap regions and memblock reservations as "reserved".
+static void log_iomem(void)
+{
+    static unsigned char text[65536];
+    ssize_t n = read_file("/proc/iomem", text, sizeof(text) - 1);
+    if (n <= 0) { report("rmem /proc/iomem unavailable"); return; }
+    text[n] = 0;
+    unsigned logged = 0, skipped = 0;
+    char message[200];
+    for (char *line = (char *)text, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        if (!strstr(line, ": reserved") && !strstr(line, ": System RAM") && !strstr(line, ": Kernel")) continue;
+        if (logged >= 128) { ++skipped; continue; }
+        snprintf(message, sizeof(message), "rmem iomem %s", line);
+        report(message);
+        ++logged;
+    }
+    snprintf(message, sizeof(message), "rmem iomem lines=%u skipped=%u", logged, skipped);
+    report(message);
+}
+
+static void reserved_memory(void)
+{
+    log_reserved_nodes("/sys/firmware/devicetree/base");
+    log_memreserve();
+    log_iomem();
+    report("rmem complete");
+}
+
+// ---- 5. USB connection state ----
+static void cable_monitor(void)
+{
+    char udc[64] = "", path[PATH_MAX], state[64], previous[64] = "", speed[64], message[200];
+    unsigned changes = 0;
+    while (seconds_since(&probe_start) < PROBE_CABLE_SECONDS) {
+        if (!udc[0]) {
+            DIR *directory = opendir("/sys/class/udc");
+            struct dirent *entry;
+            while (directory && (entry = readdir(directory)))
+                if (tp8_udc_name(entry->d_name)) { snprintf(udc, sizeof(udc), "%s", entry->d_name); break; }
+            if (directory) closedir(directory);
+        }
+        if (udc[0]) {
+            snprintf(path, sizeof(path), "/sys/class/udc/%s/state", udc);
+            if (tpufs_attribute(path, state, sizeof(state))) snprintf(state, sizeof(state), "unreadable");
+            state[strcspn(state, "\n")] = 0;
+            if (strcmp(state, previous)) {
+                snprintf(path, sizeof(path), "/sys/class/udc/%s/current_speed", udc);
+                if (tpufs_attribute(path, speed, sizeof(speed))) snprintf(speed, sizeof(speed), "unreadable");
+                speed[strcspn(speed, "\n")] = 0;
+                if (++changes <= 120) {
+                    snprintf(message, sizeof(message), "usb-state t=%.1f udc=%s state=%s speed=%s change=%u",
+                             seconds_since(&probe_start), udc, state, speed, changes);
+                    report(message);
+                }
+                snprintf(previous, sizeof(previous), "%s", state);
+            }
+        }
+        sleep(1);
+    }
+    snprintf(message, sizeof(message), "usb-state monitor ended changes=%u last=%s", changes, previous[0] ? previous : "none");
+    report(message);
+}
+
+// ---- 4. I2C chip IDs ----
+// True when the platform device has a bound driver.
+static int platform_bound(const char *device)
+{
+    char path[PATH_MAX];
+    struct stat info;
+    snprintf(path, sizeof(path), "/sys/bus/platform/devices/%s/driver", device);
+    return !lstat(path, &info);
+}
+
+static int gpiochip_open(void);
+
+// Lists devices bound to the MT6771 pinctrl driver, and gpiochip0's label and size.
+static void pinctrl_devices(void)
+{
+    char message[240];
+    unsigned found = 0;
+    DIR *directory = opendir("/sys/bus/platform/drivers/mt6771-pinctrl");
+    struct dirent *entry;
+    while (directory && (entry = readdir(directory))) {
+        if (!strchr(entry->d_name, '.') || entry->d_name[0] == '.') continue;
+        snprintf(message, sizeof(message), "i2c-id pinctrl-driver device=%s", entry->d_name);
+        report(message);
+        ++found;
+    }
+    if (directory) closedir(directory);
+    snprintf(message, sizeof(message), "i2c-id pinctrl-driver %s devices=%u", directory ? "present" : "absent", found);
+    report(message);
+    int fd = gpiochip_open();
+    if (fd < 0) return;
+    struct gpiochip_info chip;
+    memset(&chip, 0, sizeof(chip));
+    if (ioctl(fd, GPIO_GET_CHIPINFO_IOCTL, &chip))
+        snprintf(message, sizeof(message), "i2c-id gpiochip0 chipinfo errno=%d", errno);
+    else
+        snprintf(message, sizeof(message), "i2c-id gpiochip0 name=%s label=%s lines=%u", chip.name, chip.label, chip.lines);
+    report(message);
+    close(fd);
+}
+
+// Finds the i2c-N child of a controller's platform device, or -1.
+static int i2c_adapter_for(const char *device)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/sys/bus/platform/devices/%s", device);
+    DIR *directory = opendir(path);
+    if (!directory) return -1;
+    struct dirent *entry;
+    int number = -1;
+    while (number < 0 && (entry = readdir(directory))) number = tp8_i2c_adapter_name(entry->d_name);
+    closedir(directory);
+    return number;
+}
+
+// Reads a regulator's state by its DT regulator-name; "absent" if no match.
+static void regulator_state(const char *name, char *out, size_t length)
+{
+    snprintf(out, length, "absent");
+    DIR *directory = opendir("/sys/class/regulator");
+    struct dirent *entry;
+    char path[PATH_MAX], text[64];
+    while (directory && (entry = readdir(directory))) {
+        if (entry->d_name[0] == '.') continue;
+        snprintf(path, sizeof(path), "/sys/class/regulator/%s/name", entry->d_name);
+        if (tpufs_attribute(path, text, sizeof(text))) continue;
+        text[strcspn(text, "\n")] = 0;
+        if (strcmp(text, name)) continue;
+        snprintf(path, sizeof(path), "/sys/class/regulator/%s/state", entry->d_name);
+        if (tpufs_attribute(path, text, sizeof(text))) snprintf(text, sizeof(text), "unreadable");
+        text[strcspn(text, "\n")] = 0;
+        snprintf(out, length, "%s", text);
+        break;
+    }
+    if (directory) closedir(directory);
+}
+
+// Opens /dev/gpiochip0 read-only after matching its device number to sysfs, or -1.
+static int gpiochip_open(void)
+{
+    char text[64];
+    dev_t expected;
+    if (tpufs_attribute("/sys/bus/gpio/devices/gpiochip0/dev", text, sizeof(text)) ||
+        tpufs_device_number(text, &expected)) { report("i2c-id gpiochip0 absent; no GPIO access"); return -1; }
+    int fd = open("/dev/gpiochip0", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat info;
+    if (fd < 0 || fstat(fd, &info) || !S_ISCHR(info.st_mode) || info.st_rdev != expected) {
+        if (fd >= 0) close(fd);
+        report("i2c-id gpiochip0 node does not match sysfs; not used");
+        return -1;
+    }
+    return fd;
+}
+
+// Line direction only, through GPIO_GET_LINEINFO_IOCTL; no line is requested.
+static void gpio_directions(void)
+{
+    static const unsigned lines[] = {1, 9, 18, 153};
+    char message[200];
+    int fd = gpiochip_open();
+    if (fd < 0) return;
+    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
+        struct gpioline_info line;
+        memset(&line, 0, sizeof(line));
+        line.line_offset = lines[i];
+        if (ioctl(fd, GPIO_GET_LINEINFO_IOCTL, &line)) {
+            snprintf(message, sizeof(message), "i2c-id gpio=%u lineinfo errno=%d", lines[i], errno);
+        } else {
+            snprintf(message, sizeof(message), "i2c-id gpio=%u direction=%s used=%d", lines[i],
+                     (line.flags & GPIOLINE_FLAG_IS_OUT) ? "out" : "in", !!(line.flags & GPIOLINE_FLAG_KERNEL));
+        }
+        report(message);
+    }
+    close(fd);
+}
+
+// Opens /dev/i2c-N read-only after matching its device number to sysfs.
+static int i2c_open(int number)
+{
+    char path[PATH_MAX], text[64];
+    dev_t expected;
+    snprintf(path, sizeof(path), "/sys/class/i2c-dev/i2c-%d/dev", number);
+    if (tpufs_attribute(path, text, sizeof(text)) || tpufs_device_number(text, &expected)) return -1;
+    snprintf(path, sizeof(path), "/dev/i2c-%d", number);
+    // devtmpfs supplies the node. Never create a fallback guessed device.
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat info;
+    if (fd >= 0 && (fstat(fd, &info) || !S_ISCHR(info.st_mode) || info.st_rdev != expected)) { close(fd); fd = -1; }
+    return fd;
+}
+
+// One ID read: a register-pointer write and a short read in one I2C_RDWR.
+struct id_read {
+    const struct tp8_i2c_target *t;
+    int fd, status, error;
+    unsigned char data[TP8_I2C_MAX_READ];
+    int line;   // GPIO line request fd during the reset pulse, else -1
+};
+
+static int id_read_once(void *ctx)
+{
+    struct id_read *r = ctx;
+    const struct tp8_i2c_target *t = r->t;
+    unsigned char pointer[2];
+    memcpy(pointer, t->reg, sizeof(pointer));
+    memset(r->data, 0, sizeof(r->data));
+    struct i2c_msg messages[2] = {
+        {.addr = t->address, .flags = 0, .len = (uint16_t)t->reg_length, .buf = pointer},
+        {.addr = t->address, .flags = I2C_M_RD, .len = (uint16_t)t->read_length, .buf = r->data},
+    };
+    struct i2c_rdwr_ioctl_data transfer = {.msgs = messages, .nmsgs = 2};
+    r->status = ioctl(r->fd, I2C_RDWR, &transfer);
+    r->error = r->status < 0 ? errno : r->status == 2 ? 0 : EIO;
+    return r->error;
+}
+
+// Line info and level of a line (tag names the device in the log), before anything drives it. The level comes from
+// a request with no direction flag, which leaves direction as it is. On paris the
+// request also sets the pin's mode to 0 (GPIO), the only mode of GPIO 178 and the
+// EINT mode stock uses for GPIO 0.
+static void reset_line_state(const char *tag, unsigned offset, const char *role)
+{
+    char message[240];
+    int chip = gpiochip_open();
+    if (chip < 0) return;
+    struct gpio_v2_line_info info;
+    memset(&info, 0, sizeof(info));
+    info.offset = offset;
+    if (ioctl(chip, GPIO_V2_GET_LINEINFO_IOCTL, &info)) {
+        snprintf(message, sizeof(message), "%s gpio=%u role=%s lineinfo errno=%d", tag, offset, role, errno);
+        report(message);
+        close(chip);
+        return;
+    }
+    unsigned long long f = info.flags;
+    snprintf(message, sizeof(message),
+             "%s gpio=%u role=%s name=%s consumer=%s flags=0x%llx direction=%s used=%d active_low=%d bias=%s drive=%s",
+             tag, offset, role, info.name[0] ? info.name : "-", info.consumer[0] ? info.consumer : "-", f,
+             (f & GPIO_V2_LINE_FLAG_OUTPUT) ? "out" : (f & GPIO_V2_LINE_FLAG_INPUT) ? "in" : "?",
+             !!(f & GPIO_V2_LINE_FLAG_USED), !!(f & GPIO_V2_LINE_FLAG_ACTIVE_LOW),
+             (f & GPIO_V2_LINE_FLAG_BIAS_PULL_UP) ? "pull-up" : (f & GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN) ? "pull-down" :
+             (f & GPIO_V2_LINE_FLAG_BIAS_DISABLED) ? "disabled" : "unknown",
+             (f & GPIO_V2_LINE_FLAG_OPEN_DRAIN) ? "open-drain" : (f & GPIO_V2_LINE_FLAG_OPEN_SOURCE) ? "open-source" : "push-pull");
+    report(message);
+    if (f & GPIO_V2_LINE_FLAG_USED) {
+        snprintf(message, sizeof(message), "%s gpio=%u role=%s level=- in use, not requested", tag, offset, role);
+        report(message);
+        close(chip);
+        return;
+    }
+    struct gpio_v2_line_request request;
+    memset(&request, 0, sizeof(request));
+    request.offsets[0] = offset;
+    request.num_lines = 1;
+    snprintf(request.consumer, sizeof(request.consumer), "tp510-v11-read");
+    if (ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &request)) {
+        snprintf(message, sizeof(message), "%s gpio=%u role=%s level=- request errno=%d", tag, offset, role, errno);
+    } else {
+        struct gpio_v2_line_values values = {.bits = 0, .mask = 1};
+        if (ioctl(request.fd, GPIO_V2_LINE_GET_VALUES_IOCTL, &values))
+            snprintf(message, sizeof(message), "%s gpio=%u role=%s level=- get errno=%d", tag, offset, role, errno);
+        else
+            snprintf(message, sizeof(message), "%s gpio=%u role=%s level=%d", tag, offset, role, (int)(values.bits & 1));
+        close(request.fd);
+    }
+    report(message);
+    close(chip);
+}
+
+// Reset pulse callbacks: the only GPIO writes to the aw9523 reset line, used only after a NACK.
+// Requests one line as an output with value 1; returns 0 or an errno and the request fd in *fd.
+static int gpio_request_output_high(unsigned offset, const char *consumer, int *fd)
+{
+    *fd = -1;
+    int chip = gpiochip_open();
+    if (chip < 0) return ENODEV;
+    struct gpio_v2_line_request request;
+    memset(&request, 0, sizeof(request));
+    request.offsets[0] = offset;
+    request.num_lines = 1;
+    snprintf(request.consumer, sizeof(request.consumer), "%s", consumer);
+    request.config.flags = GPIO_V2_LINE_FLAG_OUTPUT;
+    request.config.num_attrs = 1;
+    request.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+    request.config.attrs[0].attr.values = 1;
+    request.config.attrs[0].mask = 1;
+    int error = ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &request) ? errno : 0;
+    close(chip);
+    if (!error) *fd = request.fd;
+    return error;
+}
+
+static int reset_request_high(void *ctx)
+{
+    struct id_read *r = ctx;
+    return gpio_request_output_high(TP9_AW9523_RESET_GPIO, "tp510-v11-reset", &r->line);
+}
+
+static int reset_set(void *ctx, int value)
+{
+    struct id_read *r = ctx;
+    struct gpio_v2_line_values values = {.bits = (uint64_t)(value & 1), .mask = 1};
+    return ioctl(r->line, GPIO_V2_LINE_SET_VALUES_IOCTL, &values) ? errno : 0;
+}
+
+static void reset_sleep_us(void *ctx, unsigned us)
+{
+    (void)ctx;
+    struct timespec wait = {.tv_sec = us / 1000000u, .tv_nsec = (long)(us % 1000000u) * 1000};
+    while (nanosleep(&wait, &wait) && errno == EINTR) {}
+}
+
+// Closing the request leaves the line output-high, the state stock leaves after its probe.
+static void reset_release(void *ctx)
+{
+    struct id_read *r = ctx;
+    if (r->line >= 0) close(r->line);
+    r->line = -1;
+}
+
+// Returns the read error (0 on success), or -1 when no read was made.
+static int i2c_read_id(const struct tp8_i2c_target *t, int adapter)
+{
+    char message[240], reg[8], state[32] = "none";
+    tp8_hex_bytes(t->reg, t->reg_length, reg, sizeof(reg));
+    if (!tp8_i2c_target_valid(t)) return -1;
+    if (t->supply) {
+        regulator_state(t->supply, state, sizeof(state));
+        if (strcmp(state, "enabled")) {
+            snprintf(message, sizeof(message), "i2c bus=%u adapter=%d addr=0x%02x chip=%s reg=%s id=- result=skipped supply %s %s",
+                     t->stock_bus, adapter, t->address, t->chip, reg, t->supply, state);
+            report(message);
+            return -1;
+        }
+    }
+    int fd = adapter < 0 ? -1 : i2c_open(adapter);
+    if (fd < 0) {
+        snprintf(message, sizeof(message), "i2c bus=%u adapter=%d addr=0x%02x chip=%s reg=%s id=- result=no-adapter",
+                 t->stock_bus, adapter, t->address, t->chip, reg);
+        report(message);
+        return -1;
+    }
+    struct id_read read = {.t = t, .fd = fd, .line = -1};
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    char extra[96] = "";
+    if (t->reset_gpio >= 0) {
+        reset_line_state("aw9523", TP9_AW9523_RESET_GPIO, "reset");
+        reset_line_state("aw9523", TP9_AW9523_INT_GPIO, "int");
+        static const struct tp9_reset_ops ops = {id_read_once, reset_request_high, reset_set, reset_sleep_us, reset_release};
+        struct tp9_reset_result r = tp9_reset_read(&ops, &read, report);
+        snprintf(extra, sizeof(extra), " reads=%u reset=%s gpio_errno=%d", r.reads,
+                 r.pulsed ? "pulsed" : r.gpio_error ? "failed" : "no", r.gpio_error);
+    } else {
+        id_read_once(&read);
+    }
+    close(fd);
+    tp11_i2c_line(message, sizeof(message), t, adapter, read.status, read.error, read.data, state,
+                  seconds_since(&start) * 1000, extra);
+    report(message);
+    return read.error;
+}
+
+// One touchpad read after the reset test; logged like the other i2c lines plus the reset result.
+static void pad_read(const struct tp8_i2c_target *t, int adapter, int fd, const char *extra)
+{
+    char message[240];
+    struct id_read read = {.t = t, .fd = fd, .line = -1};
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    id_read_once(&read);
+    tp11_i2c_line(message, sizeof(message), t, adapter, read.status, read.error, read.data, "none",
+                  seconds_since(&start) * 1000, extra);
+    report(message);
+}
+
+static void pad_step(const char *step, int error)
+{
+    char message[120];
+    snprintf(message, sizeof(message), "touchpad reset gpio=%u step=%s errno=%d", TP11_PAD_RESET_GPIO, step, error);
+    report(message);
+}
+
+// GPIO 9 reset test, run after both ordinary reads NACKed. The only GPIO writes are on
+// the touchpad reset line; the line is released high.
+static void pad_reset_test(const struct tp8_i2c_target *first, const struct tp8_i2c_target *second, int adapter)
+{
+    int fd = adapter < 0 ? -1 : i2c_open(adapter);
+    if (fd < 0) { report("touchpad reset skipped no-adapter"); return; }
+    struct id_read line = {.line = -1};
+    int error = gpio_request_output_high(TP11_PAD_RESET_GPIO, "tp510-v11-pad", &line.line);
+    pad_step("request-output-high", error);
+    for (size_t i = 0; !error && i < TP11_PAD_STEPS; ++i) {
+        if (i) {
+            error = reset_set(&line, tp11_pad_steps[i].value);
+            pad_step(tp11_pad_steps[i].value ? "high" : "low", error);
+            if (error) break;
+        }
+        reset_sleep_us(NULL, tp11_pad_steps[i].wait_us);
+    }
+    reset_release(&line);
+    pad_step("released", 0);
+    char extra[48];
+    snprintf(extra, sizeof(extra), " reset=%s", error ? "failed" : "pulsed");
+    pad_read(first, adapter, fd, extra);
+    pad_read(second, adapter, fd, extra);
+    reset_sleep_us(NULL, TP11_PAD_RETRY_GAP_US);
+    pad_read(first, adapter, fd, extra);
+    close(fd);
+}
+
+#define CONTROLLERS 4
+static void i2c_ids(void)
+{
+    static const char *const controllers[CONTROLLERS] = {"11007000.i2c", "1100f000.i2c", "11005000.i2c", "11008000.i2c"};
+    char message[200], state[32];
+    // 5.10 names the device from its first reg (0x10005000) and the node name.
+    snprintf(message, sizeof(message), "i2c-id pinctrl=%s pwrap=%s pmic-regulators=%s",
+             platform_bound("10005000.1000b000.pinctrl") ? "bound" : "unbound",
+             platform_bound("1000d000.pwrap") ? "bound" : "unbound",
+             access("/sys/class/regulator", F_OK) ? "absent" : "present");
+    report(message);
+    regulator_state("vldo28", state, sizeof(state));
+    snprintf(message, sizeof(message), "i2c-id regulator vldo28=%s", state);
+    report(message);
+    // Other candidates for the touchpad rail, logged when the kernel has them.
+    static const char *const rails[] = {"vio18", "vio28", "vibr"};
+    for (size_t i = 0; i < sizeof(rails) / sizeof(rails[0]); ++i) {
+        regulator_state(rails[i], state, sizeof(state));
+        if (strcmp(state, "absent")) {
+            snprintf(message, sizeof(message), "i2c-id regulator %s=%s", rails[i], state);
+            report(message);
+        }
+    }
+    pinctrl_devices();
+    gpio_directions();
+    int adapters[CONTROLLERS] = {-1, -1, -1, -1};
+    for (unsigned second = 0; second <= PROBE_I2C_WAIT_SECONDS; ++second) {
+        int missing = 0;
+        for (int i = 0; i < CONTROLLERS; ++i)
+            if (adapters[i] < 0 && (adapters[i] = i2c_adapter_for(controllers[i])) < 0) ++missing;
+        if (!missing) break;
+        if (second < PROBE_I2C_WAIT_SECONDS) sleep(1);
+    }
+    for (int i = 0; i < CONTROLLERS; ++i) {
+        snprintf(message, sizeof(message), "i2c-id controller=%s driver=%s adapter=%d", controllers[i],
+                 platform_bound(controllers[i]) ? "bound" : "unbound", adapters[i]);
+        report(message);
+    }
+    const struct tp8_i2c_target *pad[2] = {NULL, NULL};
+    int pad_error[2] = {-1, -1}, pad_adapter = -1;
+    for (size_t i = 0; i < TP8_I2C_TARGETS; ++i) {
+        const struct tp8_i2c_target *t = &tp8_i2c_targets[i];
+        int adapter = -1;
+        for (int c = 0; c < CONTROLLERS; ++c) if (!strcmp(t->device, controllers[c])) adapter = adapters[c];
+        int error = i2c_read_id(t, adapter);
+        if (!strcmp(t->chip, "synaptics-pad")) {
+            int slot = pad[0] ? 1 : 0;
+            pad[slot] = t;
+            pad_error[slot] = error;
+            pad_adapter = adapter;
+        }
+    }
+    if (pad[0] && pad[1]) {
+        reset_line_state("touchpad", TP11_PAD_RESET_GPIO, "reset");
+        if (tp11_pad_needs_reset(pad_error[0], pad_error[1])) pad_reset_test(pad[0], pad[1], pad_adapter);
+        else report("touchpad reset skipped: a read did not NACK");
+    }
+    report("i2c-id complete");
+}
+
+// ---- 3. ACM input hashing (PID1, called from the serial loop) ----
+static struct tp8_lines echo_lines;
+static int echo_state; // 0 waiting for input, 1 hashing, 2 closed
+static struct timespec echo_started;
+
+static void echo_close(void)
+{
+    char message[160];
+    snprintf(message, sizeof(message), "acm-echo window closed lines=%u unterminated_bytes=%llu total_bytes=%llu",
+             echo_lines.lines, (unsigned long long)echo_lines.length, (unsigned long long)echo_lines.total);
+    report(message);
+    echo_state = 2;
+}
+
+static void echo_tick(void)
+{
+    if (echo_state == 1 && seconds_since(&echo_started) >= PROBE_ECHO_SECONDS) echo_close();
+}
+
+static int echo_timeout(void)
+{
+    return echo_state == 1 ? 1000 : -1;
+}
+
+// Input inside the window is hashed and never parsed as a command.
+static int echo_hook(const char *data, ssize_t count)
+{
+    echo_tick();
+    if (echo_state == 2 || count <= 0) return 0;
+    if (!echo_state) {
+        tp8_lines_init(&echo_lines);
+        clock_gettime(CLOCK_MONOTONIC, &echo_started);
+        echo_state = 1;
+        report("acm-echo window opened; input is hashed for 60 s and never executed");
+    }
+    tp8_lines_feed(&echo_lines, data, (size_t)count, report);
+    return 1;
+}
+
+static void combined_probes(void)
+{
+    clock_gettime(CLOCK_MONOTONIC, &probe_start);
+    watchdog_pinger();
+    (void)tpufs_start("/sys", "/dev", 1, report);
+    bounded_child("part-hash", PROBE_HASH_BUDGET_SECONDS, partition_hashes);
+    bounded_child("rmem", PROBE_RMEM_BUDGET_SECONDS, reserved_memory);
+    bounded_child("usb-state", PROBE_RETURN_SECONDS, cable_monitor);
+    bounded_child("i2c-id", PROBE_I2C_BUDGET_SECONDS, i2c_ids);
+    pid_t child = fork();
+    if (child < 0) { report("tk-query fork failed"); return; }
+    if (child) return;
+    char text[64], message[160];
+    dev_t expected;
+    if (tpufs_attribute("/sys/class/misc/tkcoredrv/dev", text, sizeof(text)) ||
+        tpufs_device_number(text, &expected)) {
+        report("tk-query no valid misc device in this boot; no ioctl"); _exit(1);
+    }
+    // devtmpfs supplies the node. Never create a fallback guessed device.
+    struct tp_tkcore_query_result result;
+    int status = tp_tkcore_feature_query(expected, &result);
+    snprintf(message, sizeof(message), "tk-query status=%d stage=%d errno=%d flags=0x%08x",
+             status, (int)result.stage, result.error_number, result.feature_flags);
+    report(message);
+    _exit(status ? 1 : 0);
+}
+#define PROBE_AFTER_MOUNTS() combined_probes()
+#include "../ram-probe/init.c"

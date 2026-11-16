@@ -1,0 +1,212 @@
+--- a/drivers/misc/mediatek/pmic/mt6370/mt6370_pmu_rgbled.c
++++ b/drivers/misc/mediatek/pmic/mt6370/mt6370_pmu_rgbled.c
+@@ -77,7 +77,7 @@
+ 	0x52, /* MT6370_PMU_REG_RGB3TR: 0x8F */
+ 	0x25, /* MT6370_PMU_REG_RGB3TF: 0x90 */
+ 	0x11, /* MT6370_PMU_REG_RGB3TONTOFF: 0x91 */
+-	0x60, /* MT6370_PMU_REG_RGBCHRINDDIM: 0x92 */
++	0xE0, /* MT6370_PMU_REG_RGBCHRINDDIM: 0x92, CHG_IND auto off as stock */
+ 	0x07, /* MT6370_PMU_REG_RGBCHRINDCTRL: 0x93 */
+ 	0x52, /* MT6370_PMU_REG_RGBCHRINDTR: 0x94 */
+ 	0x25, /* MT6370_PMU_REG_RGBCHRINDTF: 0x95 */
+@@ -1013,12 +1013,12 @@
+ 	},
+ };
+ /* 6372 end */
++static int mt6370_pmu_led_change_mode(struct led_classdev *led_cdev, int mode);
+ static void mt6370_pmu_led_bright_set(struct led_classdev *led_cdev,
+ 	enum led_brightness bright)
+ {
+ 	int led_index = mt6370_pmu_led_get_index(led_cdev);
+ 	uint8_t reg_addr = 0, reg_mask = 0x7, reg_shift = 0, en_mask = 0;
+-	bool need_enable_timer = true;
+ 	int ret = 0;
+ 
+ 	switch (led_index) {
+@@ -1038,7 +1038,6 @@
+ 		reg_addr = MT6370_PMU_REG_RGBCHRINDCTRL;
+ 		reg_mask = 0x3;
+ 		en_mask = 0x10;
+-		need_enable_timer = false;
+ 		break;
+ 	default:
+ 		dev_err(led_cdev->dev, "invalid mt led index\n");
+@@ -1050,25 +1049,40 @@
+ 		dev_err(led_cdev->dev, "update brightness fail\n");
+ 		return;
+ 	}
+-	if (!bright)
+-		need_enable_timer = false;
+-	if (need_enable_timer) {
++	/* As the stock 4.14 binary: software takes ISINK4 from the charger */
++	if (led_index == MT6370_PMU_LED4) {
++		ret = mt6370_pmu_led_update_bits(led_cdev,
++						 MT6370_PMU_REG_RGBCHRINDDIM,
++						 0x80, 0x80);
++		if (ret < 0) {
++			dev_err(led_cdev->dev, "disable auto mode fail\n");
++			return;
++		}
++	}
++	if (bright) {
++		/* the dwork turns on every lit channel together */
+ 		mt6370_pmu_led_enable_dwork(led_cdev);
+ 		return;
+ 	}
+ 	ret = mt6370_pmu_led_update_bits(led_cdev, MT6370_PMU_REG_RGBEN,
+-					 en_mask,
+-					 (bright > 0) ? en_mask : ~en_mask);
+-	if (ret < 0)
++					 en_mask, ~en_mask);
++	if (ret < 0) {
+ 		dev_err(led_cdev->dev, "update enable bit fail\n");
++		return;
++	}
++	/* Off leaves PWM blink mode, so the next steady value doesn't blink */
++	ret = mt6370_pmu_led_change_mode(led_cdev, MT6370_PMU_LED_REGMODE);
++	if (ret < 0)
++		dev_err(led_cdev->dev, "change mode fail\n");
+ }
+ 
+ static enum led_brightness mt6370_pmu_led_bright_get(
+ 	struct led_classdev *led_cdev)
+ {
++	struct mt6370_pmu_rgbled_data *rgbled_data =
++				dev_get_drvdata(led_cdev->dev->parent);
+ 	int led_index = mt6370_pmu_led_get_index(led_cdev);
+ 	uint8_t reg_addr = 0, reg_mask = 0x7, reg_shift = 0, en_mask = 0;
+-	bool need_enable_timer = true;
+ 	int ret = 0;
+ 
+ 	switch (led_index) {
+@@ -1088,12 +1102,18 @@
+ 		reg_addr = MT6370_PMU_REG_RGBCHRINDCTRL;
+ 		reg_mask = 0x3;
+ 		en_mask = 0x10;
+-		need_enable_timer = false;
+ 		break;
+ 	default:
+ 		dev_err(led_cdev->dev, "invalid mt led index\n");
+ 		return -EINVAL;
+ 	}
++	/*
++	 * The enable bit is written up to 100 ms after a brightness write.
++	 * Reading RGBEN before then gives 0, the core stores it in
++	 * brightness and the dwork then leaves the channel off.
++	 */
++	if (delayed_work_pending(&rgbled_data->dwork))
++		return led_cdev->brightness;
+ 	ret = mt6370_pmu_led_reg_read(led_cdev, MT6370_PMU_REG_RGBEN);
+ 	if (ret < 0)
+ 		return ret;
+@@ -1183,7 +1203,6 @@
+ 	return 0;
+ }
+ 
+-static int mt6370_pmu_led_change_mode(struct led_classdev *led_cdev, int mode);
+ static int mt6370_pmu_led_blink_set(struct led_classdev *led_cdev,
+ 	unsigned long *delay_on, unsigned long *delay_off)
+ {
+@@ -1210,6 +1229,51 @@
+ 	return 0;
+ }
+ 
++/*
++ * delay_on_off: "on off" in ms, as the stock 4.14 LED core had it for the
++ * stock lights HAL. Sets the blink delays and calls led_blink_set(), which
++ * lands in mt6370_pmu_led_blink_set(): both non-zero blinks in PWM mode in
++ * the PMIC, "1 0" goes back to steady.
++ */
++static ssize_t delay_on_off_show(struct device *dev,
++	struct device_attribute *attr, char *buf)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++
++	return sprintf(buf, "%lu %lu\n", led_cdev->blink_delay_on,
++		       led_cdev->blink_delay_off);
++}
++
++static ssize_t delay_on_off_store(struct device *dev,
++	struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++	unsigned long on = 0, off = 0;
++	ssize_t ret = size;
++
++	if (sscanf(buf, "%lu %lu", &on, &off) != 2)
++		return -EINVAL;
++	mutex_lock(&led_cdev->led_access);
++	if (led_sysfs_is_disabled(led_cdev)) {
++		ret = -EBUSY;
++		goto out;
++	}
++	led_cdev->blink_delay_on = on;
++	led_cdev->blink_delay_off = off;
++	led_blink_set(led_cdev, &led_cdev->blink_delay_on,
++		      &led_cdev->blink_delay_off);
++out:
++	mutex_unlock(&led_cdev->led_access);
++	return ret;
++}
++static DEVICE_ATTR_RW(delay_on_off);
++
++static struct attribute *mt6370_led_attrs[] = {
++	&dev_attr_delay_on_off.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(mt6370_led);
++
+ static struct mt6370_led_classdev mt6370_led_classdev[MT6370_PMU_MAXLED] = {
+ 	{
+ 		.led_dev =  {
+@@ -1217,6 +1281,7 @@
+ 			.brightness_set = mt6370_pmu_led_bright_set,
+ 			.brightness_get = mt6370_pmu_led_bright_get,
+ 			.blink_set = mt6370_pmu_led_blink_set,
++			.groups = mt6370_led_groups,
+ 		},
+ 		.led_index = MT6370_PMU_LED1,
+ 	},
+@@ -1226,6 +1291,7 @@
+ 			.brightness_set = mt6370_pmu_led_bright_set,
+ 			.brightness_get = mt6370_pmu_led_bright_get,
+ 			.blink_set = mt6370_pmu_led_blink_set,
++			.groups = mt6370_led_groups,
+ 		},
+ 		.led_index = MT6370_PMU_LED2,
+ 	},
+@@ -1235,6 +1301,7 @@
+ 			.brightness_set = mt6370_pmu_led_bright_set,
+ 			.brightness_get = mt6370_pmu_led_bright_get,
+ 			.blink_set = mt6370_pmu_led_blink_set,
++			.groups = mt6370_led_groups,
+ 		},
+ 		.led_index = MT6370_PMU_LED3,
+ 	},
+@@ -1244,6 +1311,7 @@
+ 			.brightness_set = mt6370_pmu_led_bright_set,
+ 			.brightness_get = mt6370_pmu_led_bright_get,
+ 			.blink_set = mt6370_pmu_led_blink_set,
++			.groups = mt6370_led_groups,
+ 		},
+ 		.led_index = MT6370_PMU_LED4,
+ 	},
+@@ -2081,7 +2149,7 @@
+ 	struct mt6370_pmu_rgbled_data *rgbled_data =
+ 		container_of(work, struct mt6370_pmu_rgbled_data, dwork.work);
+ 	u8 chip_vid = rgbled_data->chip->chip_vid;
+-	u8 reg_data = 0, reg_mask = 0xE0, reg_addr = MT6370_PMU_REG_RGBEN;
++	u8 reg_data = 0, reg_mask = 0xF0, reg_addr = MT6370_PMU_REG_RGBEN;
+ 	int ret = 0;
+ 
+ 	dev_dbg(rgbled_data->dev, "%s\n", __func__);
+@@ -2094,6 +2162,9 @@
+ 	/* green */
+ 	if (mt6370_led_classdev[2].led_dev.brightness != 0)
+ 		reg_data |= 0x20;
++	/* ISINK4 too, as the stock binary */
++	if (mt6370_led_classdev[3].led_dev.brightness != 0)
++		reg_data |= 0x10;
+ 	/* if 6372 */
+ 	if (chip_vid == MT6372_VENDOR_ID || chip_vid == MT6372C_VENDOR_ID)
+ 		reg_addr = 0x82;

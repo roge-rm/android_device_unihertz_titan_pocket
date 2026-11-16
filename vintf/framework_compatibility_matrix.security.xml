@@ -1,0 +1,24 @@
+<!--
+    SPDX-License-Identifier: Apache-2.0
+    Stock TrustKernel Keymaster 4.0 and gatekeeper 1.0 HIDL HALs. keystore2 reaches the
+    keymaster through km_compat and gatekeeperd uses the gatekeeper; listing them keeps
+    checkvintf from failing on the stock vendor manifest (KEYMASTER_PORT.md).
+-->
+<compatibility-matrix version="1.0" type="framework">
+    <hal format="hidl" optional="true">
+        <name>android.hardware.keymaster</name>
+        <version>4.0</version>
+        <interface>
+            <name>IKeymasterDevice</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+    <hal format="hidl" optional="true">
+        <name>android.hardware.gatekeeper</name>
+        <version>1.0</version>
+        <interface>
+            <name>IGatekeeper</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+</compatibility-matrix>

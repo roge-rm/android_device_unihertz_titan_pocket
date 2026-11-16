@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- VoLTE for Fido (carrier id 1962) and Rogers (1403), the network Fido runs on. -->
+<carrier_config_list>
+    <carrier_config cid="1962">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config cid="1403">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+</carrier_config_list>

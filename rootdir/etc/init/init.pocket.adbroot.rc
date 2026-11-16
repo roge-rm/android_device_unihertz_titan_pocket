@@ -1,0 +1,5 @@
+# Engineering build only: allow adb root before system_server can turn it on in Settings.
+# adb_root reads /data/adbroot/enabled once at start (class main, after post-fs-data).
+on post-fs-data
+    mkdir /data/adbroot 0700 root root
+    write /data/adbroot/enabled 1

@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Points the Updater at the owner repo's update feed.
+
+runtime_resource_overlay {
+    name: "PocketUpdaterOverlay",
+    resource_dirs: ["overlay/PocketUpdaterOverlay/res"],
+    manifest: "overlay/PocketUpdaterOverlay/AndroidManifest.xml",
+    product_specific: true,
+}

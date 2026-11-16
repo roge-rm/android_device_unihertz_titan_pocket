@@ -1,0 +1,1668 @@
+--- /dev/null
++++ b/drivers/misc/mediatek/connectivity/Kconfig
+@@ -0,0 +1,80 @@
++# Connectivity built-in adapter (connadp) and the stock connectivity
++# options from the 4.14 Kconfig, for the out-of-tree WMT, Wi-Fi, BT, GPS
++# and FM modules. Only MTK_COMBO builds code here; the rest are read by the
++# module Makefiles from this kernel's config, as stock.
++
++config MTK_COMBO
++	bool "MediaTek connectivity built-in adapter"
++	help
++	  Builds the exports the MediaTek connsys modules (wmt_drv,
++	  wmt_chrdev_wifi, wlan_drv_gen3, bt_drv, gps_drv, fmradio_drv)
++	  take from the kernel. Built in: the modules link against it and
++	  it hooks the consys reserved memory at boot.
++
++choice
++	prompt "Select Chip"
++	depends on MTK_COMBO
++
++config MTK_COMBO_CHIP_CONSYS_6771
++	bool "MTK MT6771 combo chip support"
++	help
++	  MT6771 connsys (BT, Wi-Fi, GPS and FM).
++
++endchoice
++
++config MTK_COMBO_CHIP
++	string
++	default "CONSYS_6771" if MTK_COMBO_CHIP_CONSYS_6771
++	help
++	  Combo chip or SoC connsys name the module Makefiles switch on.
++
++config MTK_COMBO_BT
++	tristate "MediaTek Combo Chip BT driver"
++	depends on MTK_COMBO
++	help
++	  MTK BT /dev/stpbt driver, built out of tree.
++
++config MTK_COMBO_GPS
++	tristate "MediaTek Combo Chip GPS driver"
++	depends on MTK_COMBO
++	help
++	  MTK GPS /dev/stpgps driver, built out of tree.
++
++config MTK_COMBO_WIFI
++	tristate "MediaTek combo chip Wi-Fi support"
++	depends on MTK_COMBO
++	select WIRELESS_EXT
++	select WEXT_PRIV
++	help
++	  MTK gen3 Wi-Fi, built out of tree. Selects the wireless
++	  extensions it uses, as stock.
++
++config MTK_WIFI_MCC_SUPPORT
++	bool "MTK_WIFI_MCC_SUPPORT"
++	depends on MTK_COMBO_WIFI
++	default y
++	help
++	  Multi-channel concurrency in the Wi-Fi driver.
++
++config MTK_GPS_SUPPORT
++	tristate "support MediaTek GPS driver"
++	help
++	  GPS feature switch the GPS module build reads.
++
++config MTK_GPS_EMI
++	tristate "MediaTek GPS EMI Driver"
++	depends on MTK_COMBO_GPS
++	help
++	  GPS EMI driver for MNL offload. Off on stock.
++
++config MTK_FMRADIO
++	tristate "MediaTek FMRadio driver"
++	depends on MTK_COMBO
++	help
++	  MTK FM radio, built out of tree.
++
++config MTK_FM_CHIP
++	string "MTK FM CHIP"
++	depends on MTK_FMRADIO
++	help
++	  FM chip the FM module build picks, MT6631_FM on stock.
+--- /dev/null
++++ b/drivers/misc/mediatek/connectivity/Makefile
+@@ -0,0 +1,13 @@
++# SPDX-License-Identifier: GPL-2.0
++# Connectivity built-in adapter (connadp) for the out-of-tree connsys modules.
++
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include/clkbuf_v1
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/base/power/include/clkbuf_v1/$(MTK_PLATFORM)
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat/$(MTK_PLATFORM)/include
++ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
++
++obj-$(CONFIG_MTK_COMBO) += connadp.o
++connadp-objs := common/connectivity_build_in_adapter.o
++connadp-objs += common/wmt_build_in_adapter.o
++connadp-objs += common/connectivity_platform_stubs.o
+--- /dev/null
++++ b/drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.c
+@@ -0,0 +1,276 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++/*
++ * The 4.14 connectivity built-in adapter (connadp) on 5.10. The WMT, Wi-Fi,
++ * BT, GPS and FM modules call into the kernel only through these exports.
++ *
++ * Differences from the 4.14 file:
++ * - gConEmiPhyBase and gConEmiSize are not defined here. On 4.15 and later
++ *   the WMT module defines and exports them itself and reads the consys
++ *   node's memory-region (ALLOCATE_CONNSYS_EMI_FROM_KO in
++ *   mtk_wcn_consys_hw.c), so a kernel copy would clash at insmod. The
++ *   reserved-memory hook stays, only to log where the region landed.
++ * - The PMIC calls write the MT6358 through its mfd regmap. Only the flags
++ *   the mt6771 platform file uses are mapped.
++ * - clk_buf_ctrl is the shim in connectivity_platform_stubs.c.
++ * - The MMC, GPIO dump and gps-reserve-memory paths are for external combo
++ *   chips and other SoCs; they are stubs that log once.
++ */
++
++#ifdef DFT_TAG
++#undef DFT_TAG
++#endif
++#define DFT_TAG "[CONNADP]"
++#include "connectivity_build_in_adapter.h"
++
++#include <linux/export.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/mfd/mt6397/core.h>
++#include <linux/sched/debug.h>
++#include <linux/sched/signal.h>
++#include <linux/trace_events.h>
++
++#include <mtk_clkbuf_ctl.h>
++#include <upmu_common.h>
++
++#ifndef TASK_STATE_TO_CHAR_STR
++#define TASK_STATE_TO_CHAR_STR "RSDTtXZxKWPNn"
++#endif
++
++/* Reserved memory: the region is reserved by the 5.10 core; this only logs it, as stock does. */
++static int __init reserve_memory_consys_fn(struct reserved_mem *rmem)
++{
++	pr_info(DFT_TAG "[W]%s: name: %s,base: 0x%llx,size: 0x%llx\n",
++		__func__, rmem->name, (unsigned long long)rmem->base,
++		(unsigned long long)rmem->size);
++	return 0;
++}
++RESERVEDMEM_OF_DECLARE(reserve_memory_test, "mediatek,consys-reserve-memory",
++			reserve_memory_consys_fn);
++
++void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp)
++{
++	show_stack(tsk, sp, KERN_INFO);
++}
++EXPORT_SYMBOL(connectivity_export_show_stack);
++
++void connectivity_export_tracing_record_cmdline(struct task_struct *tsk)
++{
++#ifdef CONFIG_TRACING
++	tracing_record_cmdline(tsk);
++#endif
++}
++EXPORT_SYMBOL(connectivity_export_tracing_record_cmdline);
++
++/*******************************************************************************
++ * Clock Buffer Control
++ ******************************************************************************/
++#ifdef CONNADP_HAS_CLOCK_BUF_CTRL
++void connectivity_export_clk_buf_ctrl(enum clk_buf_id id, bool onoff)
++{
++	clk_buf_ctrl(id, onoff);
++}
++EXPORT_SYMBOL(connectivity_export_clk_buf_ctrl);
++
++void connectivity_export_clk_buf_show_status_info(void)
++{
++	clk_buf_show_status_info();
++}
++EXPORT_SYMBOL(connectivity_export_clk_buf_show_status_info);
++
++int connectivity_export_clk_buf_get_xo_en_sta(/*enum xo_id id*/ int id)
++{
++	return clk_buf_get_xo_en_sta(id);
++}
++EXPORT_SYMBOL(connectivity_export_clk_buf_get_xo_en_sta);
++#endif
++
++/*******************************************************************************
++ * PMIC
++ *
++ * The MT6358 regmap from the mfd driver, looked up on first use. Callers are
++ * the consys power-on and power-off paths, which can sleep (they call the
++ * regulator API next to these writes).
++ ******************************************************************************/
++static struct regmap *connadp_pmic_map(void)
++{
++	static struct regmap *map;
++	struct device_node *np;
++	struct platform_device *pdev;
++	struct mt6397_chip *chip;
++
++	if (map)
++		return map;
++	np = of_find_compatible_node(NULL, NULL, "mediatek,mt6358");
++	if (!np)
++		goto fail;
++	pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!pdev)
++		goto fail;
++	chip = platform_get_drvdata(pdev);
++	if (chip && chip->regmap)
++		map = chip->regmap;
++	put_device(&pdev->dev);
++	if (map)
++		return map;
++fail:
++	pr_warn_once(DFT_TAG "[E]%s: MT6358 regmap not found, PMIC writes dropped\n",
++		     __func__);
++	return NULL;
++}
++
++void connectivity_export_pmic_config_interface(unsigned int RegNum,
++		unsigned int val, unsigned int MASK, unsigned int SHIFT)
++{
++	struct regmap *map = connadp_pmic_map();
++
++	if (map)
++		regmap_update_bits(map, RegNum, MASK << SHIFT,
++				   (val & MASK) << SHIFT);
++}
++EXPORT_SYMBOL(connectivity_export_pmic_config_interface);
++
++void connectivity_export_pmic_read_interface(unsigned int RegNum,
++		unsigned int *val, unsigned int MASK, unsigned int SHIFT)
++{
++	struct regmap *map = connadp_pmic_map();
++	unsigned int reg = 0;
++
++	if (map)
++		regmap_read(map, RegNum, &reg);
++	*val = (reg >> SHIFT) & MASK;
++}
++EXPORT_SYMBOL(connectivity_export_pmic_read_interface);
++
++/*
++ * The flags the mt6771 platform file passes (mt6771.c, consys_vcn28_hw_mode_ctrl
++ * and the VCN33 hw mode paths), with addresses from mach/upmu_hw.h. The flag
++ * values are this tree's enum, which the rebuilt modules compile against.
++ */
++struct connadp_pmic_flag {
++	int flag;
++	unsigned int addr;
++	unsigned int mask;
++	unsigned int shift;
++};
++
++#define CONNADP_FLAG(name) { name, name##_ADDR, name##_MASK, name##_SHIFT }
++static const struct connadp_pmic_flag connadp_pmic_flags[] = {
++	CONNADP_FLAG(PMIC_RG_LDO_VCN28_HW0_OP_EN),
++	CONNADP_FLAG(PMIC_RG_LDO_VCN28_HW0_OP_CFG),
++	CONNADP_FLAG(PMIC_RG_LDO_VCN33_HW0_OP_EN),
++	CONNADP_FLAG(PMIC_RG_LDO_VCN33_HW0_OP_CFG),
++};
++
++static const struct connadp_pmic_flag *connadp_find_flag(int flagname)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(connadp_pmic_flags); i++)
++		if (connadp_pmic_flags[i].flag == flagname)
++			return &connadp_pmic_flags[i];
++	pr_warn_once(DFT_TAG "[E]%s: PMIC flag %d not mapped, dropped\n",
++		     __func__, flagname);
++	return NULL;
++}
++
++void connectivity_export_pmic_set_register_value(int flagname, unsigned int val)
++{
++	const struct connadp_pmic_flag *f = connadp_find_flag(flagname);
++
++	if (f)
++		connectivity_export_pmic_config_interface(f->addr, val,
++							  f->mask, f->shift);
++}
++EXPORT_SYMBOL(connectivity_export_pmic_set_register_value);
++
++unsigned short connectivity_export_pmic_get_register_value(int flagname)
++{
++	const struct connadp_pmic_flag *f = connadp_find_flag(flagname);
++	unsigned int val = 0;
++
++	if (f)
++		connectivity_export_pmic_read_interface(f->addr, &val,
++							f->mask, f->shift);
++	return val;
++}
++EXPORT_SYMBOL(connectivity_export_pmic_get_register_value);
++
++/* Whole 16-bit register write, as 4.14 upmu_set_reg_value (mask 0xffff, shift 0). */
++void connectivity_export_upmu_set_reg_value(unsigned int reg,
++		unsigned int reg_val)
++{
++	connectivity_export_pmic_config_interface(reg, reg_val, 0xffff, 0);
++}
++EXPORT_SYMBOL(connectivity_export_upmu_set_reg_value);
++
++/*******************************************************************************
++ * MMC: only the external SDIO combo chips use this; MT6771 connsys is on AHB.
++ ******************************************************************************/
++int connectivity_export_mmc_io_rw_direct(struct mmc_card *card,
++				int write, unsigned int fn,
++				unsigned int addr, u8 in, u8 *out)
++{
++	pr_warn_once(DFT_TAG "[W]%s: no SDIO combo chip support, returns -ENODEV\n",
++		     __func__);
++	return -ENODEV;
++}
++EXPORT_SYMBOL(connectivity_export_mmc_io_rw_direct);
++
++/******************************************************************************
++ * GPIO dump information: no MTK GPIO dump on 5.10.
++ ******************************************************************************/
++void connectivity_export_dump_gpio_info(int start, int end)
++{
++	pr_warn_once(DFT_TAG "[W]%s: no GPIO register dump on this kernel\n",
++		     __func__);
++}
++EXPORT_SYMBOL(connectivity_export_dump_gpio_info);
++
++/* Prints each thread whose name starts with name, with its stack. */
++void connectivity_export_dump_thread_state(const char *name)
++{
++	static const char stat_nam[] = TASK_STATE_TO_CHAR_STR;
++	struct task_struct *p;
++
++	if (name == NULL || strlen(name) > 255) {
++		pr_info("invalid name:%p or thread name too long\n", name);
++		return;
++	}
++
++	pr_info("start to show debug info of %s\n", name);
++
++	rcu_read_lock();
++	for_each_process(p) {
++		unsigned long state;
++
++		if (strncmp(p->comm, name, strlen(name)) != 0)
++			continue;
++		state = p->state;
++		if (state)
++			state = __ffs(state) + 1;
++		pr_info("%d:%-15.15s %c cpu=%d on_cpu=%d\n", p->pid, p->comm,
++			state < sizeof(stat_nam) - 1 ? stat_nam[state] : '?',
++			task_cpu(p), p->on_cpu);
++		sched_show_task(p);
++		break;
++	}
++	rcu_read_unlock();
++}
++EXPORT_SYMBOL(connectivity_export_dump_thread_state);
+--- /dev/null
++++ b/drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.h
+@@ -0,0 +1,287 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef CONNECTIVITY_BUILD_IN_ADAPTER_H
++#define CONNECTIVITY_BUILD_IN_ADAPTER_H
++
++#include <linux/kernel.h>
++#include <linux/sched.h>
++#include <linux/mm.h>
++#include <linux/dma-mapping.h>
++#include <linux/sched/clock.h>
++
++/*******************************************************************************
++ * Clock Buffer Control
++ *
++ * The Connsys adaptation layer must provide Clock Buffer Control support
++ * should it be available from the platform.
++ * Therefore CONNADP_HAS_CLOCK_BUF_CTRL is defined based on platform chip, and
++ * is used to decide if adaptation has support on Clock Buffer Control.
++ *
++ * Each WMT platform file must still define its own CONSYS_CLOCK_BUF_CTRL to
++ * decide if it is a co-clock'd platform.
++ * It is possible that the Clock Buffer Control is available on the platform,
++ * but is not used by Connsys.
++ *
++ * For Kernel-4,4, definition of CONNADP_HAS_CLOCK_BUF_CTRL must align with:
++ *	drivers/misc/mediatek/base/power/include/mtk_clkbuf_ctl.h
++ *
++ * Platform that wishes to use Clock Buffer Control, please be sure to #include
++ * the header file above.
++ ******************************************************************************/
++#if defined(CONFIG_MACH_MT6735) || \
++	defined(CONFIG_MACH_MT6735M) || \
++	defined(CONFIG_MACH_MT6753) || \
++	defined(CONFIG_MACH_MT6739) || \
++	defined(CONFIG_MACH_MT6755) || \
++	defined(CONFIG_MACH_MT6757) || \
++	defined(CONFIG_MACH_MT6758) || \
++	defined(CONFIG_MACH_MT6759) || \
++	defined(CONFIG_MACH_MT6763) || \
++	defined(CONFIG_MACH_MT6775) || \
++	defined(CONFIG_MACH_MT6797) || \
++	defined(CONFIG_MACH_MT6799) || \
++	defined(CONFIG_MACH_MT6580) || \
++	defined(CONFIG_MACH_MT6765) || \
++	defined(CONFIG_MACH_MT6761) || \
++	defined(CONFIG_MACH_MT3967) || \
++	defined(CONFIG_MACH_MT6771) || \
++	defined(CONFIG_MACH_MT6768) || \
++	defined(CONFIG_MACH_MT6785) || \
++	defined(CONFIG_MACH_KIBOPLUS) || \
++	defined(CONFIG_MACH_MT6885) || \
++	defined(CONFIG_MACH_MT6853) || \
++	defined(CONFIG_MACH_MT6873) || \
++	defined(CONFIG_MACH_ELBRUS) || \
++	defined(CONFIG_MACH_MT6893)
++#define CONNADP_HAS_CLOCK_BUF_CTRL
++#define KERNEL_CLK_BUF_CHIP_NOT_SUPPORT -7788
++#define KERNEL_clk_buf_ctrl connectivity_export_clk_buf_ctrl
++#define KERNEL_clk_buf_show_status_info \
++		connectivity_export_clk_buf_show_status_info
++#define KERNEL_clk_buf_get_xo_en_sta \
++		connectivity_export_clk_buf_get_xo_en_sta
++enum clk_buf_id;
++void connectivity_export_clk_buf_ctrl(enum clk_buf_id id, bool onoff);
++void connectivity_export_clk_buf_show_status_info(void);
++int connectivity_export_clk_buf_get_xo_en_sta(/*enum xo_id id*/ int id);
++#endif
++
++/*******************************************************************************
++ * PMIC
++ * Caller please be sure to #include:
++ *	drivers/misc/mediatek/pmic/include/mt6359/mtk_pmic_api_buck.h
++ *	drivers/misc/mediatek/include/mt-plat/upmu_common.h
++ ******************************************************************************/
++#define KERNEL_pmic_config_interface \
++	connectivity_export_pmic_config_interface
++#define KERNEL_pmic_read_interface \
++	connectivity_export_pmic_read_interface
++#define KERNEL_pmic_set_register_value \
++	connectivity_export_pmic_set_register_value
++#define KERNEL_pmic_get_register_value \
++	connectivity_export_pmic_get_register_value
++#define KERNEL_upmu_set_reg_value \
++	connectivity_export_upmu_set_reg_value
++#if defined(CONFIG_MTK_PMIC_CHIP_MT6359) || \
++	defined(CONFIG_MTK_PMIC_CHIP_MT6359P)
++#define KERNEL_pmic_ldo_vcn13_lp \
++	connectivity_export_pmic_ldo_vcn13_lp
++#define KERNEL_pmic_ldo_vcn18_lp \
++	connectivity_export_pmic_ldo_vcn18_lp
++#define KERNEL_pmic_ldo_vfe28_lp \
++	connectivity_export_pmic_ldo_vfe28_lp
++#define KERNEL_pmic_ldo_vcn33_1_lp \
++	connectivity_export_pmic_ldo_vcn33_1_lp
++#define KERNEL_pmic_ldo_vcn33_2_lp \
++	connectivity_export_pmic_ldo_vcn33_2_lp
++#endif
++void connectivity_export_pmic_config_interface(unsigned int RegNum,
++						unsigned int val,
++						unsigned int MASK,
++						unsigned int SHIFT);
++void connectivity_export_pmic_read_interface(unsigned int RegNum,
++						unsigned int *val,
++						unsigned int MASK,
++						unsigned int SHIFT);
++void connectivity_export_pmic_set_register_value(int flagname,
++						unsigned int val);
++unsigned short connectivity_export_pmic_get_register_value(int flagname);
++void connectivity_export_upmu_set_reg_value(unsigned int reg,
++						unsigned int reg_val);
++#if defined(CONFIG_MTK_PMIC_CHIP_MT6359) || \
++	defined(CONFIG_MTK_PMIC_CHIP_MT6359P)
++int connectivity_export_pmic_ldo_vcn13_lp(int user,
++		int op_mode, unsigned char op_en, unsigned char op_cfg);
++int connectivity_export_pmic_ldo_vcn18_lp(int user,
++		int op_mode, unsigned char op_en, unsigned char op_cfg);
++void connectivity_export_pmic_ldo_vfe28_lp(unsigned int user,
++		int op_mode, unsigned char op_en, unsigned char op_cfg);
++int connectivity_export_pmic_ldo_vcn33_1_lp(int user,
++		int op_mode, unsigned char op_en, unsigned char op_cfg);
++int connectivity_export_pmic_ldo_vcn33_2_lp(int user,
++		int op_mode, unsigned char op_en, unsigned char op_cfg);
++#endif
++
++/*******************************************************************************
++ * MMC
++ * Caller please be sure to #include:
++ *	<linux/mmc/host.h>
++ *	<linux/mmc/card.h>
++ *	drivers/mmc/core/sdio_ops.h
++ ******************************************************************************/
++#define KERNEL_mmc_io_rw_direct connectivity_export_mmc_io_rw_direct
++struct mmc_card;
++int connectivity_export_mmc_io_rw_direct(struct mmc_card *card, int write,
++						unsigned int fn,
++						unsigned int addr,
++						u8 in, u8 *out);
++
++/*******************************************************************************
++ * MT6306 I2C-based GPIO Expander
++ ******************************************************************************/
++#ifdef CONFIG_MTK_MT6306_GPIO_SUPPORT
++#define KERNEL_mt6306_set_gpio_out connectivity_export_mt6306_set_gpio_out
++#define KERNEL_mt6306_set_gpio_dir connectivity_export_mt6306_set_gpio_dir
++void connectivity_export_mt6306_set_gpio_out(unsigned long pin,
++						unsigned long output);
++void connectivity_export_mt6306_set_gpio_dir(unsigned long pin,
++						unsigned long dir);
++#endif
++
++
++#ifdef CONFIG_ARCH_MT6570
++#define CPU_BOOST y
++#endif
++#ifdef CONFIG_ARCH_MT6755
++#define CPU_BOOST y
++#endif
++#ifdef CONFIG_MACH_MT6757
++#define CPU_BOOST y
++#endif
++#ifdef CONFIG_MACH_MT6758
++#define CPU_BOOST y
++#endif
++#ifdef CONFIG_MACH_MT6763
++#define CPU_BOOST y
++#endif
++#ifdef CONFIG_MACH_MT6799
++#define CPU_BOOST y
++#endif
++#ifdef CONFIG_MACH_MT6739
++#define CPU_BOOST y
++#endif
++#ifdef CPU_BOOST
++#include "mtk_ppm_api.h"
++#include "mtk_spm_resource_req.h"
++#endif
++
++#define KERNEL_show_stack connectivity_export_show_stack
++#define KERNEL_tracing_record_cmdline connectivity_export_tracing_record_cmdline
++#define KERNEL_dump_thread_state connectivity_export_dump_thread_state
++
++#ifdef CPU_BOOST
++#define KERNEL_mt_ppm_sysboost_freq connectivity_export_mt_ppm_sysboost_freq
++#define KERNEL_mt_ppm_sysboost_core connectivity_export_mt_ppm_sysboost_core
++#define KERNEL_mt_ppm_sysboost_set_core_limit \
++		connectivity_export_mt_ppm_sysboost_set_core_limit
++#define KERNEL_mt_ppm_sysboost_set_freq_limit \
++		connectivity_export_mt_ppm_sysboost_set_freq_limit
++#define KERNEL_spm_resource_req  connectivity_export_spm_resource_req
++#else
++#define KERNEL_mt_ppm_sysboost_freq
++#define KERNEL_mt_ppm_sysboost_core
++#define KERNEL_mt_ppm_sysboost_set_core_limit
++#define KERNEL_mt_ppm_sysboost_set_freq_limit
++#define KERNEL_spm_resource_req
++#endif
++/*
++ * 5.10: show_stack() takes a log level (linux/sched/debug.h) and
++ * tracing_record_cmdline() is in linux/trace_events.h, so the 4.14
++ * prototypes are left out. Callers go through the exports below.
++ */
++#ifdef CPU_BOOST
++extern void mt_ppm_sysboost_freq(enum ppm_sysboost_user user,
++				 unsigned int freq);
++extern void mt_ppm_sysboost_core(enum ppm_sysboost_user user,
++				 unsigned int core_num);
++extern void mt_ppm_sysboost_set_core_limit(enum ppm_sysboost_user user,
++					   unsigned int cluster,
++					   int min_core, int max_core);
++extern void mt_ppm_sysboost_set_freq_limit(enum ppm_sysboost_user user,
++					   unsigned int cluster,
++					   int min_freq, int max_freq);
++extern bool spm_resource_req(unsigned int user, unsigned int req_mask);
++#endif
++
++void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);
++void connectivity_export_dump_thread_state(const char *name);
++void connectivity_export_tracing_record_cmdline(struct task_struct *tsk);
++#ifdef CPU_BOOST
++void connectivity_export_mt_ppm_sysboost_freq(enum ppm_sysboost_user user,
++					      unsigned int freq);
++void connectivity_export_mt_ppm_sysboost_core(enum ppm_sysboost_user user,
++					      unsigned int core_num);
++void connectivity_export_mt_ppm_sysboost_set_core_limit(
++				enum ppm_sysboost_user user,
++				unsigned int cluster,
++				int min_core, int max_core);
++void connectivity_export_mt_ppm_sysboost_set_freq_limit(
++				enum ppm_sysboost_user user,
++				unsigned int cluster,
++				int min_freq, int max_freq);
++bool connectivity_export_spm_resource_req(unsigned int user,
++				unsigned int req_mask);
++#endif
++
++/*********************************************
++ * copy from
++ * kernel-3.18/include/linux/ftrace_event.h
++ * kernel-4.4/include/linux/trace_events.h
++ *
++ * event_trace_printk()
++ *********************************************/
++#ifndef CONFIG_MACH_MT6739
++#define KERNEL_event_trace_printk(ip, fmt, args...)               \
++do {                                                              \
++	__trace_printk_check_format(fmt, ##args);                 \
++	KERNEL_tracing_record_cmdline(current);                   \
++	if (__builtin_constant_p(fmt)) {                          \
++		static const char *trace_printk_fmt               \
++		__attribute__((section("__trace_printk_fmt"))) =  \
++		__builtin_constant_p(fmt) ? fmt : NULL;           \
++		__trace_bprintk(ip, trace_printk_fmt, ##args);    \
++	} else                                                    \
++		__trace_printk(ip, fmt, ##args);                  \
++} while (0)
++#endif
++/******************************************************************************
++ * GPIO dump information
++ ******************************************************************************/
++#ifndef CONFIG_MTK_GPIO
++#define KERNEL_gpio_dump_regs_range connectivity_export_dump_gpio_info
++extern void gpio_dump_regs_range(int start, int end);
++void connectivity_export_dump_gpio_info(int start, int end);
++#endif
++
++int connectivity_export_gpio_get_tristate_input(unsigned int pin);
++
++#if defined(CONFIG_MACH_MT8167)
++#define CONNADP_HAS_UPMU_VCN_CTRL
++#define KERNEL_upmu_set_vcn35_on_ctrl_bt conn_upmu_set_vcn35_on_ctrl_bt
++#define KERNEL_upmu_set_vcn35_on_ctrl_wifi conn_upmu_set_vcn35_on_ctrl_wifi
++void conn_upmu_set_vcn35_on_ctrl_bt(unsigned int val);
++void conn_upmu_set_vcn35_on_ctrl_wifi(unsigned int val);
++#endif
++
++#endif /* CONNECTIVITY_BUILD_IN_ADAPTER_H */
+--- /dev/null
++++ b/drivers/misc/mediatek/connectivity/common/connectivity_platform_stubs.c
+@@ -0,0 +1,189 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Kernel symbols the stock connectivity modules import from drivers this
++ * 5.10 tree doesn't have: clock buffer control, aee, the conn_md LTE coex
++ * bridge (unless conn_md is built), the CPU boost and printk-too-much
++ * controls. Each logs once what is missing. emi_mpu_set_protection comes
++ * from emi/mt6771/emi_mpu.c (CONFIG_MTK_EMI). The prototypes
++ * are the stock 4.14 ones, which the modules are built against.
++ */
++
++#define pr_fmt(fmt) "connadp: " fmt
++
++#include <linux/export.h>
++#include <linux/kernel.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/mfd/mt6397/core.h>
++
++#include <mtk_clkbuf_ctl.h>
++#include <upmu_common.h>
++#include <aee.h>
++
++/*******************************************************************************
++ * Clock buffers (4.14 clkbuf_v1/mt6771)
++ *
++ * On 4.14, clk_buf_ctrl() for CLK_BUF_CONN and CLK_BUF_NFC writes no register
++ * while the buffer is under SW control with the co-clock flag set: it records
++ * the caller's state for the BBLPM decision. The modes themselves are set by
++ * clk_buf_init at boot, which this tree doesn't have, so the XO_WCN and
++ * XO_NFC modes are whatever the bootloader left. This keeps the recorded state
++ * and prints the DCXO registers so a device test can see them.
++ ******************************************************************************/
++/* Written with WRITE_ONCE: 4.14 callers may be atomic, so no lock. */
++static bool clkbuf_swctrl[XO_NUMBER];
++
++static struct regmap *clkbuf_pmic_map(void)
++{
++	struct device_node *np;
++	struct platform_device *pdev;
++	struct mt6397_chip *chip;
++	struct regmap *map = NULL;
++
++	np = of_find_compatible_node(NULL, NULL, "mediatek,mt6358");
++	if (!np)
++		return NULL;
++	pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!pdev)
++		return NULL;
++	chip = platform_get_drvdata(pdev);
++	if (chip)
++		map = chip->regmap;
++	put_device(&pdev->dev);
++	return map;
++}
++
++bool clk_buf_ctrl(enum clk_buf_id id, bool onoff)
++{
++	pr_warn_once("clk_buf_ctrl: no clkbuf driver, XO modes left as the bootloader set them; state recorded only\n");
++	switch (id) {
++	case CLK_BUF_CONN:
++		WRITE_ONCE(clkbuf_swctrl[XO_WCN], onoff);
++		return true;
++	case CLK_BUF_NFC:
++		WRITE_ONCE(clkbuf_swctrl[XO_NFC], onoff);
++		return true;
++	default:
++		pr_info("%s: id=%d isn't supported\n", __func__, id);
++		return false;
++	}
++}
++EXPORT_SYMBOL(clk_buf_ctrl);
++
++/*
++ * XO enable status from the DCXO debug mux, as 4.14 clk_buf_get_xo_en(): write
++ * the select to CW18[5:0], read CW19. Select 5 holds SOC (bit 0) and WCN (bit 6),
++ * 6 holds NFC (0), CEL (6) and EXT (12), 7 holds PD (6); AUD isn't read on 4.14.
++ * Sleeps (regmap over pwrap); the mutex keeps the select and read together.
++ */
++static const struct { u8 sel, bit; } xo_en_auxout[XO_NUMBER] = {
++	[XO_SOC] = { 5, 0 }, [XO_WCN] = { 5, 6 }, [XO_NFC] = { 6, 0 },
++	[XO_CEL] = { 6, 6 }, [XO_AUD] = { 0, 0 }, [XO_PD] = { 7, 6 },
++	[XO_EXT] = { 6, 12 },
++};
++static DEFINE_MUTEX(xo_en_lock);
++
++u8 clk_buf_get_xo_en_sta(enum xo_id id)
++{
++	struct regmap *map;
++	unsigned int auxout = 0;
++	int ret;
++
++	if (id < 0 || id >= XO_NUMBER || !xo_en_auxout[id].sel)
++		return 0;
++	map = clkbuf_pmic_map();
++	if (!map) {
++		pr_warn_once("clk_buf_get_xo_en_sta: no MT6358 regmap, recorded state only\n");
++		return clkbuf_swctrl[id];
++	}
++	mutex_lock(&xo_en_lock);
++	ret = regmap_update_bits(map, PMIC_XO_STATIC_AUXOUT_SEL_ADDR,
++				 PMIC_XO_STATIC_AUXOUT_SEL_MASK << PMIC_XO_STATIC_AUXOUT_SEL_SHIFT,
++				 xo_en_auxout[id].sel << PMIC_XO_STATIC_AUXOUT_SEL_SHIFT);
++	if (!ret)
++		ret = regmap_read(map, PMIC_XO_STATIC_AUXOUT_ADDR, &auxout);
++	mutex_unlock(&xo_en_lock);
++	if (ret)
++		return clkbuf_swctrl[id];
++	return (auxout >> (PMIC_XO_STATIC_AUXOUT_SHIFT + xo_en_auxout[id].bit)) & 1;
++}
++EXPORT_SYMBOL(clk_buf_get_xo_en_sta);
++
++void clk_buf_show_status_info(void)
++{
++	struct regmap *map = clkbuf_pmic_map();
++	unsigned int cw00 = 0, cw11 = 0;
++
++	if (map) {
++		regmap_read(map, MT6358_DCXO_CW00, &cw00);
++		regmap_read(map, MT6358_DCXO_CW11, &cw11);
++	}
++	pr_info("%s CW00=0x%x, CW11=0x%x, swctrl WCN %u NFC %u%s\n", __func__,
++		cw00, cw11, clkbuf_swctrl[XO_WCN], clkbuf_swctrl[XO_NFC],
++		map ? "" : " (no MT6358 regmap)");
++}
++EXPORT_SYMBOL(clk_buf_show_status_info);
++
++/*******************************************************************************
++ * aee: no AEE on this kernel. The other aee calls are inlines in aee.h.
++ ******************************************************************************/
++void aed_combo_exception_api(const int *log, int log_size, const int *phy,
++			     int phy_size, const char *detail, const int db_opt)
++{
++	pr_warn_once("aed_combo_exception_api: no AEE, connsys core dump not saved\n");
++	if (detail)
++		pr_info("combo exception: %s\n", detail);
++}
++EXPORT_SYMBOL(aed_combo_exception_api);
++
++/*******************************************************************************
++ * conn_md: the LTE coex (IDC) bridge to the modem, when conn_md isn't built.
++ * With CONFIG_MTK_CONN_MD the real bridge (drivers/misc/mediatek/conn_md)
++ * exports these.
++ ******************************************************************************/
++#if !IS_ENABLED(CONFIG_MTK_CONN_MD)
++struct ipc_ilm;
++struct conn_md_bridge_ops;
++
++int mtk_conn_md_bridge_reg(unsigned int u_id, struct conn_md_bridge_ops *p_ops)
++{
++	pr_warn_once("mtk_conn_md_bridge_reg: no modem bridge, LTE coex off\n");
++	return -1;
++}
++EXPORT_SYMBOL(mtk_conn_md_bridge_reg);
++
++int mtk_conn_md_bridge_unreg(unsigned int u_id)
++{
++	return 0;
++}
++EXPORT_SYMBOL(mtk_conn_md_bridge_unreg);
++
++int mtk_conn_md_bridge_send_msg(struct ipc_ilm *ilm)
++{
++	pr_warn_once("mtk_conn_md_bridge_send_msg: no modem bridge, message dropped\n");
++	return -1;
++}
++EXPORT_SYMBOL(mtk_conn_md_bridge_send_msg);
++#endif
++
++/*******************************************************************************
++ * CPU boost (cpu_ctrl, PPM) and the printk-too-much switch, both 4.14 only.
++ ******************************************************************************/
++struct ppm_limit_data;
++int update_userlimit_cpu_freq(int kicker, int num_cluster,
++			      struct ppm_limit_data *freq_limit)
++{
++	pr_warn_once("update_userlimit_cpu_freq: no PPM, Wi-Fi CPU boost ignored\n");
++	return 0;
++}
++EXPORT_SYMBOL(update_userlimit_cpu_freq);
++
++void set_logtoomuch_enable(int value)
++{
++	pr_warn_once("set_logtoomuch_enable: no printk-too-much detection, ignored\n");
++}
++EXPORT_SYMBOL(set_logtoomuch_enable);
+--- /dev/null
++++ b/drivers/misc/mediatek/connectivity/common/wmt_build_in_adapter.c
+@@ -0,0 +1,311 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++/*#define pr_fmt(fmt) KBUILD_MODNAME ": %s: " fmt, __func__*/
++#include <linux/kernel.h>
++
++#include "wmt_build_in_adapter.h"
++
++/*device tree mode*/
++#ifdef CONFIG_OF
++#include <linux/of.h>
++#include <linux/of_irq.h>
++#include <linux/irqreturn.h>
++#include <linux/of_address.h>
++#endif
++
++#include <linux/interrupt.h>
++#include <linux/ratelimit.h>
++
++#define CONNADP_LOG_LOUD    4
++#define CONNADP_LOG_DBG     3
++#define CONNADP_LOG_INFO    2
++#define CONNADP_LOG_WARN    1
++#define CONNADP_LOG_ERR     0
++
++#if defined(CONFIG_MACH_MT6873)
++#include <clk-mt6873-pg.h>
++#define DUMP_CLOCK_FAIL_CALLBACK 1
++#endif
++
++/*******************************************************************************
++ * Connsys adaptation layer logging utility
++ ******************************************************************************/
++static unsigned int gConnAdpDbgLvl = CONNADP_LOG_INFO;
++
++#define CONNADP_LOUD_FUNC(fmt, arg...) \
++do { \
++	if (gConnAdpDbgLvl >= CONNADP_LOG_LOUD) \
++		pr_info("[L]%s:"  fmt, __func__, ##arg); \
++} while (0)
++#define CONNADP_DBG_FUNC(fmt, arg...) \
++do { \
++	if (gConnAdpDbgLvl >= CONNADP_LOG_DBG) \
++		pr_info("[D]%s:"  fmt, __func__, ##arg); \
++} while (0)
++#define CONNADP_INFO_FUNC(fmt, arg...)  \
++do { \
++	if (gConnAdpDbgLvl >= CONNADP_LOG_INFO) \
++		pr_info("[I]%s:"  fmt, __func__, ##arg); \
++} while (0)
++#define CONNADP_WARN_FUNC(fmt, arg...) \
++do { \
++	if (gConnAdpDbgLvl >= CONNADP_LOG_WARN) \
++		pr_info("[W]%s:"  fmt, __func__, ##arg); \
++} while (0)
++#define CONNADP_ERR_FUNC(fmt, arg...) \
++do { \
++	if (gConnAdpDbgLvl >= CONNADP_LOG_ERR) \
++		pr_info("[E]%s(%d):"  fmt, __func__, __LINE__, ##arg); \
++} while (0)
++
++
++/*******************************************************************************
++ * Bridging from platform -> wmt_drv.ko
++ ******************************************************************************/
++static struct wmt_platform_bridge bridge;
++
++#ifdef DUMP_CLOCK_FAIL_CALLBACK
++static void wmt_clock_debug_dump(enum subsys_id sys)
++{
++	if (sys == SYS_CONN)
++		mtk_wcn_cmb_stub_clock_fail_dump();
++}
++
++static struct pg_callbacks wmt_clk_subsys_handle = {
++	.debug_dump = wmt_clock_debug_dump
++};
++#endif
++
++void wmt_export_platform_bridge_register(struct wmt_platform_bridge *cb)
++{
++	if (unlikely(!cb))
++		return;
++	bridge.thermal_query_cb = cb->thermal_query_cb;
++	bridge.trigger_assert_cb = cb->trigger_assert_cb;
++	bridge.clock_fail_dump_cb = cb->clock_fail_dump_cb;
++	bridge.conninfra_reg_readable_cb = cb->conninfra_reg_readable_cb;
++	bridge.conninfra_reg_is_bus_hang_cb = cb->conninfra_reg_is_bus_hang_cb;
++#ifdef DUMP_CLOCK_FAIL_CALLBACK
++	register_pg_callback(&wmt_clk_subsys_handle);
++#endif
++	CONNADP_INFO_FUNC("\n");
++}
++EXPORT_SYMBOL(wmt_export_platform_bridge_register);
++
++void wmt_export_platform_bridge_unregister(void)
++{
++	memset(&bridge, 0, sizeof(struct wmt_platform_bridge));
++	CONNADP_INFO_FUNC("\n");
++}
++EXPORT_SYMBOL(wmt_export_platform_bridge_unregister);
++
++int mtk_wcn_cmb_stub_query_ctrl(void)
++{
++	CONNADP_DBG_FUNC("\n");
++	if (unlikely(!bridge.thermal_query_cb)) {
++		CONNADP_WARN_FUNC("Thermal query not registered\n");
++		return -1;
++	} else
++		return bridge.thermal_query_cb();
++}
++
++int mtk_wcn_cmb_stub_trigger_assert(void)
++{
++	CONNADP_DBG_FUNC("\n");
++	/* dump backtrace for checking assert reason */
++	dump_stack();
++	if (unlikely(!bridge.trigger_assert_cb)) {
++		CONNADP_WARN_FUNC("Trigger assert not registered\n");
++		return -1;
++	} else
++		return bridge.trigger_assert_cb();
++}
++
++void mtk_wcn_cmb_stub_clock_fail_dump(void)
++{
++	CONNADP_DBG_FUNC("\n");
++	if (unlikely(!bridge.clock_fail_dump_cb))
++		CONNADP_WARN_FUNC("Clock fail dump not registered\n");
++	else
++		bridge.clock_fail_dump_cb();
++}
++
++int mtk_wcn_conninfra_reg_readable(void)
++{
++	static DEFINE_RATELIMIT_STATE(_rs, 5*HZ, 1);
++
++	if (unlikely(!bridge.conninfra_reg_readable_cb)) {
++		if (__ratelimit(&_rs))
++			CONNADP_WARN_FUNC("reg_readable not registered\n");
++		return -1;
++	} else
++		return bridge.conninfra_reg_readable_cb();
++}
++
++int mtk_wcn_conninfra_is_bus_hang(void)
++{
++	static DEFINE_RATELIMIT_STATE(_rs, 5*HZ, 1);
++
++	if (unlikely(!bridge.conninfra_reg_is_bus_hang_cb)) {
++		if (__ratelimit(&_rs))
++			CONNADP_WARN_FUNC("is_bus_hang not registered\n");
++		return -1;
++	} else
++		return bridge.conninfra_reg_is_bus_hang_cb();
++}
++
++
++/*******************************************************************************
++ * SDIO integration with platform MMC driver
++ ******************************************************************************/
++static void mtk_wcn_cmb_sdio_request_eirq(msdc_sdio_irq_handler_t irq_handler,
++					  void *data);
++static void mtk_wcn_cmb_sdio_enable_eirq(void);
++static void mtk_wcn_cmb_sdio_disable_eirq(void);
++static void mtk_wcn_cmb_sdio_register_pm(pm_callback_t pm_cb, void *data);
++
++struct sdio_ops mt_sdio_ops[4] = {
++	{NULL, NULL, NULL, NULL},
++	{NULL, NULL, NULL, NULL},
++	{mtk_wcn_cmb_sdio_request_eirq, mtk_wcn_cmb_sdio_enable_eirq,
++		mtk_wcn_cmb_sdio_disable_eirq, mtk_wcn_cmb_sdio_register_pm},
++	{mtk_wcn_cmb_sdio_request_eirq, mtk_wcn_cmb_sdio_enable_eirq,
++		mtk_wcn_cmb_sdio_disable_eirq, mtk_wcn_cmb_sdio_register_pm}
++};
++
++static atomic_t sdio_claim_irq_enable_flag;
++static atomic_t irq_enable_flag;
++
++static msdc_sdio_irq_handler_t mtk_wcn_cmb_sdio_eirq_handler;
++static void *mtk_wcn_cmb_sdio_eirq_data;
++
++unsigned int wifi_irq = 0xffffffff;
++EXPORT_SYMBOL(wifi_irq);
++
++pm_callback_t mtk_wcn_cmb_sdio_pm_cb;
++EXPORT_SYMBOL(mtk_wcn_cmb_sdio_pm_cb);
++
++void *mtk_wcn_cmb_sdio_pm_data;
++EXPORT_SYMBOL(mtk_wcn_cmb_sdio_pm_data);
++
++static int _mtk_wcn_sdio_irq_flag_set(int flag)
++{
++	if (flag != 0)
++		atomic_set(&sdio_claim_irq_enable_flag, 1);
++	else
++		atomic_set(&sdio_claim_irq_enable_flag, 0);
++
++	CONNADP_DBG_FUNC("sdio_claim_irq_enable_flag:%d\n",
++			atomic_read(&sdio_claim_irq_enable_flag));
++
++	return atomic_read(&sdio_claim_irq_enable_flag);
++}
++
++int wmt_export_mtk_wcn_sdio_irq_flag_set(int flag)
++{
++	return _mtk_wcn_sdio_irq_flag_set(flag);
++}
++EXPORT_SYMBOL(wmt_export_mtk_wcn_sdio_irq_flag_set);
++
++static irqreturn_t mtk_wcn_cmb_sdio_eirq_handler_stub(int irq, void *data)
++{
++	if ((mtk_wcn_cmb_sdio_eirq_handler != NULL) &&
++	    (atomic_read(&sdio_claim_irq_enable_flag) != 0))
++		mtk_wcn_cmb_sdio_eirq_handler(mtk_wcn_cmb_sdio_eirq_data);
++	return IRQ_HANDLED;
++}
++
++void mtk_wcn_cmb_sdio_request_eirq_by_wmt(void)
++{
++#ifdef CONFIG_OF
++	int ret = -EINVAL;
++	struct device_node *node;
++
++	CONNADP_INFO_FUNC("enter\n");
++	_mtk_wcn_sdio_irq_flag_set(0);
++	atomic_set(&irq_enable_flag, 1);
++
++	node = (struct device_node *)of_find_compatible_node(NULL, NULL,
++					"mediatek,connectivity-combo");
++	if (node) {
++		wifi_irq = irq_of_parse_and_map(node, 0);/* get wifi eint num */
++		ret = request_irq(wifi_irq, mtk_wcn_cmb_sdio_eirq_handler_stub,
++				IRQF_TRIGGER_LOW, "WIFI-eint", NULL);
++		CONNADP_DBG_FUNC("WIFI EINT irq %d !!\n", wifi_irq);
++
++		if (ret)
++			CONNADP_WARN_FUNC("WIFI EINT LINE NOT AVAILABLE!!\n");
++		else
++			mtk_wcn_cmb_sdio_disable_eirq();/*state:power off*/
++	} else
++		CONNADP_WARN_FUNC("can't find connectivity compatible node\n");
++
++	CONNADP_INFO_FUNC("exit\n");
++	return;
++#endif
++}
++EXPORT_SYMBOL(mtk_wcn_cmb_sdio_request_eirq_by_wmt);
++
++static void mtk_wcn_cmb_sdio_request_eirq(msdc_sdio_irq_handler_t irq_handler,
++					  void *data)
++{
++#ifdef CONFIG_OF
++	CONNADP_INFO_FUNC("enter\n");
++	mtk_wcn_cmb_sdio_eirq_data = data;
++	mtk_wcn_cmb_sdio_eirq_handler = irq_handler;
++
++	CONNADP_INFO_FUNC("exit\n");
++#else
++	CONNADP_ERR_FUNC("not implemented\n");
++#endif
++}
++
++static void mtk_wcn_cmb_sdio_register_pm(pm_callback_t pm_cb, void *data)
++{
++	CONNADP_DBG_FUNC("cmb_sdio_register_pm (0x%p, 0x%p)\n", pm_cb, data);
++	/* register pm change callback */
++	mtk_wcn_cmb_sdio_pm_cb = pm_cb;
++	mtk_wcn_cmb_sdio_pm_data = data;
++}
++
++static void mtk_wcn_cmb_sdio_enable_eirq(void)
++{
++	if (atomic_read(&irq_enable_flag))
++		CONNADP_DBG_FUNC("wifi eint has been enabled\n");
++	else {
++		atomic_set(&irq_enable_flag, 1);
++		if (wifi_irq != 0xffffffff) {
++			enable_irq(wifi_irq);
++			CONNADP_DBG_FUNC(" enable WIFI EINT %d!\n", wifi_irq);
++		}
++	}
++}
++
++static void mtk_wcn_cmb_sdio_disable_eirq(void)
++{
++	if (!atomic_read(&irq_enable_flag))
++		CONNADP_DBG_FUNC("wifi eint has been disabled!\n");
++	else {
++		if (wifi_irq != 0xffffffff) {
++			disable_irq_nosync(wifi_irq);
++			CONNADP_DBG_FUNC("disable WIFI EINT %d!\n", wifi_irq);
++		}
++		atomic_set(&irq_enable_flag, 0);
++	}
++}
++
++void wmt_export_mtk_wcn_cmb_sdio_disable_eirq(void)
++{
++	mtk_wcn_cmb_sdio_disable_eirq();
++}
++EXPORT_SYMBOL(wmt_export_mtk_wcn_cmb_sdio_disable_eirq);
+--- /dev/null
++++ b/drivers/misc/mediatek/connectivity/common/wmt_build_in_adapter.h
+@@ -0,0 +1,57 @@
++/*
++ * Copyright (C) 2016 MediaTek Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See http://www.gnu.org/licenses/gpl-2.0.html for more details.
++ */
++
++#ifndef WMT_BUILD_IN_ADAPTER_H
++#define WMT_BUILD_IN_ADAPTER_H
++
++#include <mtk_wcn_cmb_stub.h>
++
++#define KERNEL_mtk_wcn_cmb_sdio_request_eirq \
++		mtk_wcn_cmb_sdio_request_eirq_by_wmt
++void mtk_wcn_cmb_sdio_request_eirq_by_wmt(void);
++
++/*******************************************************************************
++ * Bridging from platform -> wmt_drv.ko
++ ******************************************************************************/
++typedef int (*wmt_bridge_thermal_query_cb)(void);
++typedef int (*wmt_bridge_trigger_assert_cb)(void);
++typedef void (*wmt_bridge_connsys_clock_fail_dump_cb)(void);
++
++typedef int (*wmt_bridge_conninfra_reg_readable)(void);
++typedef int (*wmt_bridge_conninfra_reg_is_bus_hang)(void);
++
++struct wmt_platform_bridge {
++	wmt_bridge_thermal_query_cb thermal_query_cb;
++	wmt_bridge_trigger_assert_cb trigger_assert_cb;
++	wmt_bridge_connsys_clock_fail_dump_cb clock_fail_dump_cb;
++
++	/* for CONNAC 2 */
++	wmt_bridge_conninfra_reg_readable conninfra_reg_readable_cb;
++	wmt_bridge_conninfra_reg_is_bus_hang conninfra_reg_is_bus_hang_cb;
++};
++
++void wmt_export_platform_bridge_register(struct wmt_platform_bridge *cb);
++void wmt_export_platform_bridge_unregister(void);
++
++
++/*******************************************************************************
++ * SDIO integration with platform MMC driver
++ ******************************************************************************/
++extern unsigned int wifi_irq;
++extern pm_callback_t mtk_wcn_cmb_sdio_pm_cb;
++extern void *mtk_wcn_cmb_sdio_pm_data;
++
++void wmt_export_mtk_wcn_cmb_sdio_disable_eirq(void);
++int wmt_export_mtk_wcn_sdio_irq_flag_set(int flag);
++
++#endif /* WMT_BUILD_IN_ADAPTER_H */
+--- /dev/null
++++ b/drivers/misc/mediatek/include/mt-plat/mtk_wcn_cmb_stub.h
+@@ -0,0 +1,203 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++/*! \file
++ *   \brief  Declaration of library functions
++ *
++ *   Any definitions in this file will be shared among GLUE Layer
++ *   and internal Driver Stack.
++ */
++
++#ifndef _MTK_WCN_CMB_STUB_H_
++#define _MTK_WCN_CMB_STUB_H_
++
++#include <linux/pm.h>
++
++/*******************************************************************************
++ *                        C O M P I L E R   F L A G S
++ *******************************************************************************
++ */
++
++/*******************************************************************************
++ *                                M A C R O S
++ *******************************************************************************
++ */
++/* Audio GPIO naming style for 73/75/77 */
++/* #define MTK_WCN_CMB_AUD_IO_NAMING_STYLE_0 1 */
++/* Audio GPIO naming style for 89/8135 */
++/* #define MTK_WCN_CMB_AUD_IO_NAMING_STYLE_1 1 */
++/* Audio GPIO naming style for 6592 */
++/* #define MTK_WCN_CMB_AUD_IO_NAMING_STYLE_2 1 */
++/* Audio GPIO naming style for 6595 */
++#define MTK_WCN_CMB_AUD_IO_NAMING_STYLE_3 1
++#define MTK_WCN_CMB_FOR_SDIO_1V_AUTOK 1
++
++/*******************************************************************************
++ *                   E X T E R N A L   R E F E R E N C E S
++ *******************************************************************************
++ */
++
++/*******************************************************************************
++ *                             C O N S T A N T S
++ *******************************************************************************
++ */
++
++/*******************************************************************************
++ *                            D A T A   T Y P E S
++ *******************************************************************************
++ */
++enum CMB_STUB_AIF_X {
++	CMB_STUB_AIF_0 = 0,	/* 0000: BT_PCM_OFF & FM analog (line in/out) */
++	CMB_STUB_AIF_1 = 1,	/* 0001: BT_PCM_ON & FM analog (in/out) */
++	CMB_STUB_AIF_2 = 2,	/* 0010: BT_PCM_OFF & FM digital (I2S) */
++	CMB_STUB_AIF_3 = 3,	/* 0011: BT_PCM_ON & FM digital (I2S) */
++				/* invalid in 73evb & 1.2 phone configuration */
++	CMB_STUB_AIF_4 = 4,	/* 0100: BT_I2S & FM disable */
++				/* in special projects, e.g. protea */
++	CMB_STUB_AIF_MAX = 5,
++};
++
++/*COMBO_CHIP_AUDIO_PIN_CTRL*/
++enum CMB_STUB_AIF_CTRL {
++	CMB_STUB_AIF_CTRL_DIS = 0,
++	CMB_STUB_AIF_CTRL_EN = 1,
++	CMB_STUB_AIF_CTRL_MAX = 2,
++};
++
++enum COMBO_FUNC_TYPE {
++	COMBO_FUNC_TYPE_BT = 0,
++	COMBO_FUNC_TYPE_FM = 1,
++	COMBO_FUNC_TYPE_GPS = 2,
++	COMBO_FUNC_TYPE_WIFI = 3,
++	COMBO_FUNC_TYPE_WMT = 4,
++	COMBO_FUNC_TYPE_STP = 5,
++	COMBO_FUNC_TYPE_NUM = 6
++};
++
++enum COMBO_IF {
++	COMBO_IF_UART = 0,
++	COMBO_IF_MSDC = 1,
++	COMBO_IF_BTIF = 2,
++	COMBO_IF_MAX,
++};
++
++typedef void (*wmt_bgf_eirq_cb) (void);
++typedef int (*wmt_aif_ctrl_cb) (enum CMB_STUB_AIF_X, enum CMB_STUB_AIF_CTRL);
++typedef void (*wmt_func_ctrl_cb) (unsigned int, unsigned int);
++typedef signed long (*wmt_thermal_query_cb) (void);
++typedef int (*wmt_trigger_assert_cb) (void);
++typedef int (*wmt_deep_idle_ctrl_cb) (unsigned int);
++typedef int (*wmt_func_do_reset) (unsigned int);
++
++/* for DVFS driver do 1v autok */
++#if MTK_WCN_CMB_FOR_SDIO_1V_AUTOK
++typedef unsigned int (*wmt_get_drv_status)(unsigned int);
++#endif
++typedef void (*wmt_clock_fail_dump_cb) (void);
++
++typedef void (*msdc_sdio_irq_handler_t) (void *); /* external irq handler */
++typedef void (*pm_callback_t) (pm_message_t state, void *data);
++
++struct sdio_ops {
++	void (*sdio_request_eirq)(msdc_sdio_irq_handler_t irq_handler,
++			void *data);
++	void (*sdio_enable_eirq)(void);
++	void (*sdio_disable_eirq)(void);
++	void (*sdio_register_pm)(pm_callback_t pm_cb, void *data);
++};
++
++struct _CMB_STUB_CB_ {
++	unsigned int size;	/* structure size */
++	/*wmt_bgf_eirq_cb bgf_eirq_cb; */
++	/* remove bgf_eirq_cb from stub. handle it in platform */
++	wmt_aif_ctrl_cb aif_ctrl_cb;
++	wmt_func_ctrl_cb func_ctrl_cb;
++	wmt_thermal_query_cb thermal_query_cb;
++	wmt_trigger_assert_cb trigger_assert_cb;
++	wmt_deep_idle_ctrl_cb deep_idle_ctrl_cb;
++	wmt_func_do_reset wmt_do_reset_cb;
++#if MTK_WCN_CMB_FOR_SDIO_1V_AUTOK
++	wmt_get_drv_status get_drv_status_cb;
++#endif
++	wmt_clock_fail_dump_cb clock_fail_dump_cb;
++};
++
++/*******************************************************************************
++ *                           P U B L I C   D A T A
++ *******************************************************************************
++ */
++
++/*******************************************************************************
++ *                          P R I V A T E   D A T A
++ *******************************************************************************
++ */
++
++/*******************************************************************************
++ *                 F U N C T I O N   D E C L A R A T I O N S
++ *******************************************************************************
++ */
++
++extern struct sdio_ops mt_sdio_ops[4];
++
++extern int mtk_wcn_cmb_stub_reg(struct _CMB_STUB_CB_ *p_stub_cb);
++extern int mtk_wcn_cmb_stub_unreg(void);
++
++extern int mtk_wcn_cmb_stub_aif_ctrl(enum CMB_STUB_AIF_X state,
++		enum CMB_STUB_AIF_CTRL ctrl);
++
++static inline int mtk_wcn_cmb_stub_audio_ctrl(enum CMB_STUB_AIF_X state)
++{
++/* return mtk_wcn_cmb_stub_aif_ctrl(state, 1); */
++	return 0;
++}
++
++extern int mt_combo_plt_enter_deep_idle(enum COMBO_IF src);
++extern int mt_combo_plt_exit_deep_idle(enum COMBO_IF src);
++
++/* Use new mtk_wcn_stub APIs instead of old mt_combo ones for kernel to control
++ * function on/off.
++ */
++extern void mtk_wcn_cmb_stub_func_ctrl(unsigned int type, unsigned int on);
++extern int mtk_wcn_cmb_stub_query_ctrl(void);
++extern int mtk_wcn_cmb_stub_trigger_assert(void);
++extern void mtk_wcn_cmb_stub_clock_fail_dump(void);
++
++
++extern int mtk_wcn_conninfra_reg_readable(void);
++extern int mtk_wcn_conninfra_is_bus_hang(void);
++
++extern int board_sdio_ctrl(unsigned int sdio_port_num, unsigned int on);
++extern int mtk_wcn_sdio_irq_flag_set(int falg);
++
++#if MTK_WCN_CMB_FOR_SDIO_1V_AUTOK
++extern int mtk_wcn_cmb_stub_1vautok_for_dvfs(void);
++#endif
++
++extern int mtk_wcn_wmt_chipid_query(void);
++extern void mtk_wcn_wmt_set_chipid(int chipid);
++
++/* mtk_uart_pdn_enable -- request uart port enter/exit deep idle mode,
++ * this API is defined in uart driver
++ *
++ * @ port - uart port name, Eg: "ttyMT0", "ttyMT1", "ttyMT2"
++ * @ enable - "1", enable deep idle; "0", disable deep idle
++ *
++ * Return 0 if success, else -1
++ */
++extern unsigned int mtk_uart_pdn_enable(char *port, int enable);
++/*******************************************************************************
++ *                             F U N C T I O N S
++ *******************************************************************************
++ */
++
++#endif /* _MTK_WCN_CMB_STUB_H_ */
+--- /dev/null
++++ b/drivers/misc/mediatek/base/power/include/clkbuf_v1/mtk_clkbuf_ctl.h
+@@ -0,0 +1,82 @@
++/*
++ * Copyright (C) 2015 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++/**
++ * @file    mtk_clk_buf_ctl.h
++ * @brief   Driver for clock buffer control
++ *
++ */
++#ifndef __MTK_CLK_BUF_CTL_H__
++#define __MTK_CLK_BUF_CTL_H__
++
++#include <linux/kernel.h>
++#include <linux/mutex.h>
++
++#if defined(CONFIG_MACH_ELBRUS) || defined(CONFIG_MACH_MT6799)
++#include "mt6799/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6775)
++#include "mt6775/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6758)
++#include "mt6758/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6759)
++#include "mt6759/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6763)
++#include "mt6763/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6739)
++#include "mt6739/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6771)
++#include "mt6771/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6765)
++#include "mt6765/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6768)
++#include "mt6768/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6785)
++#include "mt6785/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT8168)
++#include "mt8168/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6873)
++#include "mt6873/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6885) || defined(CONFIG_MACH_MT6893)
++#include "mt6885/mtk_clkbuf_hw.h"
++#elif defined(CONFIG_MACH_MT6853) || defined(CONFIG_MACH_MT6833)
++#include "mt6853/mtk_clkbuf_hw.h"
++#endif
++
++enum CLK_BUF_SWCTRL_STATUS_T {
++	CLK_BUF_SW_DISABLE = 0,
++	CLK_BUF_SW_ENABLE  = 1,
++};
++
++#define CLKBUF_NUM      XO_NUMBER
++
++#define STA_CLK_ON      1
++#define STA_CLK_OFF     0
++
++int clk_buf_init(void);
++bool clk_buf_ctrl(enum clk_buf_id id, bool onoff);
++void clk_buf_get_swctrl_status(enum CLK_BUF_SWCTRL_STATUS_T *status);
++void clk_buf_get_rf_drv_curr(void *rf_drv_curr);
++void clk_buf_set_by_flightmode(bool is_flightmode_on);
++void clk_buf_save_afc_val(unsigned int afcdac);
++void clk_buf_write_afcdac(void);
++void clk_buf_control_bblpm(bool on);
++u32 clk_buf_bblpm_enter_cond(void);
++void clk_buf_dump_clkbuf_log(void);
++bool is_clk_buf_under_flightmode(void);
++bool is_clk_buf_from_pmic(void);
++void clk_buf_get_aux_out(void);
++u8 clk_buf_get_xo_en_sta(enum xo_id id);
++void clk_buf_show_status_info(void);
++
++#endif
++
+--- /dev/null
++++ b/drivers/misc/mediatek/base/power/include/clkbuf_v1/mt6771/mtk_clkbuf_hw.h
+@@ -0,0 +1,117 @@
++/*
++ * Copyright (C) 2017 MediaTek Inc.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++/**
++ * @file    mtk_clk_buf_hw.h
++ * @brief   Driver for clock buffer control
++ *
++ */
++#ifndef __MTK_CLK_BUF_HW_H__
++#define __MTK_CLK_BUF_HW_H__
++
++enum MTK_CLK_BUF_STATUS {
++	CLOCK_BUFFER_DISABLE,
++	CLOCK_BUFFER_SW_CONTROL,
++	CLOCK_BUFFER_HW_CONTROL,
++};
++
++enum MTK_CLK_BUF_DRIVING_CURR {
++	CLK_BUF_DRIVING_CURR_AUTO_K = -1,
++	CLK_BUF_DRIVING_CURR_0,
++	CLK_BUF_DRIVING_CURR_1,
++	CLK_BUF_DRIVING_CURR_2,
++	CLK_BUF_DRIVING_CURR_3
++};
++
++/* clk_buf_id: users of clock buffer */
++enum clk_buf_id {
++	CLK_BUF_BB_MD		= 0,
++	CLK_BUF_CONN,
++	CLK_BUF_NFC,
++	CLK_BUF_RF,
++	CLK_BUF_AUDIO,
++	CLK_BUF_CHG,
++	CLK_BUF_UFS,
++	CLK_BUF_INVALID
++};
++
++/* xo_id: clock buffer list */
++enum xo_id {
++	XO_SOC	= 0,
++	XO_WCN,
++	XO_NFC,
++	XO_CEL,
++	XO_AUD,		/* Disabled */
++	XO_PD,		/* Disabled */
++	XO_EXT,		/* UFS */
++	XO_NUMBER
++};
++
++enum {
++	BBLPM_COND_SKIP	= (1 << 0),
++	BBLPM_COND_WCN	= (1 << CLK_BUF_CONN),
++	BBLPM_COND_NFC	= (1 << CLK_BUF_NFC),
++	BBLPM_COND_CEL	= (1 << CLK_BUF_RF),
++	BBLPM_COND_EXT	= (1 << CLK_BUF_UFS),
++};
++
++enum {
++	PWR_STATUS_MD	= (1 << 0),
++	PWR_STATUS_CONN	= (1 << 1),
++};
++
++enum {
++	SOC_EN_M = 0,
++	SOC_EN_BB_G,
++	SOC_CLK_SEL_G,
++	SOC_EN_BB_CLK_SEL_G,
++};
++
++enum {
++	WCN_EN_M = 0,
++	WCN_EN_BB_G,
++	WCN_SRCLKEN_CONN,
++	WCN_BUF24_EN,
++};
++
++enum {
++	NFC_EN_M = 0,
++	NFC_EN_BB_G,
++	NFC_CLK_SEL_G,
++	NFC_BUF234_EN,
++};
++
++enum {
++	CEL_EN_M = 0,
++	CEL_EN_BB_G,
++	CEL_CLK_SEL_G,
++	CEL_BUF24_EN,
++};
++
++enum {
++	EXT_EN_M = 0,
++	EXT_EN_BB_G,
++	EXT_CLK_SEL_G,
++	EXT_BUF247_EN,
++};
++
++#define CLKBUF_USE_BBLPM
++
++void clk_buf_post_init(void);
++void clk_buf_init_pmic_clkbuf(void);
++void clk_buf_init_pmic_wrap(void);
++void clk_buf_init_pmic_swctrl(void);
++bool clk_buf_ctrl_combine(enum clk_buf_id id, bool onoff);
++void clk_buf_ctrl_bblpm_hw(short on);
++#endif
++
+--- a/drivers/misc/mediatek/Kconfig
++++ b/drivers/misc/mediatek/Kconfig
+@@ -73,6 +73,9 @@
+ # SCP core for the sensor hub
+ source "drivers/misc/mediatek/scp/Kconfig"
+ 
++# Connectivity built-in adapter and the stock connsys options
++source "drivers/misc/mediatek/connectivity/Kconfig"
++
+ # Sensor hub stack, stock's Sensors menu
+ menu "Sensors"
+ 
+--- a/drivers/misc/mediatek/Makefile
++++ b/drivers/misc/mediatek/Makefile
+@@ -47,6 +47,8 @@
+ obj-$(CONFIG_MTK_VIBRATOR) += vibrator/
+ # SCP core: mailbox IPI and ready notify for the sensor hub
+ obj-$(CONFIG_MTK_TINYSYS_SCP_SUPPORT) += scp/
++# Connectivity built-in adapter for the out-of-tree connsys modules
++obj-$(CONFIG_MTK_COMBO) += connectivity/
+ # Sensor hub stack: hwmon misc devices and the hub sensors over the SCP
+ ifeq ($(subst ",,$(CONFIG_MTK_SENSOR_ARCHITECTURE)),1.0)
+ obj-y += sensors-1.0/

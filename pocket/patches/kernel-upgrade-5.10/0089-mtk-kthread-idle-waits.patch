@@ -1,0 +1,54 @@
+--- a/drivers/misc/mediatek/eccci/fsm/ccci_fsm.c
++++ b/drivers/misc/mediatek/eccci/fsm/ccci_fsm.c
+@@ -592,7 +592,7 @@
+ 	unsigned long flags;
+ 
+ 	while (1) {
+-		wait_event(ctl->command_wq,
++		wait_event_idle(ctl->command_wq,
+ 			!list_empty(&ctl->command_queue));
+ 		spin_lock_irqsave(&ctl->command_lock, flags);
+ 		cmd = list_first_entry(&ctl->command_queue,
+--- a/drivers/misc/mediatek/eccci/fsm/ccci_fsm_poller.c
++++ b/drivers/misc/mediatek/eccci/fsm/ccci_fsm_poller.c
+@@ -136,7 +136,8 @@
+ 			}
+ 		}
+ next:
+-		msleep(POLLING_INTERVAL_TIME);
++		/* interruptible so the 15 s nap does not count as load */
++		msleep_interruptible(POLLING_INTERVAL_TIME);
+ 	}
+ 	return 0;
+ }
+--- a/drivers/misc/mediatek/sensors-1.0/sensorHub/SCP_nanoHub/SCP_nanoHub.c
++++ b/drivers/misc/mediatek/sensors-1.0/sensorHub/SCP_nanoHub/SCP_nanoHub.c
+@@ -537,7 +537,7 @@
+ static int SCP_sensorHub_direct_push_work(void *data)
+ {
+ 	for (;;) {
+-		wait_event(chre_kthread_wait,
++		wait_event_idle(chre_kthread_wait,
+ 			READ_ONCE(chre_kthread_wait_condition));
+ 		WRITE_ONCE(chre_kthread_wait_condition, false);
+ 		mark_timestamp(0, WORK_START, ktime_get_boottime_ns(), 0);
+@@ -2183,7 +2183,7 @@
+ 	struct SCP_sensorHub_data *obj = obj_data;
+ 	unsigned long flags = 0;
+ 
+-	wait_event(power_reset_wait,
++	wait_event_idle(power_reset_wait,
+ 		READ_ONCE(scp_system_ready) && READ_ONCE(scp_chre_ready));
+ 	spin_lock_irqsave(&scp_state_lock, flags);
+ 	WRITE_ONCE(scp_chre_ready, false);
+--- a/drivers/power/supply/mediatek/charger/mtk_charger.c
++++ b/drivers/power/supply/mediatek/charger/mtk_charger.c
+@@ -1842,7 +1842,7 @@
+ 	int bat_current = 0, chg_current = 0;
+ 
+ 	while (1) {
+-		wait_event(info->wait_que,
++		wait_event_idle(info->wait_que,
+ 			(info->charger_thread_timeout == true));
+ 
+ 		mutex_lock(&info->charger_lock);

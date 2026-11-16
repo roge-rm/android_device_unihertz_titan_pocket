@@ -1,0 +1,185 @@
+--- a/drivers/usb/mtu3/mtu3_plat.c
++++ b/drivers/usb/mtu3/mtu3_plat.c
+@@ -23,23 +23,35 @@
+ {
+ 	void __iomem *ibase = ssusb->ippc_base;
+ 	u32 value, check_val;
++	bool mt6771;
+ 	int ret;
+ 
+-	check_val = ex_clks | SSUSB_SYS125_RST_B_STS | SSUSB_SYSPLL_STABLE |
+-			SSUSB_REF_RST_B_STS;
++	mt6771 = of_device_is_compatible(ssusb->dev->of_node,
++					 "mediatek,mt6771-mtu3");
++	check_val = ex_clks | SSUSB_SYS125_RST_B_STS;
++	/* MT6771's v2 BSP checks SYS125 and the separate USB2 MAC status,
++	 * logs a timeout and carries on; its own probe-time check fails on
++	 * the Pocket while USB still works. Other SoCs keep the generic
++	 * checks and fail on a timeout.
++	 */
++	if (!mt6771)
++		check_val |= SSUSB_SYSPLL_STABLE | SSUSB_REF_RST_B_STS;
+ 
+ 	ret = readl_poll_timeout(ibase + U3D_SSUSB_IP_PW_STS1, value,
+ 			(check_val == (value & check_val)), 100, 20000);
+ 	if (ret) {
+-		dev_err(ssusb->dev, "clks of sts1 are not stable!\n");
+-		return ret;
++		dev_err(ssusb->dev, "clks of sts1 are not stable! sts1 0x%x want 0x%x\n",
++			value, check_val);
++		if (!mt6771)
++			return ret;
+ 	}
+ 
+ 	ret = readl_poll_timeout(ibase + U3D_SSUSB_IP_PW_STS2, value,
+ 			(value & SSUSB_U2_MAC_SYS_RST_B_STS), 100, 10000);
+ 	if (ret) {
+-		dev_err(ssusb->dev, "mac2 clock is not stable\n");
+-		return ret;
++		dev_err(ssusb->dev, "mac2 clock is not stable, sts2 0x%x\n", value);
++		if (!mt6771)
++			return ret;
+ 	}
+ 
+ 	return 0;
+@@ -216,6 +228,7 @@
+ 	struct device_node *node = pdev->dev.of_node;
+ 	struct otg_switch_mtk *otg_sx = &ssusb->otg_switch;
+ 	struct device *dev = &pdev->dev;
++	struct resource *res;
+ 	int i;
+ 	int ret;
+ 
+@@ -231,7 +244,9 @@
+ 		return PTR_ERR(ssusb->sys_clk);
+ 	}
+ 
+-	ssusb->ref_clk = devm_clk_get_optional(dev, "ref_ck");
++	ssusb->ref_clk = devm_clk_get_optional(dev,
++		of_device_is_compatible(node, "mediatek,mt6771-mtu3") ?
++		"rel_clk" : "ref_ck");
+ 	if (IS_ERR(ssusb->ref_clk))
+ 		return PTR_ERR(ssusb->ref_clk);
+ 
+@@ -262,13 +277,20 @@
+ 		}
+ 	}
+ 
+-	ssusb->ippc_base = devm_platform_ioremap_resource_byname(pdev, "ippc");
+-	if (IS_ERR(ssusb->ippc_base))
+-		return PTR_ERR(ssusb->ippc_base);
++	/* ippc lies inside the mac range on MT6771, so map it without claiming */
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ippc");
++	if (!res)
++		return -ENODEV;
++	ssusb->ippc_base = devm_ioremap(dev, res->start, resource_size(res));
++	if (!ssusb->ippc_base)
++		return -ENOMEM;
+ 
+ 	ssusb->dr_mode = usb_get_dr_mode(dev);
+ 	if (ssusb->dr_mode == USB_DR_MODE_UNKNOWN)
+ 		ssusb->dr_mode = USB_DR_MODE_OTG;
++
++	/* MT6771's BSP always forces VBUS valid; the charger detects cables */
++	ssusb->force_vbus = of_device_is_compatible(node, "mediatek,mt6771-mtu3");
+ 
+ 	if (ssusb->dr_mode == USB_DR_MODE_PERIPHERAL)
+ 		goto out;
+@@ -505,6 +527,7 @@
+ #ifdef CONFIG_OF
+ 
+ static const struct of_device_id mtu3_of_match[] = {
++	{.compatible = "mediatek,mt6771-mtu3",},
+ 	{.compatible = "mediatek,mt8173-mtu3",},
+ 	{.compatible = "mediatek,mtu3",},
+ 	{},
+--- a/drivers/usb/mtu3/mtu3_core.c
++++ b/drivers/usb/mtu3/mtu3_core.c
+@@ -92,6 +92,12 @@
+ 	dev_dbg(mtu->dev, "SOFTCONN = %d\n", !!enable);
+ }
+ 
++/* the U3 port is left alone when the device runs at high speed or below */
++static bool mtu3_u3_dev(struct mtu3 *mtu)
++{
++	return mtu->is_u3_ip && mtu->max_speed > USB_SPEED_HIGH;
++}
++
+ /* only port0 of U2/U3 supports device mode */
+ static int mtu3_device_enable(struct mtu3 *mtu)
+ {
+@@ -100,7 +106,7 @@
+ 
+ 	mtu3_clrbits(ibase, U3D_SSUSB_IP_PW_CTRL2, SSUSB_IP_DEV_PDN);
+ 
+-	if (mtu->is_u3_ip) {
++	if (mtu3_u3_dev(mtu)) {
+ 		check_clk = SSUSB_U3_MAC_RST_B_STS;
+ 		mtu3_clrbits(ibase, SSUSB_U3_CTRL(0),
+ 			(SSUSB_U3_PORT_DIS | SSUSB_U3_PORT_PDN |
+@@ -112,7 +118,7 @@
+ 
+ 	if (mtu->ssusb->dr_mode == USB_DR_MODE_OTG) {
+ 		mtu3_setbits(ibase, SSUSB_U2_CTRL(0), SSUSB_U2_PORT_OTG_SEL);
+-		if (mtu->is_u3_ip)
++		if (mtu3_u3_dev(mtu))
+ 			mtu3_setbits(ibase, SSUSB_U3_CTRL(0),
+ 				     SSUSB_U3_PORT_DUAL_MODE);
+ 	}
+@@ -124,7 +130,7 @@
+ {
+ 	void __iomem *ibase = mtu->ippc_base;
+ 
+-	if (mtu->is_u3_ip)
++	if (mtu3_u3_dev(mtu))
+ 		mtu3_setbits(ibase, SSUSB_U3_CTRL(0),
+ 			(SSUSB_U3_PORT_DIS | SSUSB_U3_PORT_PDN));
+ 
+@@ -133,7 +139,7 @@
+ 
+ 	if (mtu->ssusb->dr_mode == USB_DR_MODE_OTG) {
+ 		mtu3_clrbits(ibase, SSUSB_U2_CTRL(0), SSUSB_U2_PORT_OTG_SEL);
+-		if (mtu->is_u3_ip)
++		if (mtu3_u3_dev(mtu))
+ 			mtu3_clrbits(ibase, SSUSB_U3_CTRL(0),
+ 				     SSUSB_U3_PORT_DUAL_MODE);
+ 	}
+@@ -620,8 +626,11 @@
+ 
+ 	/* U2/U3 detected by HW */
+ 	mtu3_writel(mbase, U3D_DEVICE_CONF, 0);
+-	/* vbus detected by HW */
+-	mtu3_clrbits(mbase, U3D_MISC_CTRL, VBUS_FRC_EN | VBUS_ON);
++	/* vbus detected by HW unless the platform forces it */
++	if (mtu->ssusb->force_vbus)
++		mtu3_setbits(mbase, U3D_MISC_CTRL, VBUS_FRC_EN | VBUS_ON);
++	else
++		mtu3_clrbits(mbase, U3D_MISC_CTRL, VBUS_FRC_EN | VBUS_ON);
+ 	/* use new QMU format when HW version >= 0x1003 */
+ 	if (mtu->gen2cp)
+ 		mtu3_writel(mbase, U3D_QFCR, ~0x0);
+@@ -796,6 +805,13 @@
+ 	}
+ 
+ 	if (!mtu->is_u3_ip && (mtu->max_speed > USB_SPEED_HIGH))
++		mtu->max_speed = USB_SPEED_HIGH;
++
++	/* MT6771 runs device mode as USB 2.0 unless the U3 port is dual role */
++	if (of_device_is_compatible(mtu->ssusb->dev->of_node,
++				    "mediatek,mt6771-mtu3") &&
++	    !mtu->ssusb->otg_switch.is_u3_drd &&
++	    mtu->max_speed > USB_SPEED_HIGH)
+ 		mtu->max_speed = USB_SPEED_HIGH;
+ 
+ 	mtu->speed = mtu->max_speed;
+--- a/drivers/usb/mtu3/mtu3.h
++++ b/drivers/usb/mtu3/mtu3.h
+@@ -261,6 +261,8 @@
+ 	int u2_ports;
+ 	int u3_ports;
+ 	int u3p_dis_msk;
++	/* VBUS is forced valid instead of detected by the IP */
++	bool force_vbus;
+ 	struct dentry *dbgfs_root;
+ 	/* usb wakeup for host mode */
+ 	bool uwk_en;

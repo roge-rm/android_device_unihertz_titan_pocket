@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0
+// Enables, as stock, the DISP nodes, mtkfb with its TE pin state and the lcd-backlight LED; the v9 board disables them.
+// Properties stay as captured. Needs pocket-mm-providers.dtso for the DISP clocks.
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/dispsys";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@1 {
+		target-path = "/disp_ovl0@14008000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@2 {
+		target-path = "/disp_ovl0_2l@14009000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@3 {
+		target-path = "/disp_ovl1_2l@1400a000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@4 {
+		target-path = "/disp_rdma0@1400b000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@5 {
+		target-path = "/disp_rdma1@1400c000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@6 {
+		target-path = "/disp_wdma0@1400d000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@7 {
+		target-path = "/disp_color0@1400e000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@8 {
+		target-path = "/disp_ccorr0@1400f000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@9 {
+		target-path = "/disp_aal0@14010000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@10 {
+		target-path = "/disp_gamma0@14011000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@11 {
+		target-path = "/disp_dither0@14012000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@12 {
+		target-path = "/disp_split@14013000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@13 {
+		target-path = "/disp_mutex@14016000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@14 {
+		target-path = "/disp_rsz@1401a000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@15 {
+		target-path = "/disp_pwm0@1100e000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@16 {
+		target-path = "/dsi0@14014000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@17 {
+		target-path = "/dsi1@1401f000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@18 {
+		target-path = "/dpi0@14015000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@19 {
+		target-path = "/dbi@1401d000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@20 {
+		target-path = "/mipi_tx0@11e50000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@21 {
+		target-path = "/mipi_tx1@10216000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@22 {
+		target-path = "/mtkfb@0";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@23 {
+		target-path = "/dsi_te";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@24 {
+		target-path = "/1000b000.pinctrl/lcm_dsi_te";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@25 {
+		target-path = "/1000b000.pinctrl/lcm_dsi_te/pins_cmd_dat";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@26 {
+		target-path = "/odm/led@6";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};

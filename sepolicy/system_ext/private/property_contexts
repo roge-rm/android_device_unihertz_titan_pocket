@@ -1,0 +1,24 @@
+# MTK service and AEE properties that vendor rc files and vendor services use.
+persist.vendor.mtk.aee. u:object_r:system_mtk_persist_mtk_aee_prop:s0
+ctl.mdlogger   u:object_r:system_mtk_ctl_mdlogger_prop:s0
+ctl.emdlogger1 u:object_r:system_mtk_ctl_emdlogger1_prop:s0
+ctl.emdlogger2 u:object_r:system_mtk_ctl_emdlogger2_prop:s0
+ctl.emdlogger3 u:object_r:system_mtk_ctl_emdlogger3_prop:s0
+init.svc.emdlogger1 u:object_r:system_mtk_init_svc_emdlogger1_prop:s0
+init.svc.aee_aedv   u:object_r:system_mtk_init_svc_aee_aedv_prop:s0
+init.svc.md_monitor u:object_r:system_mtk_init_svc_md_monitor_prop:s0
+
+# Set by the vendor build.prop.
+ro.telephony.sim.count u:object_r:telephony_config_prop:s0 exact int
+# Keyboard touchpad key guard, set by pocket_padd and init.
+sys.pocket.pad_guard u:object_r:pocket_pad_guard_prop:s0 exact string
+# Pocket keyboard key hook in system_server, set by the product.
+ro.pocket.input_policy u:object_r:pocket_input_config_prop:s0 exact bool
+# Governor override read by init.pocket.power.rc, set from adb shell.
+persist.vendor.pocket.governor u:object_r:pocket_governor_prop:s0 exact string
+# Read by vendor_init for the aguiextmodule start trigger.
+persist.service.agui.extmodule u:object_r:pocket_agui_extmodule_prop:s0 exact string
+# Read by vendor_init for the dplanner-2-0 restart trigger.
+init.svc.dplanner-2-0 u:object_r:init_service_status_prop:s0 exact string
+# OCV run logger, set from adb shell and by the logger.
+persist.vendor.pocket.battlog u:object_r:pocket_battlog_prop:s0 exact string

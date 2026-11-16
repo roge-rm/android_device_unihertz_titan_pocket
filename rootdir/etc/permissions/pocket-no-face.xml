@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Hides the face feature the stock vendor declares. With it, FaceService starts with no face
+     entry in config_biometric_sensors, only sees the "virtual" instance it adds itself and
+     waits on IVirtualHal/virtual forever, logging every second. Fingerprint comes from the
+     stock vendor's android.hardware.fingerprint.xml. -->
+<permissions>
+    <unavailable-feature name="android.hardware.biometrics.face" />
+</permissions>

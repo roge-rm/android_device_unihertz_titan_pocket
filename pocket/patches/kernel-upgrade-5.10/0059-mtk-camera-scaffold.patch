@@ -1,0 +1,223 @@
+--- /dev/null
++++ b/drivers/i2c/busses/i2c-mtk.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * The MTK I2C extension calls the 4.14 camera drivers make, over mainline
++ * i2c-mt65xx. T's names, prototypes and flag values; the
++ * code is in drivers/misc/mediatek/i2c_shim. T's camera Makefiles add
++ * drivers/i2c/busses to their include path, so they find this header as is.
++ *
++ * mtk_i2c_transfer() is a plain i2c_transfer(): the bus speed comes from the
++ * DT clock-frequency and the extension flags are dropped. The hardware
++ * trigger calls return -1, as T does on a bus without buffer mode (no stock
++ * bus has one). i2c_ccu_enable() and i2c_ccu_disable() are i2c-mt65xx's CCU
++ * channel calls (i2c-mt65xx-ccu.h), which also give the
++ * CCU driver and imgsensor the controller id and the CCU command page that
++ * T reads from its struct mt_i2c.
++ */
++#ifndef __I2C_MTK_H__
++#define __I2C_MTK_H__
++
++#include <linux/i2c.h>
++#include <linux/types.h>
++
++#include "i2c-mt65xx-ccu.h"
++
++/* T's largest DMA transfer, imgsensor's burst write length. */
++#define MAX_DMA_TRANS_SIZE	4096
++
++/* T's controller id bound, the size of the CCU's per-controller tables */
++#define I2C_MAX_CHANNEL		10
++
++/* ext_flag bit for mtk_i2c_transfer(), T's value: no error log on a NACK */
++#define I2C_A_FILTER_MSG	0x00000001
++
++int mtk_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num,
++		     u32 ext_flag, u32 timing);
++int hw_trig_i2c_enable(struct i2c_adapter *adap);
++int hw_trig_i2c_disable(struct i2c_adapter *adap);
++int hw_trig_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
++			 int num);
++int i2c_ccu_enable(struct i2c_adapter *adap, u16 ch_offset);
++int i2c_ccu_disable(struct i2c_adapter *adap);
++
++#endif /* __I2C_MTK_H__ */
+--- /dev/null
++++ b/drivers/misc/mediatek/i2c_shim/Kconfig
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0
++config MTK_I2C_SHIM
++	bool "MTK I2C extension calls over i2c-mt65xx"
++	depends on I2C_MT65XX=y
++	help
++	  mtk_i2c_transfer, hw_trig_i2c_* and i2c_ccu_* from the 4.14 MTK
++	  I2C driver, for the 4.14 camera drivers. mtk_i2c_transfer is a
++	  plain i2c_transfer, hw_trig_i2c_* return -1 as stock does on a
++	  bus without buffer mode and i2c_ccu_* drive i2c-mt65xx's CCU
++	  channel.
+--- /dev/null
++++ b/drivers/misc/mediatek/i2c_shim/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++# MTK I2C extension calls over i2c-mt65xx for the camera drivers
++obj-$(CONFIG_MTK_I2C_SHIM) += mtk_i2c_shim.o
+--- /dev/null
++++ b/drivers/misc/mediatek/i2c_shim/mtk_i2c_shim.c
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * The MTK I2C extension calls of T's i2c-mtk.c over mainline i2c-mt65xx, for
++ * the 4.14 camera drivers. Prototypes in
++ * drivers/i2c/busses/i2c-mtk.h.
++ */
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/i2c.h>
++
++#include "../../../i2c/busses/i2c-mtk.h"
++
++/*
++ * T sets the ext flags and the timing for this one transfer. Here the bus
++ * runs at its DT clock-frequency (400 kHz on both camera buses, as T's
++ * default) and I2C_A_FILTER_MSG is dropped: i2c-mt65xx logs a NACK at debug
++ * level only. Returns the number of messages sent or a negative errno, as T.
++ */
++int mtk_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num,
++		     u32 ext_flag, u32 timing)
++{
++	return i2c_transfer(adap, msgs, num);
++}
++EXPORT_SYMBOL(mtk_i2c_transfer);
++
++/*
++ * Hardware trigger (buffer mode) hands the controller to the ISP. T returns -1
++ * on a bus without mediatek,buffermode_used, and no bus in the stock DT has
++ * it, so these return -1 as stock does on every bus.
++ */
++int hw_trig_i2c_enable(struct i2c_adapter *adap)
++{
++	return -1;
++}
++EXPORT_SYMBOL(hw_trig_i2c_enable);
++
++int hw_trig_i2c_disable(struct i2c_adapter *adap)
++{
++	return -1;
++}
++EXPORT_SYMBOL(hw_trig_i2c_disable);
++
++int hw_trig_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
++			 int num)
++{
++	return -1;
++}
++EXPORT_SYMBOL(hw_trig_i2c_transfer);
++
++/*
++ * CCU trigger: the CCU drives the channel at ch_offset itself. T's
++ * i2c_ccu_enable() returns its dummy transfer's message count, 1, on success;
++ * T keeps the clocks on until i2c_ccu_disable().
++ */
++int i2c_ccu_enable(struct i2c_adapter *adap, u16 ch_offset)
++{
++	int ret = mtk_i2c_ccu_enable(adap, ch_offset);
++
++	return ret ? ret : 1;
++}
++EXPORT_SYMBOL(i2c_ccu_enable);
++
++int i2c_ccu_disable(struct i2c_adapter *adap)
++{
++	return mtk_i2c_ccu_disable(adap);
++}
++EXPORT_SYMBOL(i2c_ccu_disable);
+--- a/drivers/misc/mediatek/Kconfig
++++ b/drivers/misc/mediatek/Kconfig
+@@ -136,4 +136,7 @@
+ # Video codec, /dev/Vcodec
+ source "drivers/misc/mediatek/videocodec/Kconfig"
+ 
++# Camera: the MTK I2C calls over i2c-mt65xx
++source "drivers/misc/mediatek/i2c_shim/Kconfig"
++
+ endif
+--- a/drivers/misc/mediatek/Makefile
++++ b/drivers/misc/mediatek/Makefile
+@@ -79,3 +79,5 @@
+ obj-$(CONFIG_MTK_SYSTRACKER_V2) += systracker/
+ # Video codec: /dev/Vcodec for the stock OMX codecs
+ obj-$(CONFIG_MTK_VIDEOCODEC_DRIVER) += videocodec/
++# Camera: the MTK I2C calls imgsensor and cam_cal make, over i2c-mt65xx
++obj-$(CONFIG_MTK_I2C_SHIM) += i2c_shim/
+--- a/drivers/misc/mediatek/mmdvfs/mmdvfs_pmqos.h
++++ b/drivers/misc/mediatek/mmdvfs/mmdvfs_pmqos.h
+@@ -54,4 +54,68 @@
+ 	return -ENODEV;
+ }
+ 
++/*
++ * Camera port: the MM QoS calls the camera drivers make
++ * (ISP, seninf, JPEG, CCU). Requests are dropped, so the engines run at their
++ * default clocks and bandwidth. T's names and BW_COMP_* values.
++ */
++enum {
++	BW_COMP_NONE = 0,
++	BW_COMP_DEFAULT,
++	BW_COMP_VENC,
++	BW_COMP_END
++};
++
++static inline s32 mm_qos_add_request(struct plist_head *owner_list,
++				     struct mm_qos_request *req, u32 master_id)
++{
++	return 0;
++}
++
++static inline s32 mm_qos_set_request(struct mm_qos_request *req, u32 bw_value,
++				     u32 hrt_value, u32 comp_type)
++{
++	return 0;
++}
++
++static inline s32 mm_qos_set_bw_request(struct mm_qos_request *req,
++					u32 bw_value, s32 comp_type)
++{
++	return 0;
++}
++
++static inline s32 mm_qos_set_hrt_request(struct mm_qos_request *req,
++					 u32 hrt_value)
++{
++	return 0;
++}
++
++static inline void mm_qos_update_all_request(struct plist_head *owner_list)
++{
++}
++
++static inline void mm_qos_remove_all_request(struct plist_head *owner_list)
++{
++}
++
++static inline void mm_qos_update_all_request_zero(struct plist_head *owner_list)
++{
++}
++
++enum mmdvfs_limit_source {
++	MMDVFS_LIMIT_THERMAL = 0,
++	MMDVFS_LIMIT_CAM,
++};
++
++/* No MM DVFS steps without mmdvfs_pmqos.c, so no current freq either. */
++static inline u64 mmdvfs_qos_get_freq(u32 pm_qos_class)
++{
++	return 0;
++}
++
++static inline void mmdvfs_qos_limit_config(u32 pm_qos_class, u32 limit_value,
++					   enum mmdvfs_limit_source source)
++{
++}
++
+ #endif /* __MMDVFS_PMQOS_H__ */

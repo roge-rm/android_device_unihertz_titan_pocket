@@ -1,0 +1,123 @@
+Bluetooth (bt_drv, OPPO MT6765 bt/) on Linux 5.10, applied to the staged tree by
+tools/prepare-connectivity-sources.py (patches.applied in connectivity-sources.json).
+
+- ioremap_nocache to ioremap (5 sites), the bt_dbg procfs file_operations to proc_ops.
+- PM_QOS_CONTROL stays off, as stock.
+- bt_dbg: the handlers stock does not have (AP register read and write, audio_cr_debug, and
+  _bt_audio_cr_dbug) and their table entries 0x9, 0xa and 0x11 are under BT_DBG_OPPO_EXTRA, which
+  is not defined, so the table has 0xf entries as stock.
+
+--- a/bt/dbg_bt.c
++++ b/bt/dbg_bt.c
+@@ -5,6 +5,7 @@
+ #include <linux/io.h>
+ #include <linux/uaccess.h>
+ #include <linux/proc_fs.h>
++#include <linux/version.h>
+ #include "bt.h"
+ 
+ /*******************************************************************************
+@@ -41,9 +42,11 @@
+ */
+ static int bt_dbg_get_bt_state(int par1, int par2, int par3);
+ static int bt_dbg_setlog_level(int par1, int par2, int par3);
++#ifdef BT_DBG_OPPO_EXTRA
+ static int bt_dbg_audio_cr_debug(int par1, int par2, int par3);
+ static int bt_dbg_ap_reg_read(int par1, int par2, int par3);
+ static int bt_dbg_ap_reg_write(int par1, int par2, int par3);
++#endif
+ 
+ /*******************************************************************************
+ *			     P R I V A T E   D A T A
+@@ -60,11 +63,8 @@
+ static bool g_bt_dbg_enable = FALSE;
+ 
+ static const tBT_DEV_DBG_STRUCT bt_dev_dbg_struct[] = {
+-    [0x9] = {bt_dbg_ap_reg_read,		FALSE},
+-    [0xa] = {bt_dbg_ap_reg_write,		TRUE},
+ 	[0xb] = {bt_dbg_setlog_level,		TRUE},
+ 	[0xe] = {bt_dbg_get_bt_state,		TRUE},
+-    [0x11] = {bt_dbg_audio_cr_debug,	TRUE},
+ };
+ 
+ /*******************************************************************************
+@@ -101,11 +101,12 @@
+ 	return 0;
+ }
+ 
++#ifdef BT_DBG_OPPO_EXTRA
+ uint32_t inline _bt_audio_cr_dbug(void)
+ {
+ 	uint32_t addr = 0x1800700C;
+ 	uint32_t value = 0;
+-	uint8_t *base = ioremap_nocache(addr, 0x10);
++	uint8_t *base = ioremap(addr, 0x10);
+ 
+ 	if (base == NULL) {
+ 		BT_LOG_PRT_WARN("remapping 0x%08x fail\n", addr);
+@@ -139,7 +140,7 @@
+ 	uint32_t *remap_addr = NULL;
+ 
+ 	/* TODO: */
+-	remap_addr = ioremap_nocache(par2, 4);
++	remap_addr = ioremap(par2, 4);
+ 	if (!remap_addr) {
+ 		BT_LOG_PRT_ERR("ioremap [0x%08x] fail", par2);
+ 		return -1;
+@@ -155,7 +156,7 @@
+ 	uint32_t *remap_addr = NULL;
+ 
+ 	/* TODO: */
+-	remap_addr = ioremap_nocache(par2, 4);
++	remap_addr = ioremap(par2, 4);
+ 	if (!remap_addr) {
+ 		BT_LOG_PRT_ERR("ioremap [0x%08x] fail", par2);
+ 		return -1;
+@@ -166,6 +167,8 @@
+ 	return 0;
+ }
+ 
++#endif /* BT_DBG_OPPO_EXTRA */
++
+ ssize_t bt_dbg_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+ {
+ 	int ret = 0;
+@@ -397,11 +400,18 @@
+ int bt_dev_dbg_init(void)
+ {
+ 	int i_ret = 0;
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0))
++	static const struct proc_ops bt_dbg_fops = {
++		.proc_read = bt_dbg_read,
++		.proc_write = bt_dbg_write,
++	};
++#else
+ 	static const struct file_operations bt_dbg_fops = {
+ 		.owner = THIS_MODULE,
+ 		.read = bt_dbg_read,
+ 		.write = bt_dbg_write,
+ 	};
++#endif
+ 
+ 	// initialize debug function struct
+ 	g_bt_dbg_st.trx_enable = FALSE;
+--- a/bt/stp_chrdev_bt.c
++++ b/bt/stp_chrdev_bt.c
+@@ -136,7 +136,7 @@
+ static uint32_t inline bt_read_cr(unsigned char *cr_name, uint32_t addr)
+ {
+ 	uint32_t value = 0;
+-	uint8_t *base = ioremap_nocache(addr, 0x10);
++	uint8_t *base = ioremap(addr, 0x10);
+ 
+ 	if (base == NULL) {
+ 		BT_LOG_PRT_WARN("remapping 0x%08x fail\n", addr);
+@@ -152,7 +152,7 @@
+ {
+ 	uint32_t addr = 0x1800700C;
+ 	uint32_t value = 0;
+-	uint8_t *base = ioremap_nocache(addr, 0x10);
++	uint8_t *base = ioremap(addr, 0x10);
+ 
+ 	if (base == NULL) {
+ 		BT_LOG_PRT_WARN("remapping 0x%08x fail\n", addr);

@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-2.0
+// Enables, as stock, the multimedia clock providers, M4U, SMI and GCE that DISP uses; the v9 board disables them.
+// Properties stay as captured. of_clk_init skips disabled providers, so the scpsys and mmsys_config clocks need these.
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/scpsys@10001000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@1 {
+		target-path = "/mmsys_config@14000000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@2 {
+		target-path = "/imgsys@15020000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@3 {
+		target-path = "/camsys@1a000000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@4 {
+		target-path = "/vdec_gcon@16000000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@5 {
+		target-path = "/venc_gcon@17000000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@6 {
+		target-path = "/m4u@10205000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@7 {
+		target-path = "/smi_common@14019000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@8 {
+		target-path = "/smi_common_ao@10211000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@9 {
+		target-path = "/smi_larb0@14017000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@10 {
+		target-path = "/smi_larb1@16010000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@11 {
+		target-path = "/smi_larb2@1502f000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@12 {
+		target-path = "/smi_larb3@1a002000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@13 {
+		target-path = "/smi_larb4@17010000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@14 {
+		target-path = "/smi_larb5@15021000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@15 {
+		target-path = "/smi_larb6@1a001000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@16 {
+		target-path = "/gce@10238000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	fragment@17 {
+		target-path = "/gce_mbox@10238000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};

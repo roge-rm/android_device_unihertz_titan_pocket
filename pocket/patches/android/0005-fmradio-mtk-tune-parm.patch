@@ -1,0 +1,23 @@
+--- a/packages/apps/FMRadio/jni/fmr/fm.h
++++ b/packages/apps/FMRadio/jni/fmr/fm.h
+@@ -133,6 +133,7 @@
+     uint8_t band;
+     uint8_t space;
+     uint8_t hilo;
++    uint8_t deemphasis; // MT6631 driver and stock libfmjni layout, 8 bytes
+     uint16_t freq;
+ };
+ 
+@@ -289,9 +290,9 @@
+ };
+ 
+ struct rds_group_cnt {
+-    unsigned long total;
+-    unsigned long groupA[16]; // RDS groupA counter
+-    unsigned long groupB[16]; // RDS groupB counter
++    unsigned int total; // 32-bit as in the driver
++    unsigned int groupA[16]; // RDS groupA counter
++    unsigned int groupB[16]; // RDS groupB counter
+ };
+ 
+ enum rds_group_cnt_opcode {

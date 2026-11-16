@@ -1,0 +1,75 @@
+--- a/drivers/misc/mediatek/sensors-1.0/hwmon/sensor_list/sensor_list.c
++++ b/drivers/misc/mediatek/sensors-1.0/hwmon/sensor_list/sensor_list.c
+@@ -42,7 +42,14 @@
+ };
+ 
+ #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
+-static struct work_struct sensorlist_work;
++/*
++ * The SCP auto-detects its chips for a second or more after READY, so a name
++ * asked for at SENSOR_POWER_UP may not be there yet. Ask again once a second,
++ * up to SENSORLIST_TRIES times, for the entries still "NULL".
++ */
++#define SENSORLIST_TRIES 10
++static struct delayed_work sensorlist_work;
++static int sensorlist_tries;
+ #endif
+ static atomic_t first_ready_after_boot;
+ static struct sensorlist_info_t sensorlist_info[maxhandle];
+@@ -121,18 +128,23 @@
+ #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
+ static void sensorlist_get_deviceinfo(struct work_struct *work)
+ {
+-	int err = 0, handle = -1, sensor = -1;
++	int err = 0, handle = -1, sensor = -1, missing = 0;
++	bool last = ++sensorlist_tries >= SENSORLIST_TRIES;
+ 	struct sensorInfo_t devinfo;
+ 
+ 	for (handle = accel; handle < maxhandle; ++handle) {
+ 		sensor = handle_to_sensor(handle);
+ 		if (sensor < 0)
++			continue;
++		if (strcmp(sensorlist_info[handle].name, "NULL"))
+ 			continue;
+ 		memset(&devinfo, 0, sizeof(struct sensorInfo_t));
+ 		err = sensor_set_cmd_to_hub(sensor,
+ 			CUST_ACTION_GET_SENSOR_INFO, &devinfo);
+ 		if (err < 0) {
+-			pr_err("sensor(%d) not register\n", sensor);
++			missing++;
++			if (last)
++				pr_err("sensor(%d) not register\n", sensor);
+ 			continue;
+ 		}
+ 		spin_lock(&sensorlist_info_lock);
+@@ -140,7 +152,11 @@
+ 			devinfo.name,
+ 			sizeof(sensorlist_info[handle].name));
+ 		spin_unlock(&sensorlist_info_lock);
+-	}
++		pr_info("sensor(%d) %s, try %d\n", sensor,
++			sensorlist_info[handle].name, sensorlist_tries);
++	}
++	if (missing && !last)
++		schedule_delayed_work(&sensorlist_work, HZ);
+ }
+ 
+ static int scp_ready_event(uint8_t event, void *ptr)
+@@ -149,7 +165,7 @@
+ 	case SENSOR_POWER_UP:
+ 		if (likely(atomic_xchg(&first_ready_after_boot, 1)))
+ 			return 0;
+-		schedule_work(&sensorlist_work);
++		schedule_delayed_work(&sensorlist_work, 0);
+ 		break;
+ 	case SENSOR_POWER_DOWN:
+ 		break;
+@@ -229,7 +245,7 @@
+ 		return -1;
+ 	atomic_set(&first_ready_after_boot, 0);
+ #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
+-	INIT_WORK(&sensorlist_work, sensorlist_get_deviceinfo);
++	INIT_DELAYED_WORK(&sensorlist_work, sensorlist_get_deviceinfo);
+ 	scp_power_monitor_register(&scp_ready_notifier);
+ #endif
+ 	return 0;

@@ -1,0 +1,8 @@
+# Power-off charging screen. init queues "charger" in charger boot mode and class_start charger runs this.
+service charger /system/bin/charger
+    class charger
+    user system
+    group system graphics input
+    capabilities SYS_BOOT
+    file /dev/kmsg w
+    seclabel u:r:charger:s0

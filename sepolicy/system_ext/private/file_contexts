@@ -1,0 +1,19 @@
+# MTK device nodes.
+/dev/ubi[_0-9]*         u:object_r:mtd_device:s0
+/dev/ubi_ctrl           u:object_r:mtd_device:s0
+/dev/block/mtd(.*)?     u:object_r:mtd_device:s0
+/dev/block/mntlblk(.*)? u:object_r:mtd_device:s0
+/dev/mcupm(/.*)?        u:object_r:mcupm_device:s0
+# Engineering software KeyMint (keymint/), in the platform's system-side KeyMint domain.
+/(system_ext|system/system_ext)/bin/hw/android\.hardware\.security\.keymint-service\.pocket u:object_r:hal_keymint_system_exec:s0
+# Keyboard touchpad swipe scroll (packages/PocketInput/pad).
+/(system_ext|system/system_ext)/bin/pocket_padd u:object_r:pocket_padd_exec:s0
+# System-side Bluetooth audio HAL.
+/system/bin/hw/android\.hardware\.bluetooth\.audio-service-system u:object_r:hal_audio_sysbta_exec:s0
+# Power HAL (power/), libperfmgr with powerhint.json.
+/(system_ext|system/system_ext)/bin/hw/android\.hardware\.power-service\.pocket u:object_r:hal_power_pocket_exec:s0
+# Charging control HAL (health/).
+/(system_ext|system/system_ext)/bin/hw/vendor\.lineage\.health-service\.pocket u:object_r:hal_lineage_health_pocket_exec:s0
+# OCV run logger (battlog/) and its logs.
+/(system_ext|system/system_ext)/bin/pocket_battlog u:object_r:pocket_battlog_exec:s0
+/data/misc/pocket_battlog(/.*)? u:object_r:pocket_battlog_data_file:s0

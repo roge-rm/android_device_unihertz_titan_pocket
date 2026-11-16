@@ -1,0 +1,7 @@
+<!-- The stock vendor's matrix asks the framework for VNDK 30, which the system
+     provides as com.android.vndk.v30. -->
+<manifest version="1.0" type="framework">
+    <vendor-ndk>
+        <version>30</version>
+    </vendor-ndk>
+</manifest>

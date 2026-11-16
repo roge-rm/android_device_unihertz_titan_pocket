@@ -1,0 +1,150 @@
+{
+  "Nodes": [
+    {
+      "Name": "CPULittleClusterMinFreq",
+      "Path": "/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq",
+      "Values": ["1417000", "1014000", "793000"],
+      "DefaultIndex": 2,
+      "ResetOnInit": true
+    },
+    {
+      "Name": "CPUBigClusterMinFreq",
+      "Path": "/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq",
+      "Values": ["1417000", "1014000", "793000"],
+      "DefaultIndex": 2,
+      "ResetOnInit": true
+    },
+    {
+      "Name": "TAUClampMin",
+      "Path": "/dev/cpuctl/top-app/cpu.uclamp.min",
+      "Values": ["100", "50", "0"],
+      "DefaultIndex": 2,
+      "ResetOnInit": true
+    },
+    {
+      "Name": "TAUClampMax",
+      "Path": "/dev/cpuctl/top-app/cpu.uclamp.max",
+      "Values": ["60", "80", "max"],
+      "DefaultIndex": 2,
+      "ResetOnInit": true
+    },
+    {
+      "Name": "FGUClampMax",
+      "Path": "/dev/cpuctl/foreground/cpu.uclamp.max",
+      "Values": ["50", "70", "max"],
+      "DefaultIndex": 2,
+      "ResetOnInit": true
+    },
+    {
+      "Name": "BGUClampMax",
+      "Path": "/dev/cpuctl/background/cpu.uclamp.max",
+      "Values": ["30", "50", "max"],
+      "DefaultIndex": 2,
+      "ResetOnInit": true
+    }
+  ],
+  "Actions": [
+    {
+      "PowerHint": "LAUNCH",
+      "Node": "CPULittleClusterMinFreq",
+      "Duration": 30000,
+      "Value": "1417000"
+    },
+    {
+      "PowerHint": "LAUNCH",
+      "Node": "CPUBigClusterMinFreq",
+      "Duration": 30000,
+      "Value": "1417000"
+    },
+    {
+      "PowerHint": "LAUNCH",
+      "Node": "TAUClampMin",
+      "Duration": 30000,
+      "Value": "100"
+    },
+    {
+      "PowerHint": "INTERACTION",
+      "Node": "CPULittleClusterMinFreq",
+      "Duration": 1000,
+      "Value": "1014000"
+    },
+    {
+      "PowerHint": "INTERACTION",
+      "Node": "CPUBigClusterMinFreq",
+      "Duration": 1000,
+      "Value": "1014000"
+    },
+    {
+      "PowerHint": "INTERACTION",
+      "Node": "TAUClampMin",
+      "Duration": 1000,
+      "Value": "50"
+    },
+    {
+      "PowerHint": "SUSTAINED_PERFORMANCE",
+      "Type": "EndHint",
+      "Value": "LAUNCH"
+    },
+    {
+      "PowerHint": "SUSTAINED_PERFORMANCE",
+      "Type": "EndHint",
+      "Value": "INTERACTION"
+    },
+    {
+      "PowerHint": "SUSTAINED_PERFORMANCE",
+      "Type": "MaskHint",
+      "Value": "LAUNCH"
+    },
+    {
+      "PowerHint": "SUSTAINED_PERFORMANCE",
+      "Type": "MaskHint",
+      "Value": "INTERACTION"
+    },
+    {
+      "PowerHint": "SUSTAINED_PERFORMANCE",
+      "Node": "TAUClampMax",
+      "Duration": 0,
+      "Value": "80"
+    },
+    {
+      "PowerHint": "SUSTAINED_PERFORMANCE",
+      "Node": "FGUClampMax",
+      "Duration": 0,
+      "Value": "70"
+    },
+    {
+      "PowerHint": "SUSTAINED_PERFORMANCE",
+      "Node": "BGUClampMax",
+      "Duration": 0,
+      "Value": "50"
+    },
+    {
+      "PowerHint": "LOW_POWER",
+      "Type": "EndHint",
+      "Value": "INTERACTION"
+    },
+    {
+      "PowerHint": "LOW_POWER",
+      "Type": "MaskHint",
+      "Value": "INTERACTION"
+    },
+    {
+      "PowerHint": "LOW_POWER",
+      "Node": "TAUClampMax",
+      "Duration": 0,
+      "Value": "60"
+    },
+    {
+      "PowerHint": "LOW_POWER",
+      "Node": "FGUClampMax",
+      "Duration": 0,
+      "Value": "50"
+    },
+    {
+      "PowerHint": "LOW_POWER",
+      "Node": "BGUClampMax",
+      "Duration": 0,
+      "Value": "30"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// The built-in keyboard's layout overlay. res/raw/aw9523_key.kcm is rootdir/usr/keychars/aw9523-key.kcm
+// with "type OVERLAY"; tools/check-pocket-kcm.py and check-pocket-keyboard-layout.py check they match.
+android_app {
+    name: "PocketKeyboardLayout",
+    sdk_version: "current",
+    system_ext_specific: true,
+}

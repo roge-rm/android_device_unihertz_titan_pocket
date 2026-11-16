@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# init.pocket.power.rc writes scaling_governor after boot. Platform policy lets init chown and chmod these files only.
+allow init sysfs_devices_system_cpu:file { getattr open write };
+# persist.vendor.pocket.governor would fall to vendor_default_prop, which only init and
+# vendor_init may set. Our own type lets adb shell set it.
+system_internal_prop(pocket_governor_prop)
+set_prop(shell, pocket_governor_prop)

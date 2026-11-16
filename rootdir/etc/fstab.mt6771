@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# January partition identities, with current fs_mgr syntax.
+# Provisioning filesystems deliberately have no automatic-format fallback.
+/dev/block/by-name/vbmeta_system /vbmeta_system emmc defaults first_stage_mount,nofail,avb=vbmeta
+system /system ext4 ro wait,logical,first_stage_mount,avb=vbmeta_system
+product /product ext4 ro wait,logical,first_stage_mount,avb=vbmeta_system
+vendor /vendor ext4 ro wait,logical,first_stage_mount,avb
+/dev/block/by-name/md_udc /metadata ext4 noatime,nosuid,nodev,discard wait,check,first_stage_mount
+# /data is encrypted as on stock (FBE v2, key on /metadata). No checkpoint=block or resize on this A-only device.
+/dev/block/by-name/userdata /data ext4 noatime,nosuid,nodev,noauto_da_alloc,errors=panic,inlinecrypt wait,check,formattable,quota,latemount,reservedsize=128m,fileencryption=aes-256-xts:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption
+/dev/block/by-name/cache /cache ext4 noatime,nosuid,nodev,noauto_da_alloc,discard wait,check
+/dev/block/by-name/protect1 /mnt/vendor/protect_f ext4 noatime,nosuid,nodev,noauto_da_alloc,commit=1,nodelalloc wait,check
+/dev/block/by-name/protect2 /mnt/vendor/protect_s ext4 noatime,nosuid,nodev,noauto_da_alloc,commit=1,nodelalloc wait,check
+/dev/block/by-name/nvdata /mnt/vendor/nvdata ext4 noatime,nosuid,nodev,noauto_da_alloc,commit=1,nodelalloc wait,check
+/dev/block/by-name/nvcfg /mnt/vendor/nvcfg ext4 noatime,nosuid,nodev,noauto_da_alloc,commit=1,nodelalloc wait,check
+/dev/block/by-name/persist /mnt/vendor/persist ext4 noatime,nosuid,nodev,noauto_da_alloc,commit=1,nodelalloc wait,check
+/dev/block/by-name/apd /mnt/vendor/apd ext4 noatime,nosuid,nodev,noauto_da_alloc,commit=1,nodelalloc wait,check
+/devices/platform/externdevice* auto auto defaults voldmanaged=sdcard1:auto,encryptable=userdata
+/devices/platform/usb3_xhci* auto vfat defaults voldmanaged=usbotg:auto

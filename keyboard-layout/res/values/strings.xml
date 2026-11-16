@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <string name="app_label" translatable="false">Titan Pocket keyboard layout</string>
+    <string name="collection_label" translatable="false">Titan Pocket</string>
+    <string name="layout_label" translatable="false">Titan Pocket</string>
+</resources>

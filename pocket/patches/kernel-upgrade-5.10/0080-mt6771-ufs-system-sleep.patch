@@ -1,0 +1,259 @@
+--- a/drivers/scsi/ufs/ufs-mediatek.c
++++ b/drivers/scsi/ufs/ufs-mediatek.c
+@@ -28,6 +28,18 @@
+ 
+ #define CREATE_TRACE_POINTS
+ #include "ufs-mediatek-trace.h"
++
++/*
++ * MT6771 system sleep depth, read at each system suspend:
++ * 0 leaves host, link and device active,
++ * 1 sends SSU (sleep), puts the link in Hibern8 with UniPro power-down and
++ *   gates the host clocks,
++ * 2 also powers the M-PHY down and gates XO_UFS, in stock's order.
++ * VA09 and VCC stay on at every level. Runtime PM stays pinned.
++ */
++static unsigned int mt6771_sleep = 2;
++module_param(mt6771_sleep, uint, 0644);
++MODULE_PARM_DESC(mt6771_sleep, "MT6771 UFS system sleep level (0-2)");
+ 
+ static bool ufs_mtk_uses_mt6771_fw(struct ufs_hba *hba)
+ {
+@@ -331,13 +343,30 @@
+ 		return 0;
+ 	if (!host->legacy_ref_clk)
+ 		return -ENODEV;
+-	/* Stock off also releases the UFS SPM resource vote. No SPM supplier
+-	 * exists in this port yet: fail visibly without clock/PHY/power writes.
+-	 * Production PM stays disabled; the RAM probe pins runtime PM and
+-	 * rejects suspend until that complete dependency is integrated.
++	/*
++	 * Off only in a level 2 system sleep. Level 1 keeps it on and lets the
++	 * host clocks gate. Stock off also drops the UFS spm_resource_req vote,
++	 * which only deep idle and SODI read, so system suspend doesn't need it.
+ 	 */
+-	if (!on)
+-		return -EOPNOTSUPP;
++	if (!on) {
++		if (host->sleep_level < 2)
++			return host->sleep_level ? 0 : -EOPNOTSUPP;
++		/* Stock wait between Hibern8 and gating, in us. */
++		switch (hba->dev_info.wmanufacturerid) {
++		case UFS_VENDOR_TOSHIBA:
++			udelay(100);
++			break;
++		case UFS_VENDOR_SAMSUNG:
++			udelay(1);
++			break;
++		default:
++			udelay(30);
++			break;
++		}
++		clk_disable_unprepare(host->legacy_ref_clk);
++		host->ref_clk_enabled = false;
++		return 0;
++	}
+ 	ret = clk_prepare_enable(host->legacy_ref_clk);
+ 	if (ret)
+ 		return ret;
+@@ -770,6 +799,12 @@
+ 		}
+ 	} else if (on && status == POST_CHANGE) {
+ 		/* Generic resume restores clocks before the variant resume hook. */
++		if (ufs_mtk_uses_mt6771_fw(hba)) {
++			/* Stock turns XO_UFS on before it releases the M-PHY. */
++			ret = ufs_mtk_setup_ref_clk(hba, true);
++			if (ret)
++				return ret;
++		}
+ 		if (ufs_mtk_uses_mt6771_fw(hba) && !host->mphy_powered_on) {
+ 			ret = ufs_mtk_mphy_power_on(hba, true);
+ 			if (ret)
+@@ -1280,14 +1315,70 @@
+ 				   REGULATOR_MODE_NORMAL);
+ }
+ 
++/* Level 2: drop both PHY votes so phy-mtk-ufs runs its power-down, then gate
++ * XO_UFS. VA09 stays on.
++ */
++static int ufs_mt6771_phy_ref_off(struct ufs_hba *hba)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++	int err;
++
++	err = ufs_mtk_wait_link_state(hba, VS_LINK_HIBERN8, 15);
++	if (err)
++		return err;
++	if (host->clk_phy_voted) {
++		err = phy_power_off(host->mphy);
++		if (err)
++			return err;
++		host->clk_phy_voted = false;
++	}
++	if (host->mphy_enabled) {
++		err = phy_power_off(host->mphy);
++		if (err)
++			goto phy_on;
++		host->mphy_enabled = false;
++		host->mphy_powered_on = false;
++	}
++	err = ufs_mt6771_setup_ref_clk(hba, false);
++	if (!err)
++		return 0;
++phy_on:
++	if (!ufs_mtk_mphy_power_on(hba, true) && !phy_power_on(host->mphy))
++		host->clk_phy_voted = true;
++	return err;
++}
++
++/* ufshcd_suspend() has sent SSU (sleep) and put the link in Hibern8. */
++static int ufs_mt6771_suspend(struct ufs_hba *hba)
++{
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++	int err;
++
++	if (!ufshcd_is_link_hibern8(hba))
++		return -EINVAL;
++	/* Vendor UniPro power-down, as stock; it undoes itself on failure. */
++	err = ufs_mtk_link_set_lpm(hba);
++	if (err)
++		return err;
++	if (host->sleep_level < 2)
++		return 0;
++	err = ufs_mt6771_phy_ref_off(hba);
++	if (err)
++		ufs_mtk_unipro_set_pm(hba, false);
++	return err;
++}
++
+ static int ufs_mtk_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
+ {
+ 	int err;
+ 	struct arm_smccc_res res;
+ 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+ 
+-	if (host->ram_probe)
+-		return -EOPNOTSUPP;
++	if (host->ram_probe) {
++		if (pm_op != UFS_SYSTEM_PM || !host->sleep_level)
++			return -EOPNOTSUPP;
++		return ufs_mt6771_suspend(hba);
++	}
+ 	if (ufshcd_is_link_hibern8(hba)) {
+ 		err = ufs_mtk_link_set_lpm(hba);
+ 		if (err)
+@@ -1338,7 +1429,8 @@
+ 	int err;
+ 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+ 
+-	if (host->ram_probe)
++	/* setup_clocks() has already restored XO_UFS and the M-PHY. */
++	if (host->ram_probe && (pm_op != UFS_SYSTEM_PM || !host->sleep_level))
+ 		return -EOPNOTSUPP;
+ 	err = ufs_mtk_mphy_power_on(hba, true);
+ 	if (err)
+@@ -1375,7 +1467,20 @@
+ static int ufs_mtk_apply_dev_quirks(struct ufs_hba *hba)
+ {
+ 	struct ufs_dev_info *dev_info = &hba->dev_info;
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+ 	u16 mid = dev_info->wmanufacturerid;
++
++	/*
++	 * The card is known now: take a clock reference on the inherited-on
++	 * XO_UFS so a level 2 sleep can gate it. If that fails the buffer is
++	 * left as it is and sleep just won't gate it.
++	 */
++	if (ufs_mtk_uses_mt6771_fw(hba) && !host->ref_clk_enabled) {
++		int ret = ufs_mt6771_setup_ref_clk(hba, true);
++
++		if (ret)
++			dev_warn(hba->dev, "XO_UFS not owned: %d\n", ret);
++	}
+ 
+ 	if (mid == UFS_VENDOR_SAMSUNG)
+ 		ufshcd_dme_set(hba, UIC_ARG_MIB(PA_TACTIVATE), 6);
+@@ -1531,28 +1636,55 @@
+ 
+ #ifdef CONFIG_PM_SLEEP
+ /*
+- * The RAM storage binding has no tested low-power path, and ufshcd_suspend()
+- * would send START STOP UNIT and enter Hibern8 before ufs_mtk_suspend() can
+- * refuse. So system sleep (s2idle) leaves the host, link and device active.
++ * MT6771 binding: with mt6771_sleep at 0, system sleep leaves the host, link
++ * and device active, since ufshcd_suspend() would send SSU and enter Hibern8
++ * before ufs_mtk_suspend() could refuse. Levels 1 and 2 go through
++ * ufshcd_suspend() with VCC held on.
+  */
+ static int ufs_mtk_system_suspend(struct device *dev)
+ {
+ 	struct ufs_hba *hba = dev_get_drvdata(dev);
+ 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+-
+-	if (host->ram_probe)
++	struct ufs_vreg *vcc = hba->vreg_info.vcc;
++	int ret;
++
++	if (host->ram_probe) {
++		host->sleep_level = min(READ_ONCE(mt6771_sleep), 2U);
++		if (!host->sleep_level)
++			return 0;
++		if (vcc) {
++			host->vcc_always_on_saved = vcc->always_on;
++			vcc->always_on = true;
++		}
++	}
++	ret = ufshcd_pltfrm_suspend(dev);
++	if (ret && host->ram_probe) {
++		dev_err(dev, "sleep level %u failed: %d\n", host->sleep_level, ret);
++		if (vcc)
++			vcc->always_on = host->vcc_always_on_saved;
++		host->sleep_level = 0;
++	}
++	return ret;
++}
++
++static int ufs_mtk_system_resume(struct device *dev)
++{
++	struct ufs_hba *hba = dev_get_drvdata(dev);
++	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
++	int ret;
++
++	if (host->ram_probe && !host->sleep_level)
+ 		return 0;
+-	return ufshcd_pltfrm_suspend(dev);
+-}
+-
+-static int ufs_mtk_system_resume(struct device *dev)
+-{
+-	struct ufs_hba *hba = dev_get_drvdata(dev);
+-	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
+-
+-	if (host->ram_probe)
+-		return 0;
+-	return ufshcd_pltfrm_resume(dev);
++	ret = ufshcd_pltfrm_resume(dev);
++	if (host->ram_probe) {
++		if (ret)
++			dev_err(dev, "resume from sleep level %u failed: %d\n",
++				host->sleep_level, ret);
++		if (hba->vreg_info.vcc)
++			hba->vreg_info.vcc->always_on = host->vcc_always_on_saved;
++		host->sleep_level = 0;
++	}
++	return ret;
+ }
+ #else
+ #define ufs_mtk_system_suspend	NULL
+--- a/drivers/scsi/ufs/ufs-mediatek.h
++++ b/drivers/scsi/ufs/ufs-mediatek.h
+@@ -136,6 +136,9 @@
+ 	bool unipro_lpm;
+ 	bool ref_clk_enabled;
+ 	bool ram_probe;
++	/* MT6771 system sleep level in force, 0 outside system suspend. */
++	unsigned int sleep_level;
++	bool vcc_always_on_saved;
+ 	u16 ref_clk_ungating_wait_us;
+ 	u16 ref_clk_gating_wait_us;
+ };
